@@ -7,11 +7,13 @@ import Vision
 public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case shape
     case visionPersonSegmentation
+    case foregroundObjects
 
     public var displayName: String {
         switch self {
         case .shape: return "図形ベース（矩形/楕円）"
         case .visionPersonSegmentation: return "Vision人物セグメンテーション"
+        case .foregroundObjects: return "前景オブジェクト"
         }
     }
 }
@@ -61,6 +63,48 @@ public final class ShapeSegmentEngine: Segmenting {
             .transformed(by: CGAffineTransform(translationX: rect.midX, y: rect.midY))
 
         return transformed.cropped(to: extent)
+    }
+}
+
+/// Vision の前景オブジェクトセグメンテーション（SAM系のローカル代替）。
+/// 被写体（人物・物体）の画素マスクをROIごとに切り出して使う。
+/// DETECTION_IMPROVEMENT_PLAN.md Phase 3 の実装。SAM/MobileSAM等の外部モデル同梱を避け、
+/// macOS標準の `VNGenerateForegroundInstanceMaskRequest` を採用（追加コスト0・完全ローカル）。
+/// 前景が得られない場合は `ShapeSegmentEngine` にフォールバックする。
+public final class ForegroundSegmentEngine: Segmenting {
+    private let fallback = ShapeSegmentEngine()
+
+    public init() {}
+
+    public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        try? handler.perform([request])
+
+        guard let observation = request.results?.first,
+              !observation.allInstances.isEmpty,
+              let buffer = try? observation.generateScaledMaskForImage(
+                  forInstances: observation.allInstances,
+                  from: handler
+              ) else {
+            return try fallback.createMasks(for: rois, in: image, extent: extent)
+        }
+
+        let rawMask = CIImage(cvPixelBuffer: buffer)
+        guard rawMask.extent.width > 0, rawMask.extent.height > 0 else {
+            return try fallback.createMasks(for: rois, in: image, extent: extent)
+        }
+        let scaleX = extent.width / rawMask.extent.width
+        let scaleY = extent.height / rawMask.extent.height
+        let black = CIImage(color: .black).cropped(to: extent)
+        let fullFrameMask = rawMask
+            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            .composited(over: black)
+
+        return rois.map { roi in
+            let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+            return fullFrameMask.cropped(to: rect).composited(over: black)
+        }
     }
 }
 

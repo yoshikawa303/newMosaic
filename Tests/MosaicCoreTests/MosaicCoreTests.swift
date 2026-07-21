@@ -197,6 +197,27 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func foregroundSegmentEngineFallsBackOnPlainImage() throws {
+    // 単色画像には前景オブジェクトが存在しないため、ShapeSegmentEngineへのフォールバック経路を検証する。
+    let image = try makeSolidImage(width: 80, height: 60)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+        confidence: 1,
+        source: "manual",
+        shape: .rectangle
+    )
+
+    let output = try MosaicEngine().applyMosaic(
+        to: image,
+        rois: [roi],
+        scale: 12,
+        segmentEngine: ForegroundSegmentEngine()
+    )
+
+    #expect(output.width == 80)
+    #expect(output.height == 60)
+}
+
 @Test func mosaicROIRoundTripsCategory() throws {
     let roi = MosaicROI(
         rect: NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),

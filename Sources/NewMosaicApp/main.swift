@@ -704,6 +704,7 @@ final class MosaicWindowController: NSObject {
         switch kinds[index] {
         case .shape: return ShapeSegmentEngine()
         case .visionPersonSegmentation: return VisionPersonSegmentEngine()
+        case .foregroundObjects: return ForegroundSegmentEngine()
         }
     }
 

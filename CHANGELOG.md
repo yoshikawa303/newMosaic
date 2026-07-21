@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00001 - Build 12 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 自動認識Phase 3: マスク生成方式に「前景オブジェクト」を追加した。被写体の画素単位マスクに沿ったモザイクを生成できる。
+
+■更新履歴
+
+- `ForegroundSegmentEngine` を新設。`VNGenerateForegroundInstanceMaskRequest` で前景（人物・物体）の画素マスクを取得し、ROIごとに切り出してモザイクマスクに使用。前景が得られない場合は図形ベースへフォールバック。
+- ツールバー「マスク生成」ポップアップに「前景オブジェクト」を追加（`SegmentEngineKind.foregroundObjects`）。
+- モデル選定: SAM/MobileSAM等の外部モデル同梱（数百MB+CoreML変換工数）を避け、macOS標準の前景インスタンスマスクAPIを採用（追加コスト0・完全ローカル）。`Segmenting` 境界は維持しているため、将来SAM系CoreMLへの差し替えも可能。
+
 ## v0.0.00001 - Build 11 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）
