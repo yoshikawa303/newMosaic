@@ -32,6 +32,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+        DispatchQueue.main.async { [controller] in
+            controller.applyInitialLayoutIfNeeded()
+        }
     }
 
     func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool {
@@ -285,6 +288,7 @@ final class MosaicWindowController: NSObject {
     private var imageEditStates: [UUID: PerImageEditState] = [:]
     private var imageEditStateOrder: [UUID] = []
     private let imageEditStateLimit = 8
+    private var rightPaneSplitView: NSSplitView?
 
     override init() {
         let savedRatio = UserDefaults.standard.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
@@ -383,6 +387,7 @@ final class MosaicWindowController: NSObject {
         rightPane.isVertical = false
         rightPane.dividerStyle = .thin
         rightPane.autosaveName = "RightPaneSplit"
+        rightPaneSplitView = rightPane
         rightPane.translatesAutoresizingMaskIntoConstraints = false
         rightPane.addArrangedSubview(libraryPanel)
         rightPane.addArrangedSubview(layerPanel)
@@ -515,6 +520,21 @@ final class MosaicWindowController: NSObject {
         } else {
             updateStatus("新規追加ROIのカテゴリ: \(category.displayName)")
         }
+    }
+
+    /// レイヤパネルの初期縦幅を「人物4人分」（グループ4+子8+固定2=14行×約24pt+見出し・ボタン≈430pt）に設定する。
+    /// 右ペインの高さが足りない場合はライブラリと半々。一度適用した後はユーザーのドラッグ調整（autosave）を尊重する。
+    func applyInitialLayoutIfNeeded() {
+        let appliedKey = "RightPaneDefaultLayoutApplied.v1"
+        guard !UserDefaults.standard.bool(forKey: appliedKey), let rightPane = rightPaneSplitView else { return }
+        rightPane.layoutSubtreeIfNeeded()
+        let total = rightPane.bounds.height
+        guard total > 100 else { return }
+        let divider = rightPane.dividerThickness
+        var layerHeight = min(430, total / 2)
+        layerHeight = max(160, min(layerHeight, total - 200 - divider))
+        rightPane.setPosition(total - divider - layerHeight, ofDividerAt: 0)
+        UserDefaults.standard.set(true, forKey: appliedKey)
     }
 
     /// 鼠径部ROIの位置基準（腰0%〜膝100%の比率）を事前補正する。設定は永続化され、次回の候補生成から適用される。
