@@ -341,6 +341,12 @@ final class MosaicWindowController: NSObject {
         optionToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 8, right: 12)
         optionToolbar.translatesAutoresizingMaskIntoConstraints = false
 
+        // 縦の余白はキャンバス側（splitView）に吸収させ、ツールバー3段は内容ぴったりの高さに固定する。
+        // これが無いとAuto Layoutがツールバーを縦に引き伸ばし、コンテンツが下へ押し込まれるレイアウト崩れが起きる。
+        toolbar.setContentHuggingPriority(.required, for: .vertical)
+        editToolbar.setContentHuggingPriority(.required, for: .vertical)
+        optionToolbar.setContentHuggingPriority(.required, for: .vertical)
+
         canvas.translatesAutoresizingMaskIntoConstraints = false
         let libraryPanel = makeLibraryPanel()
         let layerPanel = makeLayerPanel()

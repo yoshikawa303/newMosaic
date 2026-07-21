@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.0.00001 - Build 20 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: Build 18でも残っていたツールバーのレイアウト崩れ（チェックボックス行が画面中央へ浮き、キャンバスが下へ押し込まれる）を修正した。
+
+■更新履歴
+
+- 原因: ツールバー3段（操作／形状・カテゴリ・マスク生成／チェックボックス群）に縦方向の content hugging が未設定で、Auto Layout が縦の余白をチェックボックス行のスタックへ割り当てて引き伸ばしていた。
+- 修正: 3段すべてに `setContentHuggingPriority(.required, for: .vertical)` を設定し、余白は常にキャンバス側（splitView）が吸収するようにした。
+
 ## v0.0.00001 - Build 19 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）
