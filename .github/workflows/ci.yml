@@ -1,0 +1,17 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  swift:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Governance guard
+        run: bash scripts/ci/agent_governance_guard.sh
+      - name: Test
+        run: swift test
+      - name: Build
+        run: swift build -c release
