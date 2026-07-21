@@ -86,16 +86,47 @@ final class YOLOONNXModel {
     private let outputName: String
 
     init(resourceName: String) throws {
-        guard let modelURL = Bundle.module.url(forResource: resourceName, withExtension: "onnx") else {
-            throw CocoaError(.fileNoSuchFile, userInfo: [
-                NSLocalizedDescriptionKey: "検出モデル（\(resourceName).onnx）が見つかりません"
-            ])
-        }
+        let modelURL = try Self.cachedModelURL(resourceName: resourceName)
         env = try ORTEnv(loggingLevel: .warning)
         let options = try ORTSessionOptions()
         session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: options)
         inputName = try session.inputNames().first ?? "images"
         outputName = try session.outputNames().first ?? "output0"
+    }
+
+    /// 同梱モデルを内蔵ディスク（Application Support/newMosaic/Models）へ初回のみコピーし、そのURLを返す。
+    /// アプリ本体がリムーバブルボリューム上にある場合、バンドル内モデルの直接読み込みが
+    /// macOSのリムーバブルボリューム許可ダイアログを誘発する（adhoc署名はビルドごとに別アプリ扱いになり
+    /// 毎ビルド再表示される）ため、コピー済みマーカーがあればバンドルへ一切触れない。
+    static func cachedModelURL(resourceName: String) throws -> URL {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        let modelsDirectory = support.appendingPathComponent("newMosaic/Models")
+        let cached = modelsDirectory.appendingPathComponent("\(resourceName).onnx")
+        let markerKey = "ModelCache.\(resourceName).v1"
+
+        if UserDefaults.standard.bool(forKey: markerKey), FileManager.default.fileExists(atPath: cached.path) {
+            return cached
+        }
+        guard let bundled = Bundle.module.url(forResource: resourceName, withExtension: "onnx") else {
+            if FileManager.default.fileExists(atPath: cached.path) {
+                return cached
+            }
+            throw CocoaError(.fileNoSuchFile, userInfo: [
+                NSLocalizedDescriptionKey: "検出モデル（\(resourceName).onnx）が見つかりません"
+            ])
+        }
+        try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
+        if FileManager.default.fileExists(atPath: cached.path) {
+            try FileManager.default.removeItem(at: cached)
+        }
+        try FileManager.default.copyItem(at: bundled, to: cached)
+        UserDefaults.standard.set(true, forKey: markerKey)
+        return cached
     }
 
     func detect(

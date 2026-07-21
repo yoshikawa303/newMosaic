@@ -42,11 +42,13 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>0.0.00001</string>
   <key>CFBundleVersion</key>
-  <string>33</string>
+  <string>34</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>NSHighResolutionCapable</key>
   <true/>
+  <key>NSRemovableVolumesUsageDescription</key>
+  <string>アプリ本体がリムーバブルボリューム上にある場合、同梱の検出モデルを初回に内蔵ディスクへコピーするためアクセスします。</string>
 </dict>
 </plist>
 PLIST
