@@ -1227,10 +1227,14 @@ final class MosaicWindowController: NSObject {
             }
 
             // 実写では実写用NSFW部位検出モデル（NudeNet）を実行して統合する
-            // （従来は骨格からの位置推定のみで、性器の内容ベース検出が無かった）
+            // （従来は骨格からの位置推定のみで、性器の内容ベース検出が無かった）。
+            // 全体画像に加えて人物クロップごとにも推論し、全身写真での解像度不足による検出漏れを防ぐ。
             var photoDetectionCount = 0
             if domain == .photo, let detector = photoCensorDetector {
-                let photoROIs = (try? detector.detect(in: loadedImage.cgImage)) ?? []
+                let photoROIs = (try? detector.detect(
+                    in: loadedImage.cgImage,
+                    personBounds: snapshot.personBounds
+                )) ?? []
                 photoDetectionCount = photoROIs.count
                 rois = Self.mergeCandidates(base: rois, adding: photoROIs)
             }

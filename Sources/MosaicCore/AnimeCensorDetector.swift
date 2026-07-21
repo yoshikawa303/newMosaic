@@ -312,7 +312,8 @@ public final class PhotoCensorDetector {
     }
 
     /// 画像からNSFW部位を検出し、カテゴリ付きROIとして返す。
-    public func detect(in image: CGImage, confidenceThreshold: Double = 0.25) throws -> [MosaicROI] {
+    /// しきい値の既定値はNudeNet公式実装と同じ0.2。
+    public func detect(in image: CGImage, confidenceThreshold: Double = 0.2) throws -> [MosaicROI] {
         try model.detect(
             in: image,
             classCount: Self.classCount,
@@ -327,5 +328,63 @@ public final class PhotoCensorDetector {
                 category: category
             )
         }
+    }
+
+    /// 全体画像+人物クロップごとに検出を実行して統合する。
+    /// モデル入力が320x320のため、全身写真では性器が数ピクセルに縮小され検出できない
+    /// （「実写は性器を認識しない」報告の原因）。人物領域をクロップして推論することで
+    /// 対象部位の実効解像度を上げ、検出漏れを大幅に減らす。人物未検出時は2x2タイルで代替する。
+    public func detect(
+        in image: CGImage,
+        personBounds: [NormalizedRect],
+        confidenceThreshold: Double = 0.2
+    ) throws -> [MosaicROI] {
+        var results = (try? detect(in: image, confidenceThreshold: confidenceThreshold)) ?? []
+        let regions = personBounds.isEmpty
+            ? Self.tileRegions()
+            : personBounds.map { $0.expanded(scale: 1.15).clamped() }
+        let imageSize = CGSize(width: image.width, height: image.height)
+        for region in regions {
+            let cropRect = region.cgRect(imageSize: imageSize, origin: .topLeft)
+            guard cropRect.width >= 64, cropRect.height >= 64,
+                  region.width > 0.01, region.height > 0.01,
+                  let crop = image.cropping(to: cropRect) else { continue }
+            let cropROIs = (try? detect(in: crop, confidenceThreshold: confidenceThreshold)) ?? []
+            // クロップ内正規化座標 → 画像全体の正規化座標へ変換
+            results.append(contentsOf: cropROIs.map { roi in
+                var mapped = roi
+                mapped.rect = NormalizedRect(
+                    x: region.x + roi.rect.x * region.width,
+                    y: region.y + roi.rect.y * region.height,
+                    width: roi.rect.width * region.width,
+                    height: roi.rect.height * region.height
+                ).clamped()
+                return mapped
+            })
+        }
+        return Self.dedupe(results)
+    }
+
+    /// 人物未検出時の代替クロップ領域（2x2タイル。境界で対象が分断されないよう20%重複）。
+    static func tileRegions() -> [NormalizedRect] {
+        let size = 0.6
+        return [
+            NormalizedRect(x: 0.0, y: 0.0, width: size, height: size),
+            NormalizedRect(x: 0.4, y: 0.0, width: size, height: size),
+            NormalizedRect(x: 0.0, y: 0.4, width: size, height: size),
+            NormalizedRect(x: 0.4, y: 0.4, width: size, height: size)
+        ]
+    }
+
+    /// 全体・クロップの重複検出を同カテゴリ内IoUで統合する（信頼度の高い方を残す）。
+    static func dedupe(_ rois: [MosaicROI], iouThreshold: Double = 0.45) -> [MosaicROI] {
+        var kept: [MosaicROI] = []
+        for roi in rois.sorted(by: { $0.confidence > $1.confidence }) {
+            let overlaps = kept.contains { existing in
+                existing.category == roi.category && existing.rect.iou(with: roi.rect) > iouThreshold
+            }
+            if !overlaps { kept.append(roi) }
+        }
+        return kept
     }
 }

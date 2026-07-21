@@ -515,6 +515,36 @@ import Testing
     #expect(rois.isEmpty)
 }
 
+@Test func photoCensorDetectorPersonCropDetectRunsOnPlainImage() throws {
+    // 人物クロップ併用の検出が単色画像でもクラッシュせず0件を返すことを検証する
+    let detector = try PhotoCensorDetector()
+    let image = try makeSolidImage(width: 640, height: 480)
+    let persons = [NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.8)]
+
+    let rois = try detector.detect(in: image, personBounds: persons)
+    let tiled = try detector.detect(in: image, personBounds: [])
+
+    #expect(rois.isEmpty)
+    #expect(tiled.isEmpty)
+}
+
+@Test func photoCensorDetectorDedupeKeepsHighestConfidence() {
+    // 全体・クロップの重複検出（同カテゴリ・高IoU）が信頼度の高い1件へ統合されることを検証する
+    let rect = NormalizedRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
+    let nearRect = NormalizedRect(x: 0.41, y: 0.41, width: 0.2, height: 0.2)
+    let farRect = NormalizedRect(x: 0.0, y: 0.0, width: 0.1, height: 0.1)
+    let low = MosaicROI(rect: rect, confidence: 0.3, source: "photo-censor", category: .femaleGenital)
+    let high = MosaicROI(rect: nearRect, confidence: 0.8, source: "photo-censor", category: .femaleGenital)
+    let otherCategory = MosaicROI(rect: rect, confidence: 0.5, source: "photo-censor", category: .nipple)
+    let far = MosaicROI(rect: farRect, confidence: 0.5, source: "photo-censor", category: .femaleGenital)
+
+    let deduped = PhotoCensorDetector.dedupe([low, high, otherCategory, far])
+
+    #expect(deduped.count == 3)
+    #expect(deduped.contains { $0.confidence == 0.8 })
+    #expect(!deduped.contains { $0.confidence == 0.3 })
+}
+
 @Test func photoCensorDetectorMapsOnlyTargetClasses() {
     // 採用クラス（乳首・性器・肛門）のみカテゴリ対応があり、顔・足などは対象外であることを検証する
     #expect(PhotoCensorDetector.classCategories[3] == .nipple)
