@@ -815,10 +815,15 @@ final class MosaicWindowController: NSObject {
             rebuildDetectionLayers(personCount: snapshot.personBounds.count, poseCount: snapshot.poseHints.count)
             // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
             showAllLayers()
+            // 実写/イラスト・漫画を判定し、イラスト系はアニメ用モデル未導入である旨を明示する
+            let domain = DomainClassifier.classify(loadedImage.cgImage)
+            let domainNote = domain == .illustration
+                ? "イラスト/漫画と判定（アニメ用検出モデル未導入のため自動検出は限定的）: "
+                : ""
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {
-                updateStatus("人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
+                updateStatus(domainNote + "人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
             } else {
-                updateStatus("候補生成: 人物\(snapshot.persons.count)名 / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
+                updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名 / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
             }
         } catch {
             showError(error)

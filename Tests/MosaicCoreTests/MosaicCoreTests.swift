@@ -373,6 +373,15 @@ import Testing
     }
 }
 
+@Test func domainClassifierSeparatesFlatAndTexturedImages() throws {
+    // 単色（平坦=イラスト的）とテクスチャ（隣接差分が大きい=実写的）を判別できることを検証する
+    let flat = try makeSolidImage(width: 200, height: 200)
+    let textured = try makePatternImage(width: 200, height: 200)
+
+    #expect(DomainClassifier.classify(flat) == .illustration)
+    #expect(DomainClassifier.classify(textured) == .photo)
+}
+
 @Test func yoloDatasetExporterWritesImagesAndLabels() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
