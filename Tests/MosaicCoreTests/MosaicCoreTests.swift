@@ -62,6 +62,30 @@ import Testing
     #expect(entries == [entry])
 }
 
+@Test func libraryEngineStoresOriginalAndProcessedImages() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathComponent("Library")
+    let engine = LibraryEngine(rootURL: root)
+    let image = try makeSolidImage(width: 32, height: 24)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
+        confidence: 1,
+        source: "test"
+    )
+
+    let imported = try engine.importOriginal(image, sourceName: "clipboard.png")
+    let processed = try engine.saveProcessedImage(image, rois: [roi], for: imported.id)
+    let items = try engine.loadItems()
+
+    #expect(items.count == 1)
+    #expect(items[0].id == imported.id)
+    #expect(items[0].processedRelativePath == processed.processedRelativePath)
+    #expect(FileManager.default.fileExists(atPath: engine.originalURL(for: processed).path))
+    #expect(engine.processedURL(for: processed).map { FileManager.default.fileExists(atPath: $0.path) } == true)
+    #expect(items[0].rois == [roi])
+}
+
 private func makeSolidImage(width: Int, height: Int) throws -> CGImage {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(
