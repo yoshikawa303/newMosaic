@@ -90,6 +90,19 @@ private final class LayerLeaf {
     }
 }
 
+/// レイヤパネル内「モザイク対象」配下に表示するROI選択リストの1行。
+/// 同一カテゴリ名のROIが複数ある場合はタイトルへ連番を付与する。
+@MainActor
+private final class ROIListEntry {
+    let roiID: UUID
+    let title: String
+
+    init(roiID: UUID, title: String) {
+        self.roiID = roiID
+        self.title = title
+    }
+}
+
 @MainActor
 private final class LayerGroup {
     var name: String
@@ -143,10 +156,11 @@ private final class LayerRowView: NSTableCellView {
         ])
     }
 
-    func configure(title: String, state: NSControl.StateValue, allowsMixed: Bool) {
+    func configure(title: String, state: NSControl.StateValue, allowsMixed: Bool, showsCheckbox: Bool = true) {
         label.stringValue = title
         checkbox.allowsMixedState = allowsMixed
         checkbox.state = state
+        checkbox.isHidden = !showsCheckbox
     }
 
     @objc private func handleToggle() {
@@ -236,9 +250,15 @@ final class MosaicWindowController: NSObject {
         target: nil,
         action: nil
     )
-    private let personLayerCheckbox = NSButton(checkboxWithTitle: "人物検出レイヤ", target: nil, action: nil)
-    private let poseLayerCheckbox = NSButton(checkboxWithTitle: "骨格検出レイヤ", target: nil, action: nil)
-    private let categoryControl = NSPopUpButton(title: "", target: nil, action: nil)
+    // レイヤパネル先頭の表示トグル（ツールバーから移設）
+    private let personLayerCheckbox = NSButton(checkboxWithTitle: "人物検出", target: nil, action: nil)
+    private let poseLayerCheckbox = NSButton(checkboxWithTitle: "骨格検出", target: nil, action: nil)
+    private let roiLayerCheckbox = NSButton(checkboxWithTitle: "ROI", target: nil, action: nil)
+    // 対象カテゴリ（複数チェック可。候補生成時にチェックされたものだけを生成する）
+    private let categoryFilterChecks: [(category: MosaicTargetCategory, button: NSButton)] =
+        MosaicTargetCategory.allCases.map { ($0, NSButton(checkboxWithTitle: $0.displayName, target: nil, action: nil)) }
+    private let generatePersonCheckbox = NSButton(checkboxWithTitle: "人物", target: nil, action: nil)
+    private let generatePoseCheckbox = NSButton(checkboxWithTitle: "骨格", target: nil, action: nil)
     private let segmentEngineControl = NSPopUpButton(title: "", target: nil, action: nil)
     private let domainModeControl = NSPopUpButton(title: "", target: nil, action: nil)
     private static let domainModeDefaultsKey = "DetectionDomainMode"
@@ -277,6 +297,10 @@ final class MosaicWindowController: NSObject {
     ]
     private var layerGroups: [LayerGroup] = []
     private var layerGroupCounter = 0
+    /// レイヤパネル「モザイク対象」配下のROI選択リスト（同一カテゴリ名は連番付き）
+    private var roiListEntries: [ROIListEntry] = []
+    private var roiListSignature: [String] = []
+    private var isSyncingROISelection = false
     private var loadedImage: LoadedImage?
     private var renderedImage: CGImage?
     private var currentLibraryItem: MosaicLibraryItem?
@@ -359,12 +383,6 @@ final class MosaicWindowController: NSObject {
 
         let shapeLabel = NSTextField(labelWithString: "追加形状:")
         shapeControl.selectedSegment = 1
-        let categoryLabel = NSTextField(labelWithString: "対象カテゴリ:")
-        categoryControl.removeAllItems()
-        categoryControl.addItems(withTitles: MosaicTargetCategory.allCases.map(\.displayName))
-        if let otherIndex = MosaicTargetCategory.allCases.firstIndex(of: .other) {
-            categoryControl.selectItem(at: otherIndex)
-        }
         let segmentEngineLabel = NSTextField(labelWithString: "マスク生成:")
         segmentEngineControl.removeAllItems()
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
@@ -377,9 +395,9 @@ final class MosaicWindowController: NSObject {
         let savedDomainMode = UserDefaults.standard.integer(forKey: Self.domainModeDefaultsKey)
         domainModeControl.selectItem(at: (0...2).contains(savedDomainMode) ? savedDomainMode : 0)
 
-        // 項目過多による幅超過（レイアウト破綻）を防ぐため、編集ツールバーは2行に分ける
+        // 項目過多による幅超過（レイアウト破綻）を防ぐため、編集ツールバーは複数行に分ける
         let editToolbar = NSStackView(views: [
-            shapeLabel, shapeControl, categoryLabel, categoryControl,
+            shapeLabel, shapeControl,
             segmentEngineLabel, segmentEngineControl,
             domainModeLabel, domainModeControl
         ])
@@ -389,12 +407,22 @@ final class MosaicWindowController: NSObject {
         editToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 2, right: 12)
         editToolbar.translatesAutoresizingMaskIntoConstraints = false
 
+        // 対象カテゴリ行: 複数チェック可。候補生成時にチェックされたカテゴリ・レイヤだけを生成する
+        let categoryLabel = NSTextField(labelWithString: "対象カテゴリ:")
+        let categoryToolbar = NSStackView(
+            views: [categoryLabel] + categoryFilterChecks.map(\.button) + [generatePersonCheckbox, generatePoseCheckbox]
+        )
+        categoryToolbar.orientation = .horizontal
+        categoryToolbar.alignment = .centerY
+        categoryToolbar.spacing = 10
+        categoryToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 2, right: 12)
+        categoryToolbar.translatesAutoresizingMaskIntoConstraints = false
+
         let groinPositionLabel = NSTextField(labelWithString: "鼠径部位置:")
         groinPositionSlider.translatesAutoresizingMaskIntoConstraints = false
         groinPositionSlider.widthAnchor.constraint(equalToConstant: 100).isActive = true
 
         let optionToolbar = NSStackView(views: [
-            personLayerCheckbox, poseLayerCheckbox,
             autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox,
             mosaicSettingsButton,
             groinPositionLabel, groinPositionSlider, groinPositionValueLabel
@@ -411,6 +439,7 @@ final class MosaicWindowController: NSObject {
         // （これが無いとAuto Layoutがツールバーを縦に引き伸ばし、コンテンツが下へ押し込まれる）。
         toolbar.setHuggingPriority(.required, for: .vertical)
         editToolbar.setHuggingPriority(.required, for: .vertical)
+        categoryToolbar.setHuggingPriority(.required, for: .vertical)
         optionToolbar.setHuggingPriority(.required, for: .vertical)
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
@@ -440,6 +469,7 @@ final class MosaicWindowController: NSObject {
         rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         root.addSubview(toolbar)
         root.addSubview(editToolbar)
+        root.addSubview(categoryToolbar)
         root.addSubview(optionToolbar)
         root.addSubview(splitView)
 
@@ -450,7 +480,10 @@ final class MosaicWindowController: NSObject {
             editToolbar.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
             editToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             editToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
-            optionToolbar.topAnchor.constraint(equalTo: editToolbar.bottomAnchor),
+            categoryToolbar.topAnchor.constraint(equalTo: editToolbar.bottomAnchor),
+            categoryToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            categoryToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
+            optionToolbar.topAnchor.constraint(equalTo: categoryToolbar.bottomAnchor),
             optionToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             optionToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
             splitView.topAnchor.constraint(equalTo: optionToolbar.bottomAnchor),
@@ -483,12 +516,21 @@ final class MosaicWindowController: NSObject {
         revealButton.action = #selector(revealLibrary)
         shapeControl.target = self
         shapeControl.action = #selector(shapeControlChanged)
-        categoryControl.target = self
-        categoryControl.action = #selector(categoryControlChanged)
+        for (_, button) in categoryFilterChecks {
+            button.target = self
+            button.action = #selector(generationFilterChanged)
+        }
+        generatePersonCheckbox.target = self
+        generatePersonCheckbox.action = #selector(generationFilterChanged)
+        generatePoseCheckbox.target = self
+        generatePoseCheckbox.action = #selector(generationFilterChanged)
+        loadGenerationFilter()
         personLayerCheckbox.target = self
         personLayerCheckbox.action = #selector(toggleDetectionLayers)
         poseLayerCheckbox.target = self
         poseLayerCheckbox.action = #selector(toggleDetectionLayers)
+        roiLayerCheckbox.target = self
+        roiLayerCheckbox.action = #selector(toggleDetectionLayers)
         mosaicPreviewCheckbox.target = self
         mosaicPreviewCheckbox.action = #selector(toggleMosaicPreview)
         groinPositionSlider.target = self
@@ -504,7 +546,17 @@ final class MosaicWindowController: NSObject {
         canvas.currentShape = .ellipse
         canvas.currentCategory = .other
         canvas.onROIsChanged = { [weak self] rois in
-            self?.updateStatus("ROI \(rois.count)件")
+            guard let self else { return }
+            self.updateStatus("ROI \(rois.count)件")
+            self.refreshROIListIfNeeded()
+        }
+        canvas.onCategoryChangeRequest = { [weak self] roiID, category in
+            guard let self,
+                  let index = self.canvas.rois.firstIndex(where: { $0.id == roiID }),
+                  self.canvas.rois[index].category != category else { return }
+            self.pushUndoSnapshot(self.currentEditorState())
+            self.canvas.rois[index].category = category
+            self.updateStatus("ROIのカテゴリを「\(category.displayName)」へ変更しました")
         }
         canvas.onManualEditWillBegin = { [weak self] in
             guard let self else { return }
@@ -516,11 +568,11 @@ final class MosaicWindowController: NSObject {
             self?.resumeMosaicPreviewIfNeeded()
         }
         canvas.onROISelectionChanged = { [weak self] roi in
-            guard let self, let roi else { return }
-            self.shapeControl.selectedSegment = roi.shape == .rectangle ? 0 : 1
-            if let index = MosaicTargetCategory.allCases.firstIndex(of: roi.category) {
-                self.categoryControl.selectItem(at: index)
+            guard let self else { return }
+            if let roi {
+                self.shapeControl.selectedSegment = roi.shape == .rectangle ? 0 : 1
             }
+            self.syncROIListSelectionFromCanvas()
         }
         tableView.onNavigate = { [weak self] delta in
             self?.navigateLibrary(by: delta)
@@ -550,20 +602,43 @@ final class MosaicWindowController: NSObject {
         }
     }
 
-    @objc private func categoryControlChanged() {
-        let index = categoryControl.indexOfSelectedItem
-        guard index >= 0, index < MosaicTargetCategory.allCases.count else { return }
-        let category = MosaicTargetCategory.allCases[index]
-        canvas.currentCategory = category
-        if let selectedID = canvas.selectedROIID,
-           let roiIndex = canvas.rois.firstIndex(where: { $0.id == selectedID }),
-           canvas.rois[roiIndex].category != category {
-            pushUndoSnapshot(currentEditorState())
-            canvas.rois[roiIndex].category = category
-            updateStatus("選択中ROIのカテゴリを「\(category.displayName)」へ変更しました")
-        } else {
-            updateStatus("新規追加ROIのカテゴリ: \(category.displayName)")
+    // MARK: - 候補生成の対象フィルタ（対象カテゴリ複数チェック）
+
+    /// チェックされている生成対象カテゴリの集合。
+    private func checkedGenerationCategories() -> Set<MosaicTargetCategory> {
+        Set(categoryFilterChecks.filter { $0.button.state == .on }.map(\.category))
+    }
+
+    @objc private func generationFilterChanged() {
+        saveGenerationFilter()
+        updateStatus("候補生成の対象: \(generationFilterSummary())（次回の候補生成から適用）")
+    }
+
+    private func generationFilterSummary() -> String {
+        var names = categoryFilterChecks.filter { $0.button.state == .on }.map { $0.category.displayName }
+        if generatePersonCheckbox.state == .on { names.append("人物") }
+        if generatePoseCheckbox.state == .on { names.append("骨格") }
+        return names.isEmpty ? "なし" : names.joined(separator: "・")
+    }
+
+    private func saveGenerationFilter() {
+        let defaults = UserDefaults.standard
+        for (category, button) in categoryFilterChecks {
+            defaults.set(button.state == .on, forKey: "GenerateFilter.category.\(category.rawValue)")
         }
+        defaults.set(generatePersonCheckbox.state == .on, forKey: "GenerateFilter.person")
+        defaults.set(generatePoseCheckbox.state == .on, forKey: "GenerateFilter.pose")
+    }
+
+    /// 保存済みの生成対象フィルタを復元する（未保存キーは既定ON）。
+    private func loadGenerationFilter() {
+        let defaults = UserDefaults.standard
+        for (category, button) in categoryFilterChecks {
+            let key = "GenerateFilter.category.\(category.rawValue)"
+            button.state = (defaults.object(forKey: key) as? Bool ?? true) ? .on : .off
+        }
+        generatePersonCheckbox.state = (defaults.object(forKey: "GenerateFilter.person") as? Bool ?? true) ? .on : .off
+        generatePoseCheckbox.state = (defaults.object(forKey: "GenerateFilter.pose") as? Bool ?? true) ? .on : .off
     }
 
     /// レイヤパネルの初期縦幅を「人物4人分」（グループ4+子8+固定2=14行×約24pt+見出し・ボタン≈430pt）に設定する。
@@ -802,12 +877,15 @@ final class MosaicWindowController: NSObject {
         updateStatus("鼠径部位置の基準: 腰から膝方向へ\(Int(ratio * 100))%（次回の候補生成から適用）")
     }
 
+    /// レイヤパネル先頭の表示トグル（人物検出/骨格検出/ROI）を該当レイヤへ一括適用する。
     @objc private func toggleDetectionLayers() {
         let personOn = personLayerCheckbox.state == .on
         let poseOn = poseLayerCheckbox.state == .on
+        let roiOn = roiLayerCheckbox.state == .on
         for leaf in allLayerLeaves() {
             if leaf.kind.isPerson { leaf.isVisible = personOn }
             if leaf.kind.isPose { leaf.isVisible = poseOn }
+            if leaf.kind == .roi { leaf.isVisible = roiOn }
         }
         applyLayerVisibility()
         reloadLayerList()
@@ -817,7 +895,12 @@ final class MosaicWindowController: NSObject {
     /// 人物ごとに「人物N」グループを作り、**骨格の関節が実際に検出できた人物のみ**骨格検出レイヤを入れる。
     /// 骨格が取れていない人物へ固定比率のフォールバック矩形を骨格レイヤとして表示するのは
     /// 「検出していないものは表示しない」方針に反するため行わない（アニメ等で偽の骨格枠が出ていた問題の修正）。
-    private func rebuildDetectionLayers(personCount: Int, poseAvailability: [Bool]) {
+    private func rebuildDetectionLayers(
+        personCount: Int,
+        poseAvailability: [Bool],
+        includePersonLayer: Bool = true,
+        includePoseLayer: Bool = true
+    ) {
         ungroupedLayers.removeAll { $0.kind.isPerson || $0.kind.isPose }
         for group in layerGroups {
             group.children.removeAll { $0.kind.isPerson || $0.kind.isPose }
@@ -825,12 +908,15 @@ final class MosaicWindowController: NSObject {
         layerGroups.removeAll { $0.children.isEmpty }
 
         for index in 0..<personCount {
-            let personLeaf = LayerLeaf(kind: .person(index), isVisible: false)
+            var children: [LayerLeaf] = []
+            if includePersonLayer {
+                children.append(LayerLeaf(kind: .person(index), isVisible: false))
+            }
             let hasPose = index < poseAvailability.count && poseAvailability[index]
-            var children: [LayerLeaf] = [personLeaf]
-            if hasPose {
+            if includePoseLayer && hasPose {
                 children.append(LayerLeaf(kind: .pose(index), isVisible: false))
             }
+            guard !children.isEmpty else { continue }
             layerGroups.append(LayerGroup(name: "人物\(index + 1)", children: children))
         }
         reloadLayerList()
@@ -848,6 +934,16 @@ final class MosaicWindowController: NSObject {
         let title = NSTextField(labelWithString: "レイヤ")
         title.font = .systemFont(ofSize: 15, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
+
+        // レイヤ表示トグル（ツールバーから移設: 人物検出レイヤ・骨格検出レイヤ・ROIレイヤの一括ON/OFF）
+        let togglesLabel = NSTextField(labelWithString: "表示:")
+        togglesLabel.textColor = .secondaryLabelColor
+        let togglesRow = NSStackView(views: [togglesLabel, personLayerCheckbox, poseLayerCheckbox, roiLayerCheckbox])
+        togglesRow.orientation = .horizontal
+        togglesRow.alignment = .centerY
+        togglesRow.spacing = 8
+        togglesRow.translatesAutoresizingMaskIntoConstraints = false
+        togglesRow.setHuggingPriority(.required, for: .vertical)
 
         layerOutlineView.headerView = nil
         layerOutlineView.dataSource = self
@@ -874,13 +970,17 @@ final class MosaicWindowController: NSObject {
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
         panel.addSubview(title)
+        panel.addSubview(togglesRow)
         panel.addSubview(scrollView)
         panel.addSubview(buttons)
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
             title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
             title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
-            scrollView.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            togglesRow.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            togglesRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            togglesRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: togglesRow.bottomAnchor, constant: 6),
             scrollView.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             scrollView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             buttons.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 8),
@@ -893,8 +993,50 @@ final class MosaicWindowController: NSObject {
 
     /// レイヤ一覧を再読込し、全階層を展開した状態で表示する（通常時は常に全展開）。
     private func reloadLayerList() {
+        rebuildROIListEntries()
         layerOutlineView.reloadData()
         layerOutlineView.expandItem(nil, expandChildren: true)
+        syncROIListSelectionFromCanvas()
+    }
+
+    /// ROI選択リストの行データを再構築する。同一カテゴリ名が複数ある場合のみ連番を付与する。
+    private func rebuildROIListEntries() {
+        var counts: [String: Int] = [:]
+        for roi in canvas.rois { counts[roi.category.displayName, default: 0] += 1 }
+        var counters: [String: Int] = [:]
+        roiListEntries = canvas.rois.map { roi in
+            let name = roi.category.displayName
+            guard counts[name, default: 0] > 1 else { return ROIListEntry(roiID: roi.id, title: name) }
+            counters[name, default: 0] += 1
+            return ROIListEntry(roiID: roi.id, title: "\(name) \(counters[name] ?? 0)")
+        }
+        roiListSignature = canvas.rois.map { "\($0.id.uuidString)#\($0.category.rawValue)" }
+    }
+
+    /// ROIの件数・カテゴリが変わったときだけリストを再読込する（ドラッグ移動中の毎フレーム再描画を避ける）。
+    private func refreshROIListIfNeeded() {
+        let signature = canvas.rois.map { "\($0.id.uuidString)#\($0.category.rawValue)" }
+        guard signature != roiListSignature else { return }
+        reloadLayerList()
+    }
+
+    /// キャンバス側のROI選択をレイヤパネルのROIリストへ反映する。
+    private func syncROIListSelectionFromCanvas() {
+        guard !isSyncingROISelection else { return }
+        isSyncingROISelection = true
+        defer { isSyncingROISelection = false }
+        guard let selectedID = canvas.selectedROIID,
+              let entry = roiListEntries.first(where: { $0.roiID == selectedID }) else {
+            for index in layerOutlineView.selectedRowIndexes
+            where layerOutlineView.item(atRow: index) is ROIListEntry {
+                layerOutlineView.deselectRow(index)
+            }
+            return
+        }
+        let row = layerOutlineView.row(forItem: entry)
+        guard row >= 0 else { return }
+        layerOutlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        layerOutlineView.scrollRowToVisible(row)
     }
 
     @objc private func groupSelectedLayers() {
@@ -980,11 +1122,13 @@ final class MosaicWindowController: NSObject {
         canvas.poseLayerVisibility = poseVisibility
     }
 
+    /// レイヤパネル先頭の表示トグルを、各レイヤの実際の表示状態と同期する。
     private func syncLegacyLayerCheckboxes() {
         personLayerCheckbox.allowsMixedState = true
         poseLayerCheckbox.allowsMixedState = true
         personLayerCheckbox.state = aggregateVisibilityState(allLayerLeaves().filter(\.kind.isPerson))
         poseLayerCheckbox.state = aggregateVisibilityState(allLayerLeaves().filter(\.kind.isPose))
+        roiLayerCheckbox.state = allLayerLeaves().first { $0.kind == .roi }?.isVisible == true ? .on : .off
     }
 
     private func aggregateVisibilityState(_ leaves: [LayerLeaf]) -> NSControl.StateValue {
@@ -1083,6 +1227,11 @@ final class MosaicWindowController: NSObject {
             if let learningEngine {
                 rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
             }
+            // 対象カテゴリでチェックされたものだけ生成する
+            let checkedCategories = checkedGenerationCategories()
+            let beforeFilterCount = rois.count
+            rois = rois.filter { checkedCategories.contains($0.category) }
+            let filteredOutCount = beforeFilterCount - rois.count
             // 自動候補にも「追加形状」の選択（矩形/楕円）を適用する
             let selectedShape = canvas.currentShape
             rois = rois.map { roi in
@@ -1093,14 +1242,23 @@ final class MosaicWindowController: NSObject {
             canvas.rois = rois
             lastAutoROIs = rois
             lastPersonBounds = snapshot.personBounds
-            canvas.personLayerRects = snapshot.personBounds
-            canvas.personLayerMasks = snapshot.persons.map { $0.maskImage.flatMap { self.tintedMask(from: $0) } }
-            canvas.poseLayerRects = snapshot.poseHints.map { Self.poseDisplayRect(for: $0) }
-            canvas.poseLayerBones = snapshot.poseHints.map { Self.boneSegments(for: $0) }
-            canvas.poseLayerJointPoints = snapshot.poseHints.map { $0.joints.map { CGPoint(x: $0.x, y: $0.y) } }
+            // 人物・骨格レイヤも「対象カテゴリ」のチェックに従って生成する（内部検出はROI推定に必要なため常時実行）
+            let includePersonLayers = generatePersonCheckbox.state == .on
+            let includePoseLayers = generatePoseCheckbox.state == .on
+            canvas.personLayerRects = includePersonLayers ? snapshot.personBounds : []
+            canvas.personLayerMasks = includePersonLayers
+                ? snapshot.persons.map { $0.maskImage.flatMap { self.tintedMask(from: $0) } }
+                : []
+            canvas.poseLayerRects = includePoseLayers ? snapshot.poseHints.map { Self.poseDisplayRect(for: $0) } : []
+            canvas.poseLayerBones = includePoseLayers ? snapshot.poseHints.map { Self.boneSegments(for: $0) } : []
+            canvas.poseLayerJointPoints = includePoseLayers
+                ? snapshot.poseHints.map { $0.joints.map { CGPoint(x: $0.x, y: $0.y) } }
+                : []
             rebuildDetectionLayers(
                 personCount: snapshot.personBounds.count,
-                poseAvailability: snapshot.poseHints.map { !$0.joints.isEmpty }
+                poseAvailability: snapshot.poseHints.map { !$0.joints.isEmpty },
+                includePersonLayer: includePersonLayers,
+                includePoseLayer: includePoseLayers
             )
             // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
             showAllLayers()
@@ -1115,11 +1273,12 @@ final class MosaicWindowController: NSObject {
             } else {
                 domainNote = "実写（\(domainSourceNote)）: "
             }
+            let filterNote = filteredOutCount > 0 ? "（対象カテゴリ外 \(filteredOutCount)件を除外）" : ""
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {
-                updateStatus(domainNote + "人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
+                updateStatus(domainNote + "人物を検出できませんでした（候補0件）\(filterNote)。ドラッグで手動追加してください")
             } else {
                 let poseDetectedCount = snapshot.poseHints.filter { !$0.joints.isEmpty }.count
-                updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名（骨格検出 \(poseDetectedCount)名） / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
+                updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名（骨格検出 \(poseDetectedCount)名） / ROI \(canvas.rois.count)件\(filterNote)。ドラッグで手動追加できます")
             }
         } catch {
             showError(error)
@@ -2007,11 +2166,14 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return layerGroups.count + ungroupedLayers.count }
         if let group = item as? LayerGroup { return group.children.count }
+        if let leaf = item as? LayerLeaf, leaf.kind == .roi { return roiListEntries.count }
         return 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
-        item is LayerGroup
+        if item is LayerGroup { return true }
+        if let leaf = item as? LayerLeaf, leaf.kind == .roi { return !roiListEntries.isEmpty }
+        return false
     }
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
@@ -2020,6 +2182,9 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
             return ungroupedLayers[index - layerGroups.count]
         }
         if let group = item as? LayerGroup { return group.children[index] }
+        if let leaf = item as? LayerLeaf, leaf.kind == .roi, index < roiListEntries.count {
+            return roiListEntries[index]
+        }
         return ungroupedLayers[0]
     }
 
@@ -2034,12 +2199,27 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
         } else if let leaf = item as? LayerLeaf {
             cell.configure(title: leaf.kind.title, state: leaf.isVisible ? .on : .off, allowsMixed: false)
             cell.onToggle = { [weak self] in self?.toggleLeafVisibility(leaf) }
+        } else if let entry = item as? ROIListEntry {
+            // ROI選択リストの行（表示チェックなし。クリックでキャンバス上のROIを選択）
+            cell.configure(title: entry.title, state: .off, allowsMixed: false, showsCheckbox: false)
+            cell.onToggle = nil
         }
         return cell
     }
 
     nonisolated func outlineView(_ outlineView: NSOutlineView, shouldSelectItem item: Any) -> Bool {
         true
+    }
+
+    func outlineViewSelectionDidChange(_ notification: Notification) {
+        guard !isSyncingROISelection else { return }
+        let selectedEntries = layerOutlineView.selectedRowIndexes.compactMap {
+            layerOutlineView.item(atRow: $0) as? ROIListEntry
+        }
+        guard let entry = selectedEntries.first else { return }
+        isSyncingROISelection = true
+        canvas.selectedROIID = entry.roiID
+        isSyncingROISelection = false
     }
 }
 
@@ -2125,6 +2305,8 @@ final class ImageCanvasView: NSView {
     var onManualEditWillBegin: (() -> Void)?
     var onManualEditDidEnd: (() -> Void)?
     var onROISelectionChanged: ((MosaicROI?) -> Void)?
+    /// ROI右クリックメニューからのカテゴリ変更要求（ツールバーのカテゴリポップアップ廃止に伴う置き換え）
+    var onCategoryChangeRequest: ((UUID, MosaicTargetCategory) -> Void)?
 
     private var lastSize: [ROIShape: NSSize] = [:]
     private var image: NSImage?
@@ -2188,6 +2370,36 @@ final class ImageCanvasView: NSView {
                 height: abs(dragCurrent.y - dragStart.y)
             ))
         }
+    }
+
+    /// ROI上の右クリックで対象カテゴリを変更するコンテキストメニューを表示する。
+    override func menu(for event: NSEvent) -> NSMenu? {
+        guard image != nil else { return nil }
+        let point = convert(event.locationInWindow, from: nil)
+        let imageRect = imageDrawRect()
+        guard let hit = rois.last(where: { viewRect(from: $0.rect, imageRect: imageRect).contains(point) }) else {
+            return nil
+        }
+        selectedROIID = hit.id
+        let menu = NSMenu()
+        let header = NSMenuItem(title: "対象カテゴリ", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for category in MosaicTargetCategory.allCases {
+            let item = NSMenuItem(title: category.displayName, action: #selector(changeROICategory(_:)), keyEquivalent: "")
+            item.target = self
+            item.state = category == hit.category ? .on : .off
+            item.representedObject = category.rawValue
+            menu.addItem(item)
+        }
+        return menu
+    }
+
+    @objc private func changeROICategory(_ sender: NSMenuItem) {
+        guard let raw = sender.representedObject as? String,
+              let category = MosaicTargetCategory(rawValue: raw),
+              let selectedID = selectedROIID else { return }
+        onCategoryChangeRequest?(selectedID, category)
     }
 
     override func mouseDown(with event: NSEvent) {
