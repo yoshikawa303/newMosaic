@@ -106,14 +106,16 @@ public struct LetterboxTransform: Equatable, Sendable {
 /// 同梱YOLOv8系ONNXモデルの共通実行ヘルパー（前処理→ONNX Runtime推論→デコード）。
 /// 完全ローカル実行。画像・検出結果の外部送信は行わない。
 final class YOLOONNXModel {
-    static let inputSize = 640
+    /// モデルの入力解像度（censor_detect/person_detect=640, photo_censor_detect=320）
+    let inputSize: Int
 
     private let env: ORTEnv
     private let session: ORTSession
     private let inputName: String
     private let outputName: String
 
-    init(resourceName: String) throws {
+    init(resourceName: String, inputSize: Int = 640) throws {
+        self.inputSize = inputSize
         let modelURL = try Self.cachedModelURL(resourceName: resourceName)
         env = try ORTEnv(loggingLevel: .warning)
         let options = try ORTSessionOptions()
@@ -162,7 +164,7 @@ final class YOLOONNXModel {
         classCount: Int,
         confidenceThreshold: Double
     ) throws -> [YOLODecoder.Detection] {
-        var (tensor, letterbox) = Self.preprocess(image)
+        var (tensor, letterbox) = Self.preprocess(image, inputSize: inputSize)
         let data = NSMutableData(
             bytes: &tensor,
             length: tensor.count * MemoryLayout<Float>.size
@@ -170,7 +172,7 @@ final class YOLOONNXModel {
         let inputValue = try ORTValue(
             tensorData: data,
             elementType: .float,
-            shape: [1, 3, NSNumber(value: Self.inputSize), NSNumber(value: Self.inputSize)]
+            shape: [1, 3, NSNumber(value: inputSize), NSNumber(value: inputSize)]
         )
         let outputs = try session.run(
             withInputs: [inputName: inputValue],
@@ -185,10 +187,10 @@ final class YOLOONNXModel {
             output: floats,
             classCount: classCount,
             confidenceThreshold: confidenceThreshold,
-            inputSize: Self.inputSize
+            inputSize: inputSize
         ).map { detection in
             YOLODecoder.Detection(
-                rect: letterbox.imageRect(from: detection.rect, inputSize: Self.inputSize),
+                rect: letterbox.imageRect(from: detection.rect, inputSize: inputSize),
                 score: detection.score,
                 classIndex: detection.classIndex
             )
@@ -196,9 +198,9 @@ final class YOLOONNXModel {
     }
 
     /// レターボックス方式（アスペクト比維持リサイズ+中央配置+グレー114パディング。学習時のultralytics標準と
-    /// 同条件）で 640x640 RGB（0-1正規化）CHW配列へ変換する。単純リサイズでは縦長の漫画ページ等で
+    /// 同条件）で inputSize四方 RGB（0-1正規化）CHW配列へ変換する。単純リサイズでは縦長の漫画ページ等で
     /// 検出位置が微妙にずれるため（学習条件との不一致）、本方式へ変更した。
-    static func preprocess(_ image: CGImage) -> (tensor: [Float], letterbox: LetterboxTransform) {
+    static func preprocess(_ image: CGImage, inputSize: Int = 640) -> (tensor: [Float], letterbox: LetterboxTransform) {
         let size = inputSize
         let imageWidth = Double(image.width)
         let imageHeight = Double(image.height)
@@ -284,5 +286,46 @@ public final class AnimePersonDetector {
     public func detectPersons(in image: CGImage, confidenceThreshold: Double = 0.3) throws -> [PersonDetection] {
         try model.detect(in: image, classCount: 1, confidenceThreshold: confidenceThreshold)
             .map { PersonDetection(bounds: $0.rect) }
+    }
+}
+
+/// 実写向けのNSFW部位検出器（内容ベース検出）。
+/// モデル: deepghs/nudenet_onnx 320n（Apache-2.0ライセンス, NudeNet v3 YOLOv8n系ONNX, 入力320x320,
+/// 18クラス）。実写でも性器・乳首を内容ベースで検出するための導入
+/// （従来の実写経路は骨格からの位置推定のみで、性器の内容ベース検出が無かった）。
+public final class PhotoCensorDetector {
+    /// NudeNet v3 の18クラスのうち、モザイク対象として採用するクラスのカテゴリ対応。
+    /// 3=FEMALE_BREAST_EXPOSED, 4=FEMALE_GENITALIA_EXPOSED, 6=ANUS_EXPOSED, 14=MALE_GENITALIA_EXPOSED。
+    /// 顔・足・腹などの非対象クラスと着衣（COVERED）クラスは採用しない。
+    static let classCategories: [Int: MosaicTargetCategory] = [
+        3: .nipple,
+        4: .femaleGenital,
+        6: .other,
+        14: .maleGenital
+    ]
+    static let classCount = 18
+
+    private let model: YOLOONNXModel
+
+    public init() throws {
+        model = try YOLOONNXModel(resourceName: "photo_censor_detect", inputSize: 320)
+    }
+
+    /// 画像からNSFW部位を検出し、カテゴリ付きROIとして返す。
+    public func detect(in image: CGImage, confidenceThreshold: Double = 0.25) throws -> [MosaicROI] {
+        try model.detect(
+            in: image,
+            classCount: Self.classCount,
+            confidenceThreshold: confidenceThreshold
+        ).compactMap { detection in
+            guard let category = Self.classCategories[detection.classIndex] else { return nil }
+            return MosaicROI(
+                rect: detection.rect,
+                confidence: detection.score,
+                source: "photo-censor",
+                shape: .ellipse,
+                category: category
+            )
+        }
     }
 }

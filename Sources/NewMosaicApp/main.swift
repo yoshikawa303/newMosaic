@@ -230,6 +230,8 @@ final class MosaicWindowController: NSObject {
     private lazy var animeCensorDetector: AnimeCensorDetector? = try? AnimeCensorDetector()
     /// アニメ・イラスト用の人物検出器（矩形。イラストでのVisionシルエット不安定問題への対応）
     private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
+    /// 実写用のNSFW部位検出器（NudeNet。実写でも性器・乳首を内容ベースで検出する）
+    private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -1224,6 +1226,15 @@ final class MosaicWindowController: NSObject {
                 rois = Self.mergeCandidates(base: rois, adding: animeROIs)
             }
 
+            // 実写では実写用NSFW部位検出モデル（NudeNet）を実行して統合する
+            // （従来は骨格からの位置推定のみで、性器の内容ベース検出が無かった）
+            var photoDetectionCount = 0
+            if domain == .photo, let detector = photoCensorDetector {
+                let photoROIs = (try? detector.detect(in: loadedImage.cgImage)) ?? []
+                photoDetectionCount = photoROIs.count
+                rois = Self.mergeCandidates(base: rois, adding: photoROIs)
+            }
+
             if let learningEngine {
                 rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
             }
@@ -1271,7 +1282,9 @@ final class MosaicWindowController: NSObject {
                     ? "イラスト/漫画（\(domainSourceNote)・アニメ部位検出: \(animeDetectionCount)件）: "
                     : "イラスト/漫画（\(domainSourceNote)・アニメ用検出モデルを読み込めませんでした）: "
             } else {
-                domainNote = "実写（\(domainSourceNote)）: "
+                domainNote = photoCensorDetector != nil
+                    ? "実写（\(domainSourceNote)・実写部位検出: \(photoDetectionCount)件）: "
+                    : "実写（\(domainSourceNote)・実写用検出モデルを読み込めませんでした）: "
             }
             let filterNote = filteredOutCount > 0 ? "（対象カテゴリ外 \(filteredOutCount)件を除外）" : ""
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {

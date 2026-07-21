@@ -13,7 +13,7 @@
 ## 検出モデルキャッシュ（Build 34〜）
 
 - 保存先: `~/Library/Application Support/newMosaic/Models/`
-  - `censor_detect.onnx` / `person_detect.onnx`: アプリ同梱の検出モデルの内蔵ディスクキャッシュ（初回のみコピー）。
+  - `censor_detect.onnx` / `person_detect.onnx` / `photo_censor_detect.onnx`: アプリ同梱の検出モデルの内蔵ディスクキャッシュ（初回のみコピー）。
 - 目的: アプリ本体がリムーバブルボリューム上にある場合の、macOSリムーバブルボリューム許可ダイアログ（毎ビルド再表示）の回避。
 - 個人情報: 含まない（モデルファイルのみ）。
 - 削除方法: `Models/` フォルダを削除すれば次回起動時に再コピーされる。

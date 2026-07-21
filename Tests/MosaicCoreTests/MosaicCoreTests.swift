@@ -505,6 +505,27 @@ import Testing
     #expect(rois.isEmpty)
 }
 
+@Test func photoCensorDetectorLoadsModelAndRunsOnPlainImage() throws {
+    // 実写用NSFW部位検出モデル（NudeNet 320n）のロードと推論実行のスモークテスト（単色画像では検出0件のはず）
+    let detector = try PhotoCensorDetector()
+    let image = try makeSolidImage(width: 320, height: 240)
+
+    let rois = try detector.detect(in: image)
+
+    #expect(rois.isEmpty)
+}
+
+@Test func photoCensorDetectorMapsOnlyTargetClasses() {
+    // 採用クラス（乳首・性器・肛門）のみカテゴリ対応があり、顔・足などは対象外であることを検証する
+    #expect(PhotoCensorDetector.classCategories[3] == .nipple)
+    #expect(PhotoCensorDetector.classCategories[4] == .femaleGenital)
+    #expect(PhotoCensorDetector.classCategories[14] == .maleGenital)
+    #expect(PhotoCensorDetector.classCategories[6] == .other)
+    #expect(PhotoCensorDetector.classCategories[1] == nil)
+    #expect(PhotoCensorDetector.classCategories[7] == nil)
+    #expect(PhotoCensorDetector.classCount == 18)
+}
+
 @Test func animePersonDetectorLoadsModelAndRunsOnPlainImage() throws {
     // アニメ人物検出モデルのロードと推論実行のスモークテスト（単色画像では検出0件のはず）
     let detector = try AnimePersonDetector()
