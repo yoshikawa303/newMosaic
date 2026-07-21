@@ -198,6 +198,8 @@ public final class VisionPoseEstimator: PoseEstimating {
     /// 人物領域（矩形+15%マージン）をクロップして骨格検出を実行し、
     /// シルエットマスク内の関節数が最多の骨格を採用する。
     /// マスクがある場合、マスク外（緩衝含む）の関節は隣接人物の写り込みとみなし除外する。
+    /// 骨格が取れない場合は**顔検出を起点にした全身領域の再推定**でリトライする（Build 40〜。
+    /// 顔検出は骨格より頑健なため、骨格失敗時に顔位置から全身範囲を組み立てて再検出すると精度が上がる）。
     private func estimatePoseInPersonRegion(
         image: CGImage,
         imageSize: CGSize,
@@ -209,6 +211,14 @@ public final class VisionPoseEstimator: PoseEstimating {
               region.width > 0, region.height > 0,
               let crop = image.cropping(to: cropRect) else { return nil }
 
+        if let hint = detectPose(in: crop, region: region, person: person) {
+            return hint
+        }
+        return faceGuidedPose(image: image, imageSize: imageSize, person: person, personCrop: crop, cropRegion: region)
+    }
+
+    /// クロップ画像へ骨格検出を実行し、マスク内関節数が最多の骨格をフィルタ済みPoseHintとして返す。
+    private func detectPose(in crop: CGImage, region: NormalizedRect, person: PersonDetection) -> PoseHint? {
         let request = VNDetectHumanBodyPoseRequest()
         try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
         let observations = request.results ?? []
@@ -252,6 +262,64 @@ public final class VisionPoseEstimator: PoseEstimating {
 
         let lower = Self.lowerBodyBounds(joints: joints) ?? HeuristicPoseEstimator.lowerBody(for: person.bounds)
         return PoseHint(bodyBounds: person.bounds, lowerBodyBounds: lower, joints: joints)
+    }
+
+    /// 顔検出を起点にした骨格検出フォールバック。
+    /// 人物クロップ内で顔（`VNDetectFaceRectanglesRequest`。横顔にも対応）を検出し、
+    /// 顔位置から全身領域（幅≈顔幅4.5倍・高さ≈顔高さ8.5倍）を推定してクロップし直し、骨格検出を再実行する。
+    /// 人物矩形に背景が多い・シルエットが部分的で骨格が失敗するケースの救済。小さいクロップは2倍へ拡大してから検出する。
+    private func faceGuidedPose(
+        image: CGImage,
+        imageSize: CGSize,
+        person: PersonDetection,
+        personCrop: CGImage,
+        cropRegion: NormalizedRect
+    ) -> PoseHint? {
+        let faceRequest = VNDetectFaceRectanglesRequest()
+        try? VNImageRequestHandler(cgImage: personCrop, options: [:]).perform([faceRequest])
+        guard let face = (faceRequest.results ?? []).max(by: { $0.confidence < $1.confidence }) else { return nil }
+
+        // Visionの顔矩形（クロップ内・左下原点正規化）→ 画像全体の上原点正規化座標へ変換
+        let bb = face.boundingBox
+        let faceFull = NormalizedRect(
+            x: cropRegion.x + bb.origin.x * cropRegion.width,
+            y: cropRegion.y + (1 - bb.origin.y - bb.height) * cropRegion.height,
+            width: bb.width * cropRegion.width,
+            height: bb.height * cropRegion.height
+        )
+        // 顔を基準に全身領域を推定（身長≈顔高さ8倍の人体比率+マージン）
+        let bodyRegion = NormalizedRect(
+            x: faceFull.x + faceFull.width / 2 - faceFull.width * 2.25,
+            y: faceFull.y - faceFull.height * 0.5,
+            width: faceFull.width * 4.5,
+            height: faceFull.height * 8.5
+        ).clamped()
+        let bodyRect = bodyRegion.cgRect(imageSize: imageSize, origin: .topLeft)
+        guard bodyRect.width >= 32, bodyRect.height >= 32,
+              bodyRegion.width > 0, bodyRegion.height > 0,
+              var bodyCrop = image.cropping(to: bodyRect) else { return nil }
+        if max(bodyCrop.width, bodyCrop.height) < 480, let upscaled = Self.upscaled(bodyCrop, scale: 2) {
+            bodyCrop = upscaled
+        }
+        return detectPose(in: bodyCrop, region: bodyRegion, person: person)
+    }
+
+    /// 骨格検出前の低解像度クロップ拡大（正規化座標のマッピングには影響しない）。
+    private static func upscaled(_ image: CGImage, scale: Int) -> CGImage? {
+        let width = image.width * scale
+        let height = image.height * scale
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+        return context.makeImage()
     }
 
     private static func joints(from observation: VNHumanBodyPoseObservation) -> [PoseJoint] {

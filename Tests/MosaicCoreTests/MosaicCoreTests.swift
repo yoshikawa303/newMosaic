@@ -515,6 +515,19 @@ import Testing
     #expect(rois.isEmpty)
 }
 
+@Test func poseEstimatorFaceGuidedFallbackHandlesPlainImage() throws {
+    // 骨格・顔とも検出できない単色画像で、顔起点フォールバック経路がクラッシュせず
+    // 空関節のフォールバックヒントを返すことを検証する
+    let estimator = VisionPoseEstimator()
+    let image = try makeSolidImage(width: 320, height: 400)
+    let persons = [PersonDetection(bounds: NormalizedRect(x: 0.2, y: 0.1, width: 0.5, height: 0.8))]
+
+    let hints = try estimator.estimatePose(in: image, persons: persons)
+
+    #expect(hints.count == 1)
+    #expect(hints[0].joints.isEmpty)
+}
+
 @Test func photoCensorDetectorPersonCropDetectRunsOnPlainImage() throws {
     // 人物クロップ併用の検出が単色画像でもクラッシュせず0件を返すことを検証する
     let detector = try PhotoCensorDetector()
