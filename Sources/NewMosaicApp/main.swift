@@ -251,6 +251,26 @@ final class MosaicWindowController: NSObject {
     private let groinPositionSlider = NSSlider(value: 0.45, minValue: 0.2, maxValue: 0.8, target: nil, action: nil)
     private let groinPositionValueLabel = NSTextField(labelWithString: "45%")
     private static let groinPositionDefaultsKey = "GroinPositionRatio"
+
+    // モザイク描画スタイル設定（パターン+パラメータ。永続化しモザイク表示中は即時反映）
+    private let mosaicSettingsButton = NSButton(title: "モザイク設定...", target: nil, action: nil)
+    private let mosaicSettingsPopover = NSPopover()
+    private let stylePatternPopUp = NSPopUpButton(title: "", target: nil, action: nil)
+    private let styleOpacitySlider = NSSlider(value: 1.0, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
+    private let styleOpacityValueLabel = NSTextField(labelWithString: "100%")
+    private let styleTintCheckbox = NSButton(checkboxWithTitle: "色を付ける", target: nil, action: nil)
+    private let styleTintColorWell = NSColorWell()
+    private let styleBlockScaleSlider = NSSlider(value: 28, minValue: 4, maxValue: 80, target: nil, action: nil)
+    private let styleBlockScaleValueLabel = NSTextField(labelWithString: "28")
+    private let styleFeatherSlider = NSSlider(value: 0, minValue: 0, maxValue: 40, target: nil, action: nil)
+    private let styleFeatherValueLabel = NSTextField(labelWithString: "0px")
+    private let styleStripeWidthSlider = NSSlider(value: 12, minValue: 2, maxValue: 60, target: nil, action: nil)
+    private let styleStripeWidthValueLabel = NSTextField(labelWithString: "12px")
+    private let styleStripeSpacingSlider = NSSlider(value: 12, minValue: 0, maxValue: 60, target: nil, action: nil)
+    private let styleStripeSpacingValueLabel = NSTextField(labelWithString: "12px")
+    private let stylePatternImageButton = NSButton(title: "パターン画像を選択...", target: nil, action: nil)
+    private let stylePatternImageLabel = NSTextField(labelWithString: "未選択")
+    private var customPatternImage: CGImage?
     private var ungroupedLayers: [LayerLeaf] = [
         LayerLeaf(kind: .image, isVisible: true),
         LayerLeaf(kind: .roi, isVisible: true)
@@ -376,6 +396,7 @@ final class MosaicWindowController: NSObject {
         let optionToolbar = NSStackView(views: [
             personLayerCheckbox, poseLayerCheckbox,
             autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox,
+            mosaicSettingsButton,
             groinPositionLabel, groinPositionSlider, groinPositionValueLabel
         ])
         optionToolbar.orientation = .horizontal
@@ -474,6 +495,10 @@ final class MosaicWindowController: NSObject {
         groinPositionSlider.action = #selector(groinPositionChanged)
         domainModeControl.target = self
         domainModeControl.action = #selector(domainModeChanged)
+        mosaicSettingsButton.target = self
+        mosaicSettingsButton.action = #selector(toggleMosaicSettingsPopover)
+        setUpMosaicSettingsPanel()
+        loadMosaicStyleSettings()
         reloadLayerList()
 
         canvas.currentShape = .ellipse
@@ -554,6 +579,208 @@ final class MosaicWindowController: NSObject {
         layerHeight = max(160, min(layerHeight, total - 200 - divider))
         rightPane.setPosition(total - divider - layerHeight, ofDividerAt: 0)
         UserDefaults.standard.set(true, forKey: appliedKey)
+    }
+
+    // MARK: - モザイク描画スタイル設定
+
+    private func setUpMosaicSettingsPanel() {
+        stylePatternPopUp.removeAllItems()
+        stylePatternPopUp.addItems(withTitles: MosaicFillPattern.allCases.map(\.displayName))
+        stylePatternPopUp.target = self
+        stylePatternPopUp.action = #selector(mosaicStyleChanged)
+        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider] {
+            slider.target = self
+            slider.action = #selector(mosaicStyleChanged)
+            slider.translatesAutoresizingMaskIntoConstraints = false
+            slider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+        }
+        styleTintCheckbox.target = self
+        styleTintCheckbox.action = #selector(mosaicStyleChanged)
+        styleTintColorWell.target = self
+        styleTintColorWell.action = #selector(mosaicStyleChanged)
+        styleTintColorWell.translatesAutoresizingMaskIntoConstraints = false
+        styleTintColorWell.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        styleTintColorWell.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        styleTintColorWell.color = .black
+        stylePatternImageButton.target = self
+        stylePatternImageButton.action = #selector(choosePatternImage)
+        stylePatternImageLabel.textColor = .secondaryLabelColor
+        stylePatternImageLabel.font = .systemFont(ofSize: 11)
+
+        let grid = NSGridView(views: [
+            [NSTextField(labelWithString: "塗りつぶしパターン:"), stylePatternPopUp, NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "透明度:"), styleOpacitySlider, styleOpacityValueLabel],
+            [styleTintCheckbox, styleTintColorWell, NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "パターン細かさ:"), styleBlockScaleSlider, styleBlockScaleValueLabel],
+            [NSTextField(labelWithString: "範囲輪郭ぼかし:"), styleFeatherSlider, styleFeatherValueLabel],
+            [NSTextField(labelWithString: "帯の太さ:"), styleStripeWidthSlider, styleStripeWidthValueLabel],
+            [NSTextField(labelWithString: "帯の間隔（透明）:"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
+            [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
+        ])
+        grid.rowSpacing = 10
+        grid.columnSpacing = 10
+        grid.translatesAutoresizingMaskIntoConstraints = false
+
+        let panel = NSView()
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(grid)
+        NSLayoutConstraint.activate([
+            grid.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14),
+            grid.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 14),
+            grid.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
+            grid.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -14)
+        ])
+        let controller = NSViewController()
+        controller.view = panel
+        mosaicSettingsPopover.behavior = .transient
+        mosaicSettingsPopover.contentViewController = controller
+    }
+
+    @objc private func toggleMosaicSettingsPopover() {
+        if mosaicSettingsPopover.isShown {
+            mosaicSettingsPopover.close()
+        } else {
+            updateMosaicStyleControlAvailability()
+            mosaicSettingsPopover.show(relativeTo: mosaicSettingsButton.bounds, of: mosaicSettingsButton, preferredEdge: .maxY)
+        }
+    }
+
+    /// 現在のUI設定からモザイク描画スタイルを構築する。
+    private func currentMosaicStyle() -> MosaicStyle {
+        var style = MosaicStyle()
+        let patterns = MosaicFillPattern.allCases
+        let index = stylePatternPopUp.indexOfSelectedItem
+        if (0..<patterns.count).contains(index) {
+            style.pattern = patterns[index]
+        }
+        style.opacity = styleOpacitySlider.doubleValue
+        if styleTintCheckbox.state == .on,
+           let color = styleTintColorWell.color.usingColorSpace(.deviceRGB) {
+            style.tintColor = (Double(color.redComponent), Double(color.greenComponent), Double(color.blueComponent))
+        }
+        style.blockScale = styleBlockScaleSlider.doubleValue
+        style.edgeFeather = styleFeatherSlider.doubleValue
+        style.stripeWidth = styleStripeWidthSlider.doubleValue
+        style.stripeSpacing = styleStripeSpacingSlider.doubleValue
+        style.patternImage = customPatternImage
+        return style
+    }
+
+    @objc private func mosaicStyleChanged() {
+        updateMosaicStyleControlAvailability()
+        saveMosaicStyleSettings()
+        // モザイク表示中は変更を即時反映する
+        resumeMosaicPreviewIfNeeded()
+    }
+
+    private func updateMosaicStyleControlAvailability() {
+        let patterns = MosaicFillPattern.allCases
+        let index = stylePatternPopUp.indexOfSelectedItem
+        let pattern = (0..<patterns.count).contains(index) ? patterns[index] : .pixelate
+        let isStripes = pattern == .stripesVertical || pattern == .stripesHorizontal
+        styleStripeWidthSlider.isEnabled = isStripes
+        styleStripeSpacingSlider.isEnabled = isStripes
+        stylePatternImageButton.isEnabled = pattern == .customImage
+        styleOpacityValueLabel.stringValue = "\(Int(styleOpacitySlider.doubleValue * 100))%"
+        styleBlockScaleValueLabel.stringValue = "\(Int(styleBlockScaleSlider.doubleValue))"
+        styleFeatherValueLabel.stringValue = "\(Int(styleFeatherSlider.doubleValue))px"
+        styleStripeWidthValueLabel.stringValue = "\(Int(styleStripeWidthSlider.doubleValue))px"
+        styleStripeSpacingValueLabel.stringValue = "\(Int(styleStripeSpacingSlider.doubleValue))px"
+    }
+
+    /// 任意パターン画像を選択し、Application Supportへコピーして永続化する。
+    @objc private func choosePatternImage() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
+        panel.allowsMultipleSelection = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let loaded = try imageLoader.loadImage(from: url)
+            customPatternImage = loaded.cgImage
+            let destination = try Self.patternImageStoreURL()
+            try FileManager.default.createDirectory(
+                at: destination.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            let bitmap = NSBitmapImageRep(cgImage: loaded.cgImage)
+            if let png = bitmap.representation(using: .png, properties: [:]) {
+                try png.write(to: destination, options: .atomic)
+            }
+            stylePatternImageLabel.stringValue = url.lastPathComponent
+            mosaicStyleChanged()
+        } catch {
+            showError(error)
+        }
+    }
+
+    private static func patternImageStoreURL() throws -> URL {
+        let support = try FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )
+        return support.appendingPathComponent("newMosaic/Patterns/custom_pattern.png")
+    }
+
+    private func saveMosaicStyleSettings() {
+        let defaults = UserDefaults.standard
+        let patterns = MosaicFillPattern.allCases
+        let index = stylePatternPopUp.indexOfSelectedItem
+        if (0..<patterns.count).contains(index) {
+            defaults.set(patterns[index].rawValue, forKey: "MosaicStyle.pattern")
+        }
+        defaults.set(styleOpacitySlider.doubleValue, forKey: "MosaicStyle.opacity")
+        defaults.set(styleTintCheckbox.state == .on, forKey: "MosaicStyle.useTint")
+        if let color = styleTintColorWell.color.usingColorSpace(.deviceRGB) {
+            defaults.set(Double(color.redComponent), forKey: "MosaicStyle.tintR")
+            defaults.set(Double(color.greenComponent), forKey: "MosaicStyle.tintG")
+            defaults.set(Double(color.blueComponent), forKey: "MosaicStyle.tintB")
+        }
+        defaults.set(styleBlockScaleSlider.doubleValue, forKey: "MosaicStyle.blockScale")
+        defaults.set(styleFeatherSlider.doubleValue, forKey: "MosaicStyle.edgeFeather")
+        defaults.set(styleStripeWidthSlider.doubleValue, forKey: "MosaicStyle.stripeWidth")
+        defaults.set(styleStripeSpacingSlider.doubleValue, forKey: "MosaicStyle.stripeSpacing")
+    }
+
+    private func loadMosaicStyleSettings() {
+        let defaults = UserDefaults.standard
+        if let raw = defaults.string(forKey: "MosaicStyle.pattern"),
+           let pattern = MosaicFillPattern(rawValue: raw),
+           let index = MosaicFillPattern.allCases.firstIndex(of: pattern) {
+            stylePatternPopUp.selectItem(at: index)
+        }
+        if defaults.object(forKey: "MosaicStyle.opacity") != nil {
+            styleOpacitySlider.doubleValue = defaults.double(forKey: "MosaicStyle.opacity")
+        }
+        styleTintCheckbox.state = defaults.bool(forKey: "MosaicStyle.useTint") ? .on : .off
+        if defaults.object(forKey: "MosaicStyle.tintR") != nil {
+            styleTintColorWell.color = NSColor(
+                deviceRed: defaults.double(forKey: "MosaicStyle.tintR"),
+                green: defaults.double(forKey: "MosaicStyle.tintG"),
+                blue: defaults.double(forKey: "MosaicStyle.tintB"),
+                alpha: 1
+            )
+        }
+        if defaults.object(forKey: "MosaicStyle.blockScale") != nil {
+            styleBlockScaleSlider.doubleValue = defaults.double(forKey: "MosaicStyle.blockScale")
+        }
+        if defaults.object(forKey: "MosaicStyle.edgeFeather") != nil {
+            styleFeatherSlider.doubleValue = defaults.double(forKey: "MosaicStyle.edgeFeather")
+        }
+        if defaults.object(forKey: "MosaicStyle.stripeWidth") != nil {
+            styleStripeWidthSlider.doubleValue = defaults.double(forKey: "MosaicStyle.stripeWidth")
+        }
+        if defaults.object(forKey: "MosaicStyle.stripeSpacing") != nil {
+            styleStripeSpacingSlider.doubleValue = defaults.double(forKey: "MosaicStyle.stripeSpacing")
+        }
+        if let storeURL = try? Self.patternImageStoreURL(),
+           FileManager.default.fileExists(atPath: storeURL.path),
+           let loaded = try? imageLoader.loadImage(from: storeURL) {
+            customPatternImage = loaded.cgImage
+            stylePatternImageLabel.stringValue = "保存済みパターン"
+        }
+        updateMosaicStyleControlAvailability()
     }
 
     /// 画像種別（自動判定/実写/イラスト・漫画）の手動指定。永続化され、次回の候補生成から適用される。
@@ -966,6 +1193,7 @@ final class MosaicWindowController: NSObject {
                 let output = try mosaicEngine.applyMosaic(
                     to: loadedImage.cgImage,
                     rois: canvas.rois,
+                    style: currentMosaicStyle(),
                     segmentEngine: currentSegmentEngine()
                 )
                 renderedImage = output
@@ -1004,6 +1232,7 @@ final class MosaicWindowController: NSObject {
             let output = try mosaicEngine.applyMosaic(
                 to: loadedImage.cgImage,
                 rois: canvas.rois,
+                style: currentMosaicStyle(),
                 segmentEngine: currentSegmentEngine()
             )
             renderedImage = output
@@ -1036,6 +1265,7 @@ final class MosaicWindowController: NSObject {
             let output = try mosaicEngine.applyMosaic(
                 to: loadedImage.cgImage,
                 rois: canvas.rois,
+                style: currentMosaicStyle(),
                 segmentEngine: currentSegmentEngine()
             )
             pushUndoSnapshot(previousState)

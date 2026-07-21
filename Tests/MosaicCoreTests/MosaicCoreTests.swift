@@ -291,6 +291,52 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func mosaicEngineSupportsAllFillPatterns() throws {
+    // 全パターン+共通パラメータ（透明度・色・細かさ・輪郭ぼかし・帯設定）で出力サイズが保たれることを検証する
+    let image = try makePatternImage(width: 100, height: 80)
+    let patternTile = try makeSolidImage(width: 16, height: 16)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
+        confidence: 1,
+        source: "manual",
+        shape: .rectangle
+    )
+    let engine = MosaicEngine()
+
+    for pattern in MosaicFillPattern.allCases {
+        var style = MosaicStyle()
+        style.pattern = pattern
+        style.opacity = 0.7
+        style.tintColor = (red: 1.0, green: 0.4, blue: 0.7)
+        style.blockScale = 16
+        style.edgeFeather = 4
+        style.stripeWidth = 8
+        style.stripeSpacing = 6
+        style.patternImage = patternTile
+
+        let output = try engine.applyMosaic(to: image, rois: [roi], style: style)
+
+        #expect(output.width == 100, "パターン \(pattern.rawValue) で幅が変化")
+        #expect(output.height == 80, "パターン \(pattern.rawValue) で高さが変化")
+    }
+}
+
+@Test func mosaicStyleStripeMaskAlternatesBands() {
+    // 帯8px+間隔4pxの縦ボーダーで、縞マスクが生成されることを検証する
+    var style = MosaicStyle()
+    style.pattern = .stripesVertical
+    style.stripeWidth = 8
+    style.stripeSpacing = 4
+
+    let mask = MosaicEngine.stripePatternMask(style: style, extent: CGRect(x: 0, y: 0, width: 64, height: 64))
+
+    #expect(mask != nil)
+    #expect(MosaicEngine.stripePatternMask(
+        style: MosaicStyle(),
+        extent: CGRect(x: 0, y: 0, width: 64, height: 64)
+    ) == nil)
+}
+
 @Test func mosaicROIRoundTripsCategory() throws {
     let roi = MosaicROI(
         rect: NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),

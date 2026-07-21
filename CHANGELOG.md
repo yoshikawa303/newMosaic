@@ -1,6 +1,20 @@
 # Changelog
 
-## v0.0.00001 - Build 35 - 2026-07-22
+## v0.0.00001 - Build 36 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 新機能: モザイクの描画パターンと適用パラメータを設定できるようにした。ツールバーの「モザイク設定」から、塗りつぶしパターン（モザイク/ノイズ/ボケ/線・エッジぼかし/ボーダー縦・横/任意パターン画像）と、共通パラメータ（透明度・色付け・パターン細かさ・範囲輪郭ぼかし・ボーダーの帯太さ/間隔）を組み合わせて指定できる。設定は保存され、モザイク表示中は変更が即時反映される。
+
+■更新履歴
+
+- `MosaicCore` に `MosaicFillPattern`（7種）と `MosaicStyle`（透明度/色/細かさ/輪郭ぼかし/帯太さ/帯間隔/パターン画像）を追加し、`MosaicEngine.applyMosaic(to:rois:style:segmentEngine:)` を新設（従来の `scale` 指定APIは後方互換として維持）。
+- パターン実装: モザイク=CIPixellate、ノイズ=CIRandomGenerator、ボケ=CIGaussianBlur、線・エッジぼかし=CIEdges+CIMorphologyMaximumで抽出したエッジ部のみをぼかす、ボーダー=縞アルファマスク（帯=塗り、間隔=透明）をROIマスクへ乗算、任意パターン=インポート画像をCIAffineTileで敷き詰め。
+- 共通パラメータ実装: 透明度=マスク輝度への乗算、色付け=CIColorMonochrome（ボーダーは帯色として適用）、輪郭ぼかし=マスクへのCIGaussianBlur（塗りパッチをフェザー分拡張して境界の途切れを防止）。
+- UI: ツールバーへ「モザイク設定…」ボタンとポップオーバー設定パネルを追加。パターンに応じて関係ないスライダーを自動で無効化。任意パターン画像は `Application Support/newMosaic/Patterns/` へコピーして次回起動時も復元。設定はUserDefaults（`MosaicStyle.*`）で永続化。
+- テスト: 全パターン×共通パラメータ適用で出力サイズが保たれることの検証と、縞マスク生成の検証を追加（計34テスト）。
+
+
 
 ■更新履歴（Readme / ChangeLog 用）
 
