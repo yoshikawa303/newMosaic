@@ -132,24 +132,23 @@ import Testing
     #expect(abs(bounds.height - 0.4) < 0.001)
 }
 
-@Test func personDetectorFallsBackToDefaultRegionWhenNoPersonFound() throws {
-    // 単色画像（人物なし）でも従来互換のフォールバック矩形が1件返ることを検証する。
-    // Phase 1で検出0件時に空配列を返した結果、漫画等で候補が全滅した回帰の再発防止。
+@Test func personDetectorReturnsEmptyWhenNoPersonFound() throws {
+    // 単色画像（人物なし）では偽の固定矩形を返さず0件となることを検証する。
+    // 「検出していない枠線を表示しない＝正確な検知内容の表示」というユーザー方針（2026-07-22）。
     let image = try makeSolidImage(width: 100, height: 100)
 
     let persons = try VisionPersonDetector().detectPersons(in: image)
 
-    #expect(persons.count == 1)
-    #expect(persons[0].bounds.width > 0.3)
+    #expect(persons.isEmpty)
 }
 
-@Test func pipelineAlwaysProducesCandidates() throws {
-    // 検出が全滅してもパイプライン全体としてROI候補が最低1件生成されることを検証する。
+@Test func pipelineProducesNoCandidatesWithoutPersons() throws {
+    // 人物検出0件のときパイプライン全体としても候補0件（偽候補を作らない）ことを検証する。
     let image = try makeSolidImage(width: 200, height: 200)
 
     let rois = try StaticImageMosaicPipeline().generateCandidates(for: image)
 
-    #expect(!rois.isEmpty)
+    #expect(rois.isEmpty)
 }
 
 @Test func normalizedRectExpandedAndIntersection() {

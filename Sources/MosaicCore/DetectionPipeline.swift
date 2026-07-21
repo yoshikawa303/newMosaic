@@ -42,13 +42,10 @@ public final class VisionPersonDetector: PersonDetecting {
         if let persons = try? detectWithInstanceMasks(in: image), !persons.isEmpty {
             return persons
         }
-        if let persons = try? detectWithHumanRectangles(in: image), !persons.isEmpty {
-            return persons
-        }
-        // 漫画・イラスト等では実写学習のVisionが人物を検出できないことがある。
-        // 検出0件で候補が全く出なくなるより、中央の人物想定矩形を1件返して
-        // 下流のヒューリスティックROI生成と手動調整の起点を維持する（Phase 1以前と同等の挙動）。
-        return [PersonDetection(bounds: NormalizedRect(x: 0.24, y: 0.08, width: 0.52, height: 0.84))]
+        // 漫画・イラスト等では実写学習のVisionが人物を検出できないことがあるが、
+        // 検出していないのに固定比率の偽矩形を返すことはしない（正確な検知内容の表示を優先。
+        // ユーザー方針 2026-07-22）。0件時はUI側で手動ROI追加を案内する。
+        return try detectWithHumanRectangles(in: image)
     }
 
     private func detectWithInstanceMasks(in image: CGImage) throws -> [PersonDetection] {

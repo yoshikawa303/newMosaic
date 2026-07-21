@@ -693,7 +693,11 @@ final class MosaicWindowController: NSObject {
             rebuildDetectionLayers(personCount: snapshot.personBounds.count, poseCount: snapshot.poseHints.count)
             applyLayerVisibility()
             syncLegacyLayerCheckboxes()
-            updateStatus("候補生成: 人物\(snapshot.persons.count)名 / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
+            if snapshot.persons.isEmpty && canvas.rois.isEmpty {
+                updateStatus("人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
+            } else {
+                updateStatus("候補生成: 人物\(snapshot.persons.count)名 / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
+            }
         } catch {
             showError(error)
         }
