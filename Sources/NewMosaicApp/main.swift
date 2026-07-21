@@ -581,32 +581,25 @@ final class MosaicWindowController: NSObject {
         reloadLayerList()
     }
 
-    /// 候補生成で得た人物・骨格の検出数に合わせてレイヤを再構築する。
-    /// 各人物のROIと骨格ヒントが1組ずつ揃う場合は自動的に「人物N」グループへまとめ、
-    /// 対になる相手がいない場合はグループ化せずトップレベルへ追加する。
-    private func rebuildDetectionLayers(personCount: Int, poseCount: Int) {
+    /// 候補生成で得た人物・骨格の検出結果に合わせてレイヤを再構築する。
+    /// 人物ごとに「人物N」グループを作り、**骨格の関節が実際に検出できた人物のみ**骨格検出レイヤを入れる。
+    /// 骨格が取れていない人物へ固定比率のフォールバック矩形を骨格レイヤとして表示するのは
+    /// 「検出していないものは表示しない」方針に反するため行わない（アニメ等で偽の骨格枠が出ていた問題の修正）。
+    private func rebuildDetectionLayers(personCount: Int, poseAvailability: [Bool]) {
         ungroupedLayers.removeAll { $0.kind.isPerson || $0.kind.isPose }
         for group in layerGroups {
             group.children.removeAll { $0.kind.isPerson || $0.kind.isPose }
         }
         layerGroups.removeAll { $0.children.isEmpty }
 
-        let pairedCount = min(personCount, poseCount)
-        for index in 0..<pairedCount {
+        for index in 0..<personCount {
             let personLeaf = LayerLeaf(kind: .person(index), isVisible: false)
-            let poseLeaf = LayerLeaf(kind: .pose(index), isVisible: false)
-            let group = LayerGroup(name: "人物\(index + 1)", children: [personLeaf, poseLeaf])
-            layerGroups.append(group)
-        }
-        if personCount > pairedCount {
-            for index in pairedCount..<personCount {
-                ungroupedLayers.append(LayerLeaf(kind: .person(index), isVisible: false))
+            let hasPose = index < poseAvailability.count && poseAvailability[index]
+            var children: [LayerLeaf] = [personLeaf]
+            if hasPose {
+                children.append(LayerLeaf(kind: .pose(index), isVisible: false))
             }
-        }
-        if poseCount > pairedCount {
-            for index in pairedCount..<poseCount {
-                ungroupedLayers.append(LayerLeaf(kind: .pose(index), isVisible: false))
-            }
+            layerGroups.append(LayerGroup(name: "人物\(index + 1)", children: children))
         }
         reloadLayerList()
     }
@@ -859,7 +852,10 @@ final class MosaicWindowController: NSObject {
             canvas.poseLayerRects = snapshot.poseHints.map { Self.poseDisplayRect(for: $0) }
             canvas.poseLayerBones = snapshot.poseHints.map { Self.boneSegments(for: $0) }
             canvas.poseLayerJointPoints = snapshot.poseHints.map { $0.joints.map { CGPoint(x: $0.x, y: $0.y) } }
-            rebuildDetectionLayers(personCount: snapshot.personBounds.count, poseCount: snapshot.poseHints.count)
+            rebuildDetectionLayers(
+                personCount: snapshot.personBounds.count,
+                poseAvailability: snapshot.poseHints.map { !$0.joints.isEmpty }
+            )
             // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
             showAllLayers()
 
@@ -874,7 +870,8 @@ final class MosaicWindowController: NSObject {
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {
                 updateStatus(domainNote + "人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
             } else {
-                updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名 / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
+                let poseDetectedCount = snapshot.poseHints.filter { !$0.joints.isEmpty }.count
+                updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名（骨格検出 \(poseDetectedCount)名） / ROI \(canvas.rois.count)件。ドラッグで手動追加できます")
             }
         } catch {
             showError(error)
@@ -1375,7 +1372,7 @@ final class MosaicWindowController: NSObject {
                 canvas.personLayerMasks = []
                 canvas.poseLayerBones = []
                 canvas.poseLayerJointPoints = []
-                rebuildDetectionLayers(personCount: 0, poseCount: 0)
+                rebuildDetectionLayers(personCount: 0, poseAvailability: [])
                 applyLayerVisibility()
                 syncLegacyLayerCheckboxes()
                 resetUndoHistory()
@@ -1564,7 +1561,7 @@ final class MosaicWindowController: NSObject {
             learnedROIIDs = saved.learnedROIIDs
             rebuildDetectionLayers(
                 personCount: saved.personLayerRects.count,
-                poseCount: saved.poseLayerRects.count
+                poseAvailability: saved.poseLayerJointPoints.map { !$0.isEmpty }
             )
             applyLayerVisibility()
             syncLegacyLayerCheckboxes()
@@ -1583,7 +1580,7 @@ final class MosaicWindowController: NSObject {
         canvas.poseLayerBones = []
         canvas.poseLayerJointPoints = []
         canvas.selectedROIID = nil
-        rebuildDetectionLayers(personCount: 0, poseCount: 0)
+        rebuildDetectionLayers(personCount: 0, poseAvailability: [])
         applyLayerVisibility()
         syncLegacyLayerCheckboxes()
         resetUndoHistory()
