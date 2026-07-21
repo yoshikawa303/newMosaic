@@ -634,6 +634,16 @@ final class MosaicWindowController: NSObject {
         ungroupedLayers + layerGroups.flatMap(\.children)
     }
 
+    /// レイヤパネル内のすべてのレイヤ（グループ内含む）を表示状態にする。
+    private func showAllLayers() {
+        for leaf in allLayerLeaves() {
+            leaf.isVisible = true
+        }
+        applyLayerVisibility()
+        syncLegacyLayerCheckboxes()
+        reloadLayerList()
+    }
+
     private func applyLayerVisibility() {
         var personVisibility = [Bool](repeating: false, count: canvas.personLayerRects.count)
         var poseVisibility = [Bool](repeating: false, count: canvas.poseLayerRects.count)
@@ -733,8 +743,8 @@ final class MosaicWindowController: NSObject {
             canvas.poseLayerBones = snapshot.poseHints.map { Self.boneSegments(for: $0) }
             canvas.poseLayerJointPoints = snapshot.poseHints.map { $0.joints.map { CGPoint(x: $0.x, y: $0.y) } }
             rebuildDetectionLayers(personCount: snapshot.personBounds.count, poseCount: snapshot.poseHints.count)
-            applyLayerVisibility()
-            syncLegacyLayerCheckboxes()
+            // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
+            showAllLayers()
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {
                 updateStatus("人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
             } else {
@@ -1883,17 +1893,20 @@ final class ImageCanvasView: NSView {
     private func drawDetectionLayers(in target: NSRect) {
         for (index, rect) in personLayerRects.enumerated() {
             guard index < personLayerVisibility.count, personLayerVisibility[index] else { continue }
+            let viewR = viewRect(from: rect, imageRect: target)
             if index < personLayerMasks.count, let mask = personLayerMasks[index] {
                 NSImage(cgImage: mask, size: NSSize(width: mask.width, height: mask.height))
                     .draw(in: target, from: .zero, operation: .sourceOver, fraction: 0.9)
-                drawDashedRect(viewRect(from: rect, imageRect: target), color: .systemBlue)
+                drawDashedRect(viewR, color: .systemBlue)
             } else {
-                drawLayerRect(viewRect(from: rect, imageRect: target), color: .systemBlue)
+                drawLayerRect(viewR, color: .systemBlue)
             }
+            drawLayerName("人物検出\(index + 1)", in: viewR, color: .systemBlue)
         }
         for (index, rect) in poseLayerRects.enumerated() {
             guard index < poseLayerVisibility.count, poseLayerVisibility[index] else { continue }
-            drawLayerRect(viewRect(from: rect, imageRect: target), color: .systemOrange)
+            let viewR = viewRect(from: rect, imageRect: target)
+            drawLayerRect(viewR, color: .systemOrange)
             if index < poseLayerBones.count {
                 drawBones(
                     poseLayerBones[index],
@@ -1901,7 +1914,21 @@ final class ImageCanvasView: NSView {
                     imageRect: target
                 )
             }
+            drawLayerName("骨格検出\(index + 1)", in: viewR, color: .systemOrange)
         }
+    }
+
+    /// レイヤ範囲の右下内側にレイヤ名を表示する。
+    private func drawLayerName(_ text: String, in rect: NSRect, color: NSColor) {
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .backgroundColor: color.withAlphaComponent(0.85)
+        ]
+        let size = text.size(withAttributes: attributes)
+        let x = max(rect.minX + 2, rect.maxX - size.width - 2)
+        let y = max(rect.minY + 2, rect.maxY - size.height - 2)
+        text.draw(at: CGPoint(x: x, y: y), withAttributes: attributes)
     }
 
     private func drawDashedRect(_ rect: NSRect, color: NSColor) {
