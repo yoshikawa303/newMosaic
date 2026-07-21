@@ -3,6 +3,14 @@ import CoreImage
 import Foundation
 import Vision
 
+public extension CIImage {
+    /// CVPixelBuffer 由来の CIImage を CGImage ラスタ（行0=上）系の他画像と合成・表示するための垂直反転補正。
+    /// Vision のマスク出力をそのまま使うと最終表示・モザイクマスクが上下反転する（GUI確認で判明）。
+    func verticallyFlippedForRaster() -> CIImage {
+        transformed(by: CGAffineTransform(scaleX: 1, y: -1).translatedBy(x: 0, y: -extent.height))
+    }
+}
+
 /// マスク生成方式の識別子。UIの設定でユーザーが切替えるために使う。
 public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case shape
@@ -90,7 +98,7 @@ public final class ForegroundSegmentEngine: Segmenting {
             return try fallback.createMasks(for: rois, in: image, extent: extent)
         }
 
-        let rawMask = CIImage(cvPixelBuffer: buffer)
+        let rawMask = CIImage(cvPixelBuffer: buffer).verticallyFlippedForRaster()
         guard rawMask.extent.width > 0, rawMask.extent.height > 0 else {
             return try fallback.createMasks(for: rois, in: image, extent: extent)
         }
@@ -131,7 +139,7 @@ public final class VisionPersonSegmentEngine: Segmenting {
             return try fallback.createMasks(for: rois, in: image, extent: extent)
         }
 
-        let rawMask = CIImage(cvPixelBuffer: observation.pixelBuffer)
+        let rawMask = CIImage(cvPixelBuffer: observation.pixelBuffer).verticallyFlippedForRaster()
         guard rawMask.extent.width > 0, rawMask.extent.height > 0 else {
             return try fallback.createMasks(for: rois, in: image, extent: extent)
         }

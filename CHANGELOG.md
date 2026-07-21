@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.0.00001 - Build 18 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: 人物検出レイヤのシルエットマスクが上下反転して表示される問題を修正した（Vision人物セグメンテーション／前景オブジェクトのモザイクマスクにも同じ反転があったため併せて修正）。
+- バグ修正: UIツールバーの項目過多によるレイアウト崩れを修正した（編集ツールバーを2行へ分割、ステータス文の長文時は末尾省略、ウィンドウ最小サイズを設定）。
+- 改善: 「追加形状」の選択（矩形/楕円）を自動候補生成のROIにも適用するようにした（従来は楕円固定）。
+- 改善: ROIにカテゴリ名ラベルを表示し、「対象カテゴリ」の変更が画面上で確認できるようにした（変更時はステータスにも表示）。
+
+■更新履歴
+
+- `CIImage(cvPixelBuffer:)` 由来のマスクへ垂直反転補正 `verticallyFlippedForRaster()` を導入し、表示用シルエット（`VisionPersonDetector`）・`VisionPersonSegmentEngine`・`ForegroundSegmentEngine` の3経路に適用。CVPixelBufferとCGImageラスタの座標規約差が原因。
+- ツールバーを3段構成（操作ボタン+ステータス／形状・カテゴリ・マスク生成／レイヤ表示・自動化チェック）へ再編。`contentMinSize` 1100x700 を設定。
+- 候補生成後のROIへ `canvas.currentShape` を一括適用（学習提案 `learned-prior` 含む）。
+- `ImageCanvasView.drawCategoryLabel` を追加（ROI左上にカテゴリ名を色付き背景で表示）。
+
+■補足（仕様説明）
+
+- 「対象カテゴリ」は新規手動ROIへ付与するラベルと、選択中ROIのラベル変更に作用する（自動候補の生成部位を絞り込むフィルタではない）。カテゴリ別の実部位検出はDETECTION_IMPROVEMENT_PLAN.md Phase 2本命で対応予定。
+- 骨格ボーン・モザイク対象ROIの座標系は上下反転していない（骨格座標は変換済み）。見え方に引き続き違和感がある場合はスクリーンショットで再報告いただきたい。
+
 ## v0.0.00001 - Build 17 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）

@@ -26,6 +26,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = Self.windowTitle()
+        window.contentMinSize = NSSize(width: 1100, height: 700)
         window.center()
         window.contentView = controller.view
         window.makeKeyAndOrderFront(nil)
@@ -292,6 +293,10 @@ final class MosaicWindowController: NSObject {
         let reloadLibraryButton = NSButton(title: "ライブラリ更新", target: nil, action: nil)
         let revealButton = NSButton(title: "Finder表示", target: nil, action: nil)
 
+        // ステータスは余白に収め、長文時は末尾省略（幅がウィンドウを超えて制約が破綻しないようにする）
+        statusLabel.lineBreakMode = .byTruncatingTail
+        statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         let toolbar = NSStackView(views: [
             openButton, pasteButton, detectButton, applyButton, clearButton,
             undoButton, redoButton, saveButton, reloadLibraryButton, revealButton, statusLabel
@@ -314,17 +319,27 @@ final class MosaicWindowController: NSObject {
         segmentEngineControl.removeAllItems()
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
         segmentEngineControl.selectItem(at: 0)
+
+        // 項目過多による幅超過（レイアウト破綻）を防ぐため、編集ツールバーは2行に分ける
         let editToolbar = NSStackView(views: [
             shapeLabel, shapeControl, categoryLabel, categoryControl,
-            segmentEngineLabel, segmentEngineControl,
-            personLayerCheckbox, poseLayerCheckbox,
-            autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox
+            segmentEngineLabel, segmentEngineControl
         ])
         editToolbar.orientation = .horizontal
         editToolbar.alignment = .centerY
         editToolbar.spacing = 10
-        editToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 8, right: 12)
+        editToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 2, right: 12)
         editToolbar.translatesAutoresizingMaskIntoConstraints = false
+
+        let optionToolbar = NSStackView(views: [
+            personLayerCheckbox, poseLayerCheckbox,
+            autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox
+        ])
+        optionToolbar.orientation = .horizontal
+        optionToolbar.alignment = .centerY
+        optionToolbar.spacing = 10
+        optionToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 8, right: 12)
+        optionToolbar.translatesAutoresizingMaskIntoConstraints = false
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         let libraryPanel = makeLibraryPanel()
@@ -352,6 +367,7 @@ final class MosaicWindowController: NSObject {
         rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         root.addSubview(toolbar)
         root.addSubview(editToolbar)
+        root.addSubview(optionToolbar)
         root.addSubview(splitView)
 
         NSLayoutConstraint.activate([
@@ -361,7 +377,10 @@ final class MosaicWindowController: NSObject {
             editToolbar.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
             editToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             editToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: editToolbar.bottomAnchor),
+            optionToolbar.topAnchor.constraint(equalTo: editToolbar.bottomAnchor),
+            optionToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            optionToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
+            splitView.topAnchor.constraint(equalTo: optionToolbar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
@@ -451,6 +470,9 @@ final class MosaicWindowController: NSObject {
            canvas.rois[roiIndex].category != category {
             pushUndoSnapshot(currentEditorState())
             canvas.rois[roiIndex].category = category
+            updateStatus("選択中ROIのカテゴリを「\(category.displayName)」へ変更しました")
+        } else {
+            updateStatus("新規追加ROIのカテゴリ: \(category.displayName)")
         }
     }
 
@@ -694,6 +716,13 @@ final class MosaicWindowController: NSObject {
             var rois = snapshot.rois
             if let learningEngine {
                 rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
+            }
+            // 自動候補にも「追加形状」の選択（矩形/楕円）を適用する
+            let selectedShape = canvas.currentShape
+            rois = rois.map { roi in
+                var updated = roi
+                updated.shape = selectedShape
+                return updated
             }
             canvas.rois = rois
             lastAutoROIs = rois
@@ -1798,10 +1827,24 @@ final class ImageCanvasView: NSView {
             let rect = viewRect(from: roi.rect, imageRect: target)
             let color: NSColor = roi.source == "manual" ? .systemGreen : .systemRed
             drawShape(roi.shape, rect: rect, color: color)
+            drawCategoryLabel(roi, near: rect, color: color)
             if roi.id == selectedROIID {
                 drawSelectionHandles(rect)
             }
         }
+    }
+
+    /// ROIのカテゴリ名を矩形の左上へ小さく表示する（対象カテゴリ変更の結果を画面上で確認できるようにする）。
+    private func drawCategoryLabel(_ roi: MosaicROI, near rect: NSRect, color: NSColor) {
+        let text = roi.category.displayName
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .foregroundColor: NSColor.white,
+            .backgroundColor: color.withAlphaComponent(0.85)
+        ]
+        let size = text.size(withAttributes: attributes)
+        let y = rect.minY - size.height - 2 >= 0 ? rect.minY - size.height - 2 : rect.minY + 2
+        text.draw(at: CGPoint(x: max(0, rect.minX), y: y), withAttributes: attributes)
     }
 
     private func drawShape(_ shape: ROIShape, rect: NSRect, color: NSColor) {

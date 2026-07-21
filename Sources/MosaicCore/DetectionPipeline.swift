@@ -114,7 +114,8 @@ public final class VisionPersonDetector: PersonDetecting {
     }
 
     private func cgImage(from buffer: CVPixelBuffer) -> CGImage? {
-        let ciImage = CIImage(cvPixelBuffer: buffer)
+        // CVPixelBuffer→CIImage→CGImage の経路は最終表示で上下反転する（GUI確認で判明）ため垂直反転で補正する。
+        let ciImage = CIImage(cvPixelBuffer: buffer).verticallyFlippedForRaster()
         return context.createCGImage(ciImage, from: ciImage.extent)
     }
 }
