@@ -373,6 +373,39 @@ import Testing
     }
 }
 
+@Test func yoloDatasetExporterWritesImagesAndLabels() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+    let libraryRoot = root.appendingPathComponent("Library")
+    let exportRoot = root.appendingPathComponent("Dataset")
+    let engine = LibraryEngine(rootURL: libraryRoot)
+    let image = try makeSolidImage(width: 64, height: 48)
+
+    let item = try engine.importOriginal(image, sourceName: "sample.png")
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+        confidence: 1,
+        source: "manual",
+        shape: .ellipse,
+        category: .nipple
+    )
+    _ = try engine.saveProcessedImage(image, rois: [roi], for: item.id)
+
+    let result = try YOLODatasetExporter.export(items: try engine.loadItems(), libraryEngine: engine, to: exportRoot)
+
+    #expect(result.imageCount == 1)
+    #expect(result.roiCount == 1)
+    let label = try String(
+        contentsOf: exportRoot.appendingPathComponent("labels/\(item.id.uuidString).txt"),
+        encoding: .utf8
+    )
+    let nippleIndex = MosaicTargetCategory.allCases.firstIndex(of: .nipple)!
+    #expect(label.hasPrefix("\(nippleIndex) 0.500000 0.500000 0.500000 0.500000"))
+    #expect(FileManager.default.fileExists(atPath: exportRoot.appendingPathComponent("images/\(item.id.uuidString).png").path))
+    #expect(FileManager.default.fileExists(atPath: exportRoot.appendingPathComponent("classes.txt").path))
+    #expect(FileManager.default.fileExists(atPath: exportRoot.appendingPathComponent("dataset.yaml").path))
+}
+
 @Test func learningEngineDHashIsStableAndDiscriminative() throws {
     let image = try makePatternImage(width: 200, height: 200)
     let rectA = NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3)

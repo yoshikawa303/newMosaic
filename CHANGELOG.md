@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00001 - Build 28 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- ライブラリのアノテーション（元画像+保存済みROI）をYOLO形式の学習データセットとしてエクスポートする機能を追加した（「学習用エクスポート（YOLO形式）」ボタン）。以後のモザイク作業がそのまま漫画・アニメ・実写対応モデルの教師データになる。
+
+■更新履歴
+
+- `YOLODatasetExporter` を新設（images/・labels/（class cx cy w h 正規化座標）・classes.txt・dataset.yaml を出力。完全ローカル処理、単体テスト付き）。
+- DETECTION_IMPROVEMENT_PLAN.md §6.1 B（自前ファインチューニング）の先行実装。
+
+
 ## v0.0.00001 - Build 27 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）

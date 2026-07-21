@@ -1098,10 +1098,17 @@ final class MosaicWindowController: NSObject {
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
+        let exportButton = NSButton(title: "学習用エクスポート（YOLO形式）", target: self, action: #selector(exportTrainingDataset))
+        let secondButtons = NSStackView(views: [exportButton])
+        secondButtons.orientation = .horizontal
+        secondButtons.spacing = 8
+        secondButtons.translatesAutoresizingMaskIntoConstraints = false
+
         panel.addSubview(title)
         panel.addSubview(modeRow)
         panel.addSubview(libraryScrollView)
         panel.addSubview(buttons)
+        panel.addSubview(secondButtons)
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
             title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
@@ -1115,10 +1122,37 @@ final class MosaicWindowController: NSObject {
             buttons.topAnchor.constraint(equalTo: libraryScrollView.bottomAnchor, constant: 8),
             buttons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             buttons.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
-            buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
+            secondButtons.topAnchor.constraint(equalTo: buttons.bottomAnchor, constant: 6),
+            secondButtons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
+            secondButtons.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            secondButtons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
         ])
         updateLibraryModeVisibility()
         return panel
+    }
+
+    /// ライブラリのアノテーション（元画像+保存済みROI）をYOLO形式でエクスポートする。
+    /// 出力先はユーザーがフォルダ選択。以後のモザイク作業がそのまま学習データになる。
+    @objc private func exportTrainingDataset() {
+        let annotated = libraryItems.filter { !$0.rois.isEmpty }
+        guard !annotated.isEmpty else {
+            updateStatus("エクスポート対象がありません（ROIを保存した画像が必要です）")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "エクスポート"
+        panel.message = "YOLO形式データセットの出力先フォルダを選択してください"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let result = try YOLODatasetExporter.export(items: annotated, libraryEngine: libraryEngine, to: url)
+            updateStatus("学習用データセットを書き出しました: 画像\(result.imageCount)件 / ROI \(result.roiCount)件")
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            showError(error)
+        }
     }
 
     private func configureCollectionView() {
