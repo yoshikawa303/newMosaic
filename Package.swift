@@ -23,7 +23,9 @@ let package = Package(
             ],
             resources: [
                 // deepghs/anime_censor_detection censor_detect_v1.0_s (MIT License)
-                .copy("Resources/censor_detect.onnx")
+                .copy("Resources/censor_detect.onnx"),
+                // deepghs/anime_person_detection person_detect_v1.3_s (MIT License)
+                .copy("Resources/person_detect.onnx")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),

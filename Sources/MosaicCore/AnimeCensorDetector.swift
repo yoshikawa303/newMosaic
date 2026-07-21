@@ -75,24 +75,20 @@ public enum YOLODecoder {
     }
 }
 
-/// アニメ・イラスト向けのNSFW部位検出器（内容ベース検出）。
-/// モデル: deepghs/anime_censor_detection censor_detect_v1.0_s（MITライセンス, YOLOv8系ONNX,
-/// クラス: nipple_f / penis / pussy）。ONNX Runtimeで完全ローカル実行し、画像の外部送信は行わない。
-/// DETECTION_IMPROVEMENT_PLAN.md §6.1 A / §6.2 の実装。
-public final class AnimeCensorDetector {
-    public static let inputSize = 640
-    /// labels.json の順序（nipple_f, penis, pussy）に対応するアプリ内カテゴリ。
-    static let classCategories: [MosaicTargetCategory] = [.nipple, .maleGenital, .femaleGenital]
+/// 同梱YOLOv8系ONNXモデルの共通実行ヘルパー（前処理→ONNX Runtime推論→デコード）。
+/// 完全ローカル実行。画像・検出結果の外部送信は行わない。
+final class YOLOONNXModel {
+    static let inputSize = 640
 
     private let env: ORTEnv
     private let session: ORTSession
     private let inputName: String
     private let outputName: String
 
-    public init() throws {
-        guard let modelURL = Bundle.module.url(forResource: "censor_detect", withExtension: "onnx") else {
+    init(resourceName: String) throws {
+        guard let modelURL = Bundle.module.url(forResource: resourceName, withExtension: "onnx") else {
             throw CocoaError(.fileNoSuchFile, userInfo: [
-                NSLocalizedDescriptionKey: "アニメ部位検出モデル（censor_detect.onnx）が見つかりません"
+                NSLocalizedDescriptionKey: "検出モデル（\(resourceName).onnx）が見つかりません"
             ])
         }
         env = try ORTEnv(loggingLevel: .warning)
@@ -102,8 +98,11 @@ public final class AnimeCensorDetector {
         outputName = try session.outputNames().first ?? "output0"
     }
 
-    /// 画像からNSFW部位を検出し、カテゴリ付きROIとして返す。
-    public func detect(in image: CGImage, confidenceThreshold: Double = 0.3) throws -> [MosaicROI] {
+    func detect(
+        in image: CGImage,
+        classCount: Int,
+        confidenceThreshold: Double
+    ) throws -> [YOLODecoder.Detection] {
         var tensor = Self.preprocess(image)
         let data = NSMutableData(
             bytes: &tensor,
@@ -125,18 +124,10 @@ public final class AnimeCensorDetector {
 
         return YOLODecoder.decode(
             output: floats,
-            classCount: Self.classCategories.count,
+            classCount: classCount,
             confidenceThreshold: confidenceThreshold,
             inputSize: Self.inputSize
-        ).map { detection in
-            MosaicROI(
-                rect: detection.rect,
-                confidence: detection.score,
-                source: "anime-censor",
-                shape: .ellipse,
-                category: Self.classCategories[detection.classIndex]
-            )
-        }
+        )
     }
 
     /// 640x640 RGB（0-1正規化）のCHW配列へ変換する（アスペクト比は無視して単純リサイズ）。
@@ -166,5 +157,53 @@ public final class AnimeCensorDetector {
             tensor[2 * plane + index] = Float(rgba[offset + 2]) / 255.0
         }
         return tensor
+    }
+}
+
+/// アニメ・イラスト向けのNSFW部位検出器（内容ベース検出）。
+/// モデル: deepghs/anime_censor_detection censor_detect_v1.0_s（MITライセンス, YOLOv8系ONNX,
+/// クラス: nipple_f / penis / pussy）。DETECTION_IMPROVEMENT_PLAN.md §6.1 A / §6.2 の実装。
+public final class AnimeCensorDetector {
+    /// labels.json の順序（nipple_f, penis, pussy）に対応するアプリ内カテゴリ。
+    static let classCategories: [MosaicTargetCategory] = [.nipple, .maleGenital, .femaleGenital]
+
+    private let model: YOLOONNXModel
+
+    public init() throws {
+        model = try YOLOONNXModel(resourceName: "censor_detect")
+    }
+
+    /// 画像からNSFW部位を検出し、カテゴリ付きROIとして返す。
+    public func detect(in image: CGImage, confidenceThreshold: Double = 0.3) throws -> [MosaicROI] {
+        try model.detect(
+            in: image,
+            classCount: Self.classCategories.count,
+            confidenceThreshold: confidenceThreshold
+        ).map { detection in
+            MosaicROI(
+                rect: detection.rect,
+                confidence: detection.score,
+                source: "anime-censor",
+                shape: .ellipse,
+                category: Self.classCategories[detection.classIndex]
+            )
+        }
+    }
+}
+
+/// アニメ・イラスト向けの人物検出器（バウンディングボックス）。
+/// モデル: deepghs/anime_person_detection person_detect_v1.3_s（MITライセンス, YOLOv8系ONNX, クラス: person）。
+/// 実写学習のVisionセグメンテーションがイラストで部分的にしか反応しない問題への対応（計画書§6.1 D）。
+/// シルエットマスクは生成しない（矩形のみ。マスクは将来のアニメセグメンテーションモデルで対応）。
+public final class AnimePersonDetector {
+    private let model: YOLOONNXModel
+
+    public init() throws {
+        model = try YOLOONNXModel(resourceName: "person_detect")
+    }
+
+    public func detectPersons(in image: CGImage, confidenceThreshold: Double = 0.3) throws -> [PersonDetection] {
+        try model.detect(in: image, classCount: 1, confidenceThreshold: confidenceThreshold)
+            .map { PersonDetection(bounds: $0.rect) }
     }
 }

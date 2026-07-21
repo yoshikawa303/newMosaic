@@ -214,6 +214,8 @@ final class MosaicWindowController: NSObject {
     private let learningEngine: LearningEngine? = try? LearningEngine.defaultStore()
     /// アニメ・イラスト用のNSFW部位検出器（初回アクセス時にモデルロード。失敗時はnil=従来動作）
     private lazy var animeCensorDetector: AnimeCensorDetector? = try? AnimeCensorDetector()
+    /// アニメ・イラスト用の人物検出器（矩形。イラストでのVisionシルエット不安定問題への対応）
+    private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -482,8 +484,11 @@ final class MosaicWindowController: NSObject {
         canvas.onManualEditWillBegin = { [weak self] in
             guard let self else { return }
             self.pushUndoSnapshot(self.currentEditorState())
-            // 編集開始時はモザイク表示を解除し、元画像上でROIを再編集できるようにする
-            self.dismissMosaicPreview()
+            // 編集中は元画像表示に切り替える（チェック状態は維持し、編集完了時に自動で再適用）
+            self.suspendMosaicPreview()
+        }
+        canvas.onManualEditDidEnd = { [weak self] in
+            self?.resumeMosaicPreviewIfNeeded()
         }
         canvas.onROISelectionChanged = { [weak self] roi in
             guard let self, let roi else { return }
@@ -807,13 +812,7 @@ final class MosaicWindowController: NSObject {
         }
         let previousState = currentEditorState()
         do {
-            let snapshot = try pipeline.generateDetailedCandidates(for: loadedImage.cgImage)
-            pushUndoSnapshot(previousState)
-            dismissMosaicPreview()
-            var rois = snapshot.rois
-
-            // 実写/イラスト・漫画を判定し、イラスト系はアニメ部位検出モデル（内容ベース検出）を実行して統合する。
-            // 「画像種別」が手動指定の場合は自動判定より優先する。
+            // 実写/イラスト・漫画を先に判定する（「画像種別」の手動指定は自動判定より優先）
             let domain: ImageDomain
             let domainSourceNote: String
             switch domainModeControl.indexOfSelectedItem {
@@ -827,6 +826,26 @@ final class MosaicWindowController: NSObject {
                 domain = DomainClassifier.classify(loadedImage.cgImage)
                 domainSourceNote = "自動判定"
             }
+
+            // 検出経路をドメインで切替える:
+            // - 実写: Vision（インスタンスマスク+骨格）ベースの既存パイプライン
+            // - イラスト/漫画: アニメ人物検出（矩形）。実写学習のVisionシルエットが
+            //   イラストでは部分的にしか反応しないため使用しない。骨格モデルは未導入のため骨格なし。
+            let snapshot: DetectionSnapshot
+            if domain == .illustration {
+                let persons = (try? animePersonDetector?.detectPersons(in: loadedImage.cgImage)) ?? []
+                let hints = persons.map {
+                    PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: [])
+                }
+                snapshot = DetectionSnapshot(persons: persons, poseHints: hints, rois: [])
+            } else {
+                snapshot = try pipeline.generateDetailedCandidates(for: loadedImage.cgImage)
+            }
+            pushUndoSnapshot(previousState)
+            suspendMosaicPreview()
+            var rois = snapshot.rois
+
+            // イラスト/漫画ではアニメ部位検出モデル（内容ベース検出）を実行して統合する
             var animeDetectionCount = 0
             if domain == .illustration, let detector = animeCensorDetector {
                 let animeROIs = (try? detector.detect(in: loadedImage.cgImage)) ?? []
@@ -858,6 +877,8 @@ final class MosaicWindowController: NSObject {
             )
             // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
             showAllLayers()
+            // 「モザイク表示」チェックがONなら新しい候補で自動的に再適用する
+            resumeMosaicPreviewIfNeeded()
 
             let domainNote: String
             if domain == .illustration {
@@ -960,12 +981,35 @@ final class MosaicWindowController: NSObject {
         }
     }
 
-    /// モザイク表示を解除して元画像へ戻す（ROIは保持）。編集開始・候補生成・クリア時に呼ぶ。
-    private func dismissMosaicPreview() {
-        guard mosaicPreviewCheckbox.state == .on || renderedImage != nil else { return }
-        mosaicPreviewCheckbox.state = .off
+    /// 編集中はモザイク表示を一時停止して元画像を表示する（「モザイク表示」チェックの状態は変更しない。
+    /// チェックはユーザー操作でのみ変わる仕様。編集完了後に `resumeMosaicPreviewIfNeeded()` で自動再適用する）。
+    private func suspendMosaicPreview() {
+        guard renderedImage != nil else { return }
         renderedImage = nil
         if let loadedImage {
+            canvas.setImage(loadedImage.cgImage)
+        }
+    }
+
+    /// 「モザイク表示」チェックがONなら現在のROIでモザイクを再レンダリングして表示する。
+    /// ROIが空の場合や失敗時は元画像表示（チェック状態は維持）。
+    private func resumeMosaicPreviewIfNeeded() {
+        guard mosaicPreviewCheckbox.state == .on, let loadedImage else { return }
+        guard !canvas.rois.isEmpty else {
+            renderedImage = nil
+            canvas.setImage(loadedImage.cgImage)
+            return
+        }
+        do {
+            let output = try mosaicEngine.applyMosaic(
+                to: loadedImage.cgImage,
+                rois: canvas.rois,
+                segmentEngine: currentSegmentEngine()
+            )
+            renderedImage = output
+            canvas.setImage(output)
+        } catch {
+            renderedImage = nil
             canvas.setImage(loadedImage.cgImage)
         }
     }
@@ -1012,8 +1056,9 @@ final class MosaicWindowController: NSObject {
     @objc private func clearROIs() {
         guard !canvas.rois.isEmpty else { return }
         pushUndoSnapshot(currentEditorState())
-        dismissMosaicPreview()
+        suspendMosaicPreview()
         canvas.rois = []
+        resumeMosaicPreviewIfNeeded()
         updateStatus("ROIをクリアしました")
     }
 
@@ -1042,9 +1087,16 @@ final class MosaicWindowController: NSObject {
     private func applyEditorState(_ state: EditorState) {
         canvas.rois = state.rois
         renderedImage = state.renderedImage
-        mosaicPreviewCheckbox.state = state.renderedImage != nil ? .on : .off
-        if let loadedImage {
-            canvas.setImage(state.renderedImage ?? loadedImage.cgImage)
+        guard let loadedImage else { return }
+        // 「モザイク表示」チェックはユーザー操作でのみ変わる。チェック状態に合わせて表示を復元する。
+        if mosaicPreviewCheckbox.state == .on {
+            if let rendered = state.renderedImage {
+                canvas.setImage(rendered)
+            } else {
+                resumeMosaicPreviewIfNeeded()
+            }
+        } else {
+            canvas.setImage(loadedImage.cgImage)
         }
     }
 
@@ -1840,6 +1892,7 @@ final class ImageCanvasView: NSView {
 
     var onROIsChanged: (([MosaicROI]) -> Void)?
     var onManualEditWillBegin: (() -> Void)?
+    var onManualEditDidEnd: (() -> Void)?
     var onROISelectionChanged: ((MosaicROI?) -> Void)?
 
     private var lastSize: [ROIShape: NSSize] = [:]
@@ -1917,6 +1970,7 @@ final class ImageCanvasView: NSView {
                 onManualEditWillBegin?()
                 if selectedROIID == hit.id { selectedROIID = nil }
                 rois.removeAll { $0.id == hit.id }
+                onManualEditDidEnd?()
                 return
             }
         }
@@ -1993,12 +2047,16 @@ final class ImageCanvasView: NSView {
                 lastSize[rois[index].shape] = NSSize(width: rois[index].rect.width, height: rois[index].rect.height)
             }
             needsDisplay = true
+            onManualEditDidEnd?()
             return
         }
 
-        if moveState != nil {
+        if let move = moveState {
             moveState = nil
             needsDisplay = true
+            if move.didBeginEdit {
+                onManualEditDidEnd?()
+            }
             return
         }
 
@@ -2029,6 +2087,7 @@ final class ImageCanvasView: NSView {
         let roi = MosaicROI(rect: normalized, confidence: 1, source: "manual", shape: currentShape, category: currentCategory)
         rois.append(roi)
         selectedROIID = roi.id
+        onManualEditDidEnd?()
     }
 
     private func addROIWithRememberedSize(at point: NSPoint) {
@@ -2049,6 +2108,7 @@ final class ImageCanvasView: NSView {
         let roi = MosaicROI(rect: rect, confidence: 1, source: "manual", shape: currentShape, category: currentCategory)
         rois.append(roi)
         selectedROIID = roi.id
+        onManualEditDidEnd?()
     }
 
     private func handleAnchor(at point: NSPoint, roi: MosaicROI, imageRect: NSRect) -> NSPoint? {

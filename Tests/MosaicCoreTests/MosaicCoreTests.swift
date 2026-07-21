@@ -423,6 +423,16 @@ import Testing
     #expect(rois.isEmpty)
 }
 
+@Test func animePersonDetectorLoadsModelAndRunsOnPlainImage() throws {
+    // アニメ人物検出モデルのロードと推論実行のスモークテスト（単色画像では検出0件のはず）
+    let detector = try AnimePersonDetector()
+    let image = try makeSolidImage(width: 320, height: 240)
+
+    let persons = try detector.detectPersons(in: image)
+
+    #expect(persons.isEmpty)
+}
+
 @Test func domainClassifierSeparatesFlatAndTexturedImages() throws {
     // 単色（平坦=イラスト的）とテクスチャ（隣接差分が大きい=実写的）を判別できることを検証する
     let flat = try makeSolidImage(width: 200, height: 200)
