@@ -202,7 +202,8 @@ final class MosaicWindowController: NSObject {
     private(set) var view = NSView()
 
     private let imageLoader = ImageLoader()
-    private let pipeline = StaticImageMosaicPipeline()
+    private let roiGenerator: SensitiveROIGenerator
+    private let pipeline: StaticImageMosaicPipeline
     private let mosaicEngine = MosaicEngine()
     private let historyEngine = HistoryEngine()
     private let libraryEngine: LibraryEngine = (try? LibraryEngine.defaultLibrary())
@@ -238,6 +239,9 @@ final class MosaicWindowController: NSObject {
     private let autoGenerateCheckbox = NSButton(checkboxWithTitle: "自動候補生成", target: nil, action: nil)
     private let autoSaveCheckbox = NSButton(checkboxWithTitle: "自動保存", target: nil, action: nil)
     private let mosaicPreviewCheckbox = NSButton(checkboxWithTitle: "モザイク表示", target: nil, action: nil)
+    private let groinPositionSlider = NSSlider(value: 0.45, minValue: 0.2, maxValue: 0.8, target: nil, action: nil)
+    private let groinPositionValueLabel = NSTextField(labelWithString: "45%")
+    private static let groinPositionDefaultsKey = "GroinPositionRatio"
     private var ungroupedLayers: [LayerLeaf] = [
         LayerLeaf(kind: .image, isVisible: true),
         LayerLeaf(kind: .roi, isVisible: true)
@@ -283,7 +287,13 @@ final class MosaicWindowController: NSObject {
     private let imageEditStateLimit = 8
 
     override init() {
+        let savedRatio = UserDefaults.standard.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
+        let generator = SensitiveROIGenerator(groinPositionRatio: savedRatio)
+        self.roiGenerator = generator
+        self.pipeline = StaticImageMosaicPipeline(roiGenerator: generator)
         super.init()
+        groinPositionSlider.doubleValue = savedRatio
+        groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100))%"
         let root = NSView()
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -341,9 +351,14 @@ final class MosaicWindowController: NSObject {
         editToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 2, right: 12)
         editToolbar.translatesAutoresizingMaskIntoConstraints = false
 
+        let groinPositionLabel = NSTextField(labelWithString: "鼠径部位置:")
+        groinPositionSlider.translatesAutoresizingMaskIntoConstraints = false
+        groinPositionSlider.widthAnchor.constraint(equalToConstant: 100).isActive = true
+
         let optionToolbar = NSStackView(views: [
             personLayerCheckbox, poseLayerCheckbox,
-            autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox
+            autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox,
+            groinPositionLabel, groinPositionSlider, groinPositionValueLabel
         ])
         optionToolbar.orientation = .horizontal
         optionToolbar.alignment = .centerY
@@ -436,6 +451,8 @@ final class MosaicWindowController: NSObject {
         poseLayerCheckbox.action = #selector(toggleDetectionLayers)
         mosaicPreviewCheckbox.target = self
         mosaicPreviewCheckbox.action = #selector(toggleMosaicPreview)
+        groinPositionSlider.target = self
+        groinPositionSlider.action = #selector(groinPositionChanged)
         reloadLayerList()
 
         canvas.currentShape = .ellipse
@@ -498,6 +515,15 @@ final class MosaicWindowController: NSObject {
         } else {
             updateStatus("新規追加ROIのカテゴリ: \(category.displayName)")
         }
+    }
+
+    /// 鼠径部ROIの位置基準（腰0%〜膝100%の比率）を事前補正する。設定は永続化され、次回の候補生成から適用される。
+    @objc private func groinPositionChanged() {
+        let ratio = groinPositionSlider.doubleValue
+        roiGenerator.groinPositionRatio = ratio
+        UserDefaults.standard.set(ratio, forKey: Self.groinPositionDefaultsKey)
+        groinPositionValueLabel.stringValue = "\(Int(ratio * 100))%"
+        updateStatus("鼠径部位置の基準: 腰から膝方向へ\(Int(ratio * 100))%（次回の候補生成から適用）")
     }
 
     @objc private func toggleDetectionLayers() {
@@ -2037,18 +2063,21 @@ final class ImageCanvasView: NSView {
     }
 
     private func drawBones(_ bones: [(from: CGPoint, to: CGPoint)], jointPoints: [CGPoint], imageRect: NSRect) {
-        NSColor.systemOrange.setStroke()
+        // ボーン線は枠線（2px）より2段階太く、枠線より暗い色で描画する
+        let boneColor = NSColor.systemOrange.blended(withFraction: 0.4, of: .black) ?? .systemOrange
+        boneColor.setStroke()
         for bone in bones {
             let path = NSBezierPath()
             path.move(to: viewPoint(bone.from, imageRect: imageRect))
             path.line(to: viewPoint(bone.to, imageRect: imageRect))
-            path.lineWidth = 2
+            path.lineWidth = 4
+            path.lineCapStyle = .round
             path.stroke()
         }
-        NSColor.systemOrange.setFill()
+        boneColor.setFill()
         for joint in jointPoints {
             let center = viewPoint(joint, imageRect: imageRect)
-            NSBezierPath(ovalIn: NSRect(x: center.x - 3, y: center.y - 3, width: 6, height: 6)).fill()
+            NSBezierPath(ovalIn: NSRect(x: center.x - 4, y: center.y - 4, width: 8, height: 8)).fill()
         }
     }
 

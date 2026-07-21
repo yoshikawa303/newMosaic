@@ -98,6 +98,34 @@ import Testing
     }
 }
 
+@Test func roiGeneratorGroinPositionRatioShiftsROIDownward() {
+    let joints = [
+        PoseJoint(name: .leftHip, x: 0.42, y: 0.50, confidence: 0.9),
+        PoseJoint(name: .rightHip, x: 0.58, y: 0.50, confidence: 0.9),
+        PoseJoint(name: .leftKnee, x: 0.42, y: 0.80, confidence: 0.9),
+        PoseJoint(name: .rightKnee, x: 0.58, y: 0.80, confidence: 0.9)
+    ]
+    let hint = PoseHint(
+        bodyBounds: NormalizedRect(x: 0.2, y: 0.1, width: 0.6, height: 0.8),
+        lowerBodyBounds: NormalizedRect(x: 0.3, y: 0.5, width: 0.4, height: 0.3),
+        joints: joints
+    )
+    let imageSize = CGSize(width: 800, height: 1200)
+
+    let upper = SensitiveROIGenerator(groinPositionRatio: 0.3)
+        .generateROIs(from: [hint], imageSize: imageSize)
+        .first { $0.source == "pose-groin" }
+    let lower = SensitiveROIGenerator(groinPositionRatio: 0.6)
+        .generateROIs(from: [hint], imageSize: imageSize)
+        .first { $0.source == "pose-groin" }
+
+    let upperCenterY = (upper?.rect.y ?? 0) + (upper?.rect.height ?? 0) / 2
+    let lowerCenterY = (lower?.rect.y ?? 0) + (lower?.rect.height ?? 0) / 2
+    #expect(lowerCenterY > upperCenterY)
+    // ratio 0.6: 腰y0.5 + (膝0.8-腰0.5)*0.6 = 0.68
+    #expect(abs(lowerCenterY - 0.68) < 0.01)
+}
+
 @Test func poseHintDecodesLegacyJSONWithoutJoints() throws {
     let json = """
     {"bodyBounds":{"x":0.1,"y":0.1,"width":0.5,"height":0.5},"lowerBodyBounds":{"x":0.2,"y":0.4,"width":0.3,"height":0.2}}

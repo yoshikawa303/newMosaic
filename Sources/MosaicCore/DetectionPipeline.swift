@@ -247,7 +247,14 @@ public final class HeuristicPoseEstimator: PoseEstimating {
 /// 骨格関節からの解剖学的プライアで、カテゴリ付きROI（胸部=乳首、鼠径部）を人物ごとに生成する。
 /// 性別分類器が未導入のため、鼠径部ROIのカテゴリは `.other` に留める（Phase 2で分類予定）。
 public final class SensitiveROIGenerator: ROIGenerating {
-    public init() {}
+    /// 鼠径部ROIの中心位置。腰関節(0.0)から膝関節(1.0)へ向かう線分上の比率。
+    /// 実画像でのフィードバック（従来0.3では性器位置より上）を受け、既定を0.45とした。
+    /// UIのスライダーから事前補正できる（次回の候補生成から適用）。
+    public var groinPositionRatio: Double
+
+    public init(groinPositionRatio: Double = 0.45) {
+        self.groinPositionRatio = groinPositionRatio
+    }
 
     public func generateROIs(from poseHints: [PoseHint], imageSize: CGSize) -> [MosaicROI] {
         poseHints.flatMap { hint in
@@ -285,7 +292,8 @@ public final class SensitiveROIGenerator: ROIGenerating {
             let hipWidth = (leftHip != nil && rightHip != nil)
                 ? max(0.02, abs(leftHip!.x - rightHip!.x))
                 : max(0.02, hint.bodyBounds.width * 0.3)
-            let drop = kneeCenterY(for: hint).map { max(0.01, ($0 - hip.y) * 0.3) } ?? hipWidth * 0.5
+            let ratio = min(max(groinPositionRatio, 0.05), 0.95)
+            let drop = kneeCenterY(for: hint).map { max(0.01, ($0 - hip.y) * ratio) } ?? hipWidth * ratio * 1.6
             let width = hipWidth * 0.9
             let height = hipWidth * 0.7
             return MosaicROI(
