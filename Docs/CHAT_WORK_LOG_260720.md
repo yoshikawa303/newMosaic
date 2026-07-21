@@ -38,3 +38,15 @@
   ```text
   機能動作確認の為、モザイク対象の画像をブラウザ上の画像コピペでインポートし、モザイク処理行える様にして。またインポートした画像は検証用に元画像と加工後画像を保存する様にして、ライブラリ上で管理できるようにして。
   ```
+
+### 2026-07-22 01:09 JST - Codex GPT-5 - 種別: 作業結果 - クリップボード画像インポートと検証ライブラリ
+
+- 内容:
+
+  ブラウザ等でコピーした画像を `command + V` または「画像を貼り付け」ボタンから取り込み、既存の候補生成・手動ROI・モザイク適用パイプラインで処理できるようにした。取り込んだ元画像は `~/Library/Application Support/newMosaic/Library/Originals/`、加工後画像は `Processed/`、索引は `index.json` に保存する。
+
+  画面右側にライブラリ一覧を追加し、元画像と加工後画像を再表示できるようにした。`LibraryEngine` の単体テストを追加し、元画像・加工後画像・ROI付き索引の保存を検証した。
+
+  検証は `swift test` 5/5 PASS、`swift build -c release` PASS、`bash scripts/ci/agent_governance_guard.sh` PASS、`bash scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`open -g dist/newMosaic.app` 起動プロセス確認 PASS。
+
+- 作業時間: 約12分
