@@ -1,13 +1,26 @@
 import CoreGraphics
+import CoreImage
+import CoreVideo
 import Foundation
 import Vision
 
+/// 人物1名分の検出結果。マスクは人物シルエット表示用（取得できない場合はnil）。
+public struct PersonDetection {
+    public var bounds: NormalizedRect
+    public var maskImage: CGImage?
+
+    public init(bounds: NormalizedRect, maskImage: CGImage? = nil) {
+        self.bounds = bounds
+        self.maskImage = maskImage
+    }
+}
+
 public protocol PersonDetecting {
-    func detectPersonBounds(in image: CGImage) throws -> [NormalizedRect]
+    func detectPersons(in image: CGImage) throws -> [PersonDetection]
 }
 
 public protocol PoseEstimating {
-    func estimatePose(in image: CGImage, personBounds: [NormalizedRect]) throws -> [PoseHint]
+    func estimatePose(in image: CGImage, persons: [PersonDetection]) throws -> [PoseHint]
 }
 
 public protocol ROIGenerating {
@@ -18,54 +31,289 @@ public protocol CandidateDetecting {
     func refineCandidates(_ rois: [MosaicROI], image: CGImage) throws -> [MosaicROI]
 }
 
+/// Vision人物インスタンスマスク（最大4人）による実位置検出。
+/// 5人以上や失敗時は人物矩形検出へフォールバックする。
 public final class VisionPersonDetector: PersonDetecting {
+    private let context = CIContext(options: [.cacheIntermediates: false])
+
     public init() {}
 
-    public func detectPersonBounds(in image: CGImage) throws -> [NormalizedRect] {
-        if #available(macOS 14.0, *) {
-            let request = VNGeneratePersonSegmentationRequest()
-            request.qualityLevel = .balanced
-            request.outputPixelFormat = kCVPixelFormatType_OneComponent8
-            let handler = VNImageRequestHandler(cgImage: image, options: [:])
-            try handler.perform([request])
-            if request.results?.isEmpty == false {
-                return [NormalizedRect(x: 0.18, y: 0.08, width: 0.64, height: 0.84)]
+    public func detectPersons(in image: CGImage) throws -> [PersonDetection] {
+        if let persons = try? detectWithInstanceMasks(in: image), !persons.isEmpty {
+            return persons
+        }
+        return try detectWithHumanRectangles(in: image)
+    }
+
+    private func detectWithInstanceMasks(in image: CGImage) throws -> [PersonDetection] {
+        let request = VNGeneratePersonInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        try handler.perform([request])
+        guard let observation = request.results?.first else { return [] }
+
+        var persons: [PersonDetection] = []
+        for instance in observation.allInstances.sorted() {
+            guard let bounds = Self.instanceBounds(in: observation.instanceMask, instance: instance) else { continue }
+            let maskBuffer = try? observation.generateScaledMaskForImage(
+                forInstances: IndexSet(integer: instance),
+                from: handler
+            )
+            let maskImage = maskBuffer.flatMap { cgImage(from: $0) }
+            persons.append(PersonDetection(bounds: bounds, maskImage: maskImage))
+        }
+        return persons
+    }
+
+    private func detectWithHumanRectangles(in image: CGImage) throws -> [PersonDetection] {
+        let request = VNDetectHumanRectanglesRequest()
+        request.upperBodyOnly = false
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        try handler.perform([request])
+        return (request.results ?? []).map {
+            PersonDetection(bounds: Self.normalizedRect(fromVisionRect: $0.boundingBox))
+        }
+    }
+
+    /// インスタンスラベルマップ（画素値=インスタンス番号）から該当インスタンスの外接矩形を求める。
+    static func instanceBounds(in labelMap: CVPixelBuffer, instance: Int) -> NormalizedRect? {
+        CVPixelBufferLockBaseAddress(labelMap, .readOnly)
+        defer { CVPixelBufferUnlockBaseAddress(labelMap, .readOnly) }
+        guard let base = CVPixelBufferGetBaseAddress(labelMap) else { return nil }
+        let width = CVPixelBufferGetWidth(labelMap)
+        let height = CVPixelBufferGetHeight(labelMap)
+        let bytesPerRow = CVPixelBufferGetBytesPerRow(labelMap)
+        guard width > 0, height > 0, instance >= 0, instance <= UInt8.max else { return nil }
+
+        let target = UInt8(instance)
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            let row = base.advanced(by: y * bytesPerRow).assumingMemoryBound(to: UInt8.self)
+            for x in 0..<width where row[x] == target {
+                if x < minX { minX = x }
+                if x > maxX { maxX = x }
+                if y < minY { minY = y }
+                if y > maxY { maxY = y }
             }
         }
-        return [NormalizedRect(x: 0.24, y: 0.08, width: 0.52, height: 0.84)]
+        guard maxX >= minX, maxY >= minY else { return nil }
+        return NormalizedRect(
+            x: Double(minX) / Double(width),
+            y: Double(minY) / Double(height),
+            width: Double(maxX - minX + 1) / Double(width),
+            height: Double(maxY - minY + 1) / Double(height)
+        )
+    }
+
+    static func normalizedRect(fromVisionRect rect: CGRect) -> NormalizedRect {
+        NormalizedRect(x: rect.minX, y: 1 - rect.minY - rect.height, width: rect.width, height: rect.height)
+    }
+
+    private func cgImage(from buffer: CVPixelBuffer) -> CGImage? {
+        let ciImage = CIImage(cvPixelBuffer: buffer)
+        return context.createCGImage(ciImage, from: ciImage.extent)
     }
 }
 
+/// Vision複数人物骨格検出。人物ごとに最も近い骨格を対応付け、関節を `PoseJoint` として保持する。
+/// 骨格が得られない人物には従来の固定比率フォールバックを適用する。
+public final class VisionPoseEstimator: PoseEstimating {
+    private static let jointMapping: [(VNHumanBodyPoseObservation.JointName, PoseJointName)] = [
+        (.nose, .nose), (.neck, .neck),
+        (.leftShoulder, .leftShoulder), (.rightShoulder, .rightShoulder),
+        (.leftElbow, .leftElbow), (.rightElbow, .rightElbow),
+        (.leftWrist, .leftWrist), (.rightWrist, .rightWrist),
+        (.root, .root),
+        (.leftHip, .leftHip), (.rightHip, .rightHip),
+        (.leftKnee, .leftKnee), (.rightKnee, .rightKnee),
+        (.leftAnkle, .leftAnkle), (.rightAnkle, .rightAnkle)
+    ]
+
+    public init() {}
+
+    public func estimatePose(in image: CGImage, persons: [PersonDetection]) throws -> [PoseHint] {
+        let request = VNDetectHumanBodyPoseRequest()
+        let handler = VNImageRequestHandler(cgImage: image, options: [:])
+        try? handler.perform([request])
+        var observations = request.results ?? []
+
+        return persons.map { person in
+            if let index = Self.bestObservationIndex(for: person.bounds, in: observations) {
+                let observation = observations.remove(at: index)
+                if let hint = Self.hint(from: observation, bodyBounds: person.bounds) {
+                    return hint
+                }
+            }
+            return HeuristicPoseEstimator.fallbackHint(for: person.bounds)
+        }
+    }
+
+    private static func bestObservationIndex(
+        for bounds: NormalizedRect,
+        in observations: [VNHumanBodyPoseObservation]
+    ) -> Int? {
+        let centerX = bounds.x + bounds.width / 2
+        let centerY = bounds.y + bounds.height / 2
+        var best: (index: Int, score: Double)?
+        for (index, observation) in observations.enumerated() {
+            guard let torso = torsoCenter(of: observation) else { continue }
+            let inside = torso.x >= bounds.x && torso.x <= bounds.x + bounds.width
+                && torso.y >= bounds.y && torso.y <= bounds.y + bounds.height
+            let score = hypot(torso.x - centerX, torso.y - centerY) + (inside ? 0 : 1)
+            if best == nil || score < best!.score {
+                best = (index, score)
+            }
+        }
+        return best?.index
+    }
+
+    private static func torsoCenter(of observation: VNHumanBodyPoseObservation) -> CGPoint? {
+        let names: [VNHumanBodyPoseObservation.JointName] = [.root, .neck, .leftHip, .rightHip, .leftShoulder, .rightShoulder]
+        var xs: [Double] = []
+        var ys: [Double] = []
+        for name in names {
+            guard let point = try? observation.recognizedPoint(name), point.confidence > 0.1 else { continue }
+            xs.append(point.location.x)
+            ys.append(1 - point.location.y)
+        }
+        guard !xs.isEmpty else { return nil }
+        return CGPoint(x: xs.reduce(0, +) / Double(xs.count), y: ys.reduce(0, +) / Double(ys.count))
+    }
+
+    private static func hint(from observation: VNHumanBodyPoseObservation, bodyBounds: NormalizedRect) -> PoseHint? {
+        var joints: [PoseJoint] = []
+        for (visionName, name) in jointMapping {
+            guard let point = try? observation.recognizedPoint(visionName), point.confidence > 0.1 else { continue }
+            joints.append(PoseJoint(
+                name: name,
+                x: point.location.x,
+                y: 1 - point.location.y,
+                confidence: Double(point.confidence)
+            ))
+        }
+        guard joints.count >= 4 else { return nil }
+        let lower = lowerBodyBounds(joints: joints) ?? HeuristicPoseEstimator.lowerBody(for: bodyBounds)
+        return PoseHint(bodyBounds: bodyBounds, lowerBodyBounds: lower, joints: joints)
+    }
+
+    private static func lowerBodyBounds(joints: [PoseJoint]) -> NormalizedRect? {
+        let hips = joints.filter { $0.name == .leftHip || $0.name == .rightHip }
+        guard !hips.isEmpty else { return nil }
+        let hipY = hips.map(\.y).reduce(0, +) / Double(hips.count)
+        let hipXs = hips.map(\.x)
+        let centerX = hipXs.reduce(0, +) / Double(hipXs.count)
+        let hipWidth = hips.count == 2 ? abs(hipXs[0] - hipXs[1]) : 0.15
+        let knees = joints.filter { $0.name == .leftKnee || $0.name == .rightKnee }
+        let bottomY = knees.isEmpty
+            ? hipY + max(0.05, hipWidth * 1.5)
+            : knees.map(\.y).reduce(0, +) / Double(knees.count)
+        let width = max(0.05, hipWidth * 2)
+        return NormalizedRect(
+            x: centerX - width / 2,
+            y: hipY,
+            width: width,
+            height: max(0.03, bottomY - hipY)
+        ).clamped()
+    }
+}
+
+/// 骨格が使えない場合の固定比率フォールバック。
 public final class HeuristicPoseEstimator: PoseEstimating {
     public init() {}
 
-    public func estimatePose(in image: CGImage, personBounds: [NormalizedRect]) throws -> [PoseHint] {
-        personBounds.map { bounds in
-            let lowerBody = NormalizedRect(
-                x: bounds.x + bounds.width * 0.18,
-                y: bounds.y + bounds.height * 0.48,
-                width: bounds.width * 0.64,
-                height: bounds.height * 0.36
-            )
-            return PoseHint(bodyBounds: bounds, lowerBodyBounds: lowerBody)
-        }
+    public func estimatePose(in image: CGImage, persons: [PersonDetection]) throws -> [PoseHint] {
+        persons.map { Self.fallbackHint(for: $0.bounds) }
+    }
+
+    static func lowerBody(for bounds: NormalizedRect) -> NormalizedRect {
+        NormalizedRect(
+            x: bounds.x + bounds.width * 0.18,
+            y: bounds.y + bounds.height * 0.48,
+            width: bounds.width * 0.64,
+            height: bounds.height * 0.36
+        )
+    }
+
+    static func fallbackHint(for bounds: NormalizedRect) -> PoseHint {
+        PoseHint(bodyBounds: bounds, lowerBodyBounds: lowerBody(for: bounds))
     }
 }
 
+/// 骨格関節からの解剖学的プライアで、カテゴリ付きROI（胸部=乳首、鼠径部）を人物ごとに生成する。
+/// 性別分類器が未導入のため、鼠径部ROIのカテゴリは `.other` に留める（Phase 2で分類予定）。
 public final class SensitiveROIGenerator: ROIGenerating {
     public init() {}
 
     public func generateROIs(from poseHints: [PoseHint], imageSize: CGSize) -> [MosaicROI] {
-        poseHints.map { hint in
-            let lower = hint.lowerBodyBounds
-            let focus = NormalizedRect(
-                x: lower.x + lower.width * 0.18,
-                y: lower.y + lower.height * 0.12,
-                width: lower.width * 0.64,
-                height: lower.height * 0.42
-            )
-            return MosaicROI(rect: focus, confidence: 0.42, source: "heuristic-lower-body")
+        poseHints.flatMap { hint in
+            chestROIs(for: hint) + [groinROI(for: hint)]
         }
+    }
+
+    private func chestROIs(for hint: PoseHint) -> [MosaicROI] {
+        guard let left = hint.joint(.leftShoulder), let right = hint.joint(.rightShoulder) else { return [] }
+        let shoulderWidth = abs(left.x - right.x)
+        guard shoulderWidth > 0.01 else { return [] }
+        let centerX = (left.x + right.x) / 2
+        let shoulderY = (left.y + right.y) / 2
+        let hipY = hipCenter(for: hint)?.y ?? (shoulderY + shoulderWidth * 1.4)
+        let torsoHeight = max(0.02, hipY - shoulderY)
+        let nippleY = shoulderY + torsoHeight * 0.32
+        let size = max(0.02, shoulderWidth * 0.24)
+        let confidence = Double(min(left.confidence, right.confidence))
+        return [-1.0, 1.0].map { side in
+            let centerXOffset = centerX + side * shoulderWidth * 0.27
+            return MosaicROI(
+                rect: NormalizedRect(x: centerXOffset - size / 2, y: nippleY - size / 2, width: size, height: size),
+                confidence: confidence,
+                source: "pose-chest",
+                shape: .ellipse,
+                category: .nipple
+            )
+        }
+    }
+
+    private func groinROI(for hint: PoseHint) -> MosaicROI {
+        if let hip = hipCenter(for: hint) {
+            let leftHip = hint.joint(.leftHip)
+            let rightHip = hint.joint(.rightHip)
+            let hipWidth = (leftHip != nil && rightHip != nil)
+                ? max(0.02, abs(leftHip!.x - rightHip!.x))
+                : max(0.02, hint.bodyBounds.width * 0.3)
+            let drop = kneeCenterY(for: hint).map { max(0.01, ($0 - hip.y) * 0.3) } ?? hipWidth * 0.5
+            let width = hipWidth * 0.9
+            let height = hipWidth * 0.7
+            return MosaicROI(
+                rect: NormalizedRect(x: hip.x - width / 2, y: hip.y + drop - height / 2, width: width, height: height),
+                confidence: 0.6,
+                source: "pose-groin",
+                shape: .ellipse,
+                category: .other
+            )
+        }
+        let lower = hint.lowerBodyBounds
+        let focus = NormalizedRect(
+            x: lower.x + lower.width * 0.18,
+            y: lower.y + lower.height * 0.12,
+            width: lower.width * 0.64,
+            height: lower.height * 0.42
+        )
+        return MosaicROI(rect: focus, confidence: 0.42, source: "heuristic-lower-body", shape: .ellipse, category: .other)
+    }
+
+    private func hipCenter(for hint: PoseHint) -> CGPoint? {
+        if let left = hint.joint(.leftHip), let right = hint.joint(.rightHip) {
+            return CGPoint(x: (left.x + right.x) / 2, y: (left.y + right.y) / 2)
+        }
+        if let root = hint.joint(.root) {
+            return CGPoint(x: root.x, y: root.y)
+        }
+        return nil
+    }
+
+    private func kneeCenterY(for hint: PoseHint) -> Double? {
+        let knees = [hint.joint(.leftKnee), hint.joint(.rightKnee)].compactMap { $0?.y }
+        guard !knees.isEmpty else { return nil }
+        return knees.reduce(0, +) / Double(knees.count)
     }
 }
 
@@ -77,6 +325,20 @@ public final class PassThroughCandidateDetector: CandidateDetecting {
     }
 }
 
+public struct DetectionSnapshot {
+    public var persons: [PersonDetection]
+    public var poseHints: [PoseHint]
+    public var rois: [MosaicROI]
+
+    public var personBounds: [NormalizedRect] { persons.map(\.bounds) }
+
+    public init(persons: [PersonDetection], poseHints: [PoseHint], rois: [MosaicROI]) {
+        self.persons = persons
+        self.poseHints = poseHints
+        self.rois = rois
+    }
+}
+
 public final class StaticImageMosaicPipeline {
     private let personDetector: PersonDetecting
     private let poseEstimator: PoseEstimating
@@ -85,7 +347,7 @@ public final class StaticImageMosaicPipeline {
 
     public init(
         personDetector: PersonDetecting = VisionPersonDetector(),
-        poseEstimator: PoseEstimating = HeuristicPoseEstimator(),
+        poseEstimator: PoseEstimating = VisionPoseEstimator(),
         roiGenerator: ROIGenerating = SensitiveROIGenerator(),
         candidateDetector: CandidateDetecting = PassThroughCandidateDetector()
     ) {
@@ -96,12 +358,17 @@ public final class StaticImageMosaicPipeline {
     }
 
     public func generateCandidates(for image: CGImage) throws -> [MosaicROI] {
-        let bounds = try personDetector.detectPersonBounds(in: image)
-        let hints = try poseEstimator.estimatePose(in: image, personBounds: bounds)
+        try generateDetailedCandidates(for: image).rois
+    }
+
+    public func generateDetailedCandidates(for image: CGImage) throws -> DetectionSnapshot {
+        let persons = try personDetector.detectPersons(in: image)
+        let hints = try poseEstimator.estimatePose(in: image, persons: persons)
         let rois = roiGenerator.generateROIs(
             from: hints,
             imageSize: CGSize(width: image.width, height: image.height)
         )
-        return try candidateDetector.refineCandidates(rois, image: image)
+        let refined = try candidateDetector.refineCandidates(rois, image: image)
+        return DetectionSnapshot(persons: persons, poseHints: hints, rois: refined)
     }
 }
