@@ -42,7 +42,13 @@ public final class VisionPersonDetector: PersonDetecting {
         if let persons = try? detectWithInstanceMasks(in: image), !persons.isEmpty {
             return persons
         }
-        return try detectWithHumanRectangles(in: image)
+        if let persons = try? detectWithHumanRectangles(in: image), !persons.isEmpty {
+            return persons
+        }
+        // 漫画・イラスト等では実写学習のVisionが人物を検出できないことがある。
+        // 検出0件で候補が全く出なくなるより、中央の人物想定矩形を1件返して
+        // 下流のヒューリスティックROI生成と手動調整の起点を維持する（Phase 1以前と同等の挙動）。
+        return [PersonDetection(bounds: NormalizedRect(x: 0.24, y: 0.08, width: 0.52, height: 0.84))]
     }
 
     private func detectWithInstanceMasks(in image: CGImage) throws -> [PersonDetection] {
@@ -66,6 +72,8 @@ public final class VisionPersonDetector: PersonDetecting {
 
     private func detectWithHumanRectangles(in image: CGImage) throws -> [PersonDetection] {
         let request = VNDetectHumanRectanglesRequest()
+        // upperBodyOnly=false（全身矩形）はrevision 2でのみ有効なため明示指定する。
+        request.revision = VNDetectHumanRectanglesRequestRevision2
         request.upperBodyOnly = false
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])

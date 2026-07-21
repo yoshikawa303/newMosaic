@@ -132,6 +132,26 @@ import Testing
     #expect(abs(bounds.height - 0.4) < 0.001)
 }
 
+@Test func personDetectorFallsBackToDefaultRegionWhenNoPersonFound() throws {
+    // 単色画像（人物なし）でも従来互換のフォールバック矩形が1件返ることを検証する。
+    // Phase 1で検出0件時に空配列を返した結果、漫画等で候補が全滅した回帰の再発防止。
+    let image = try makeSolidImage(width: 100, height: 100)
+
+    let persons = try VisionPersonDetector().detectPersons(in: image)
+
+    #expect(persons.count == 1)
+    #expect(persons[0].bounds.width > 0.3)
+}
+
+@Test func pipelineAlwaysProducesCandidates() throws {
+    // 検出が全滅してもパイプライン全体としてROI候補が最低1件生成されることを検証する。
+    let image = try makeSolidImage(width: 200, height: 200)
+
+    let rois = try StaticImageMosaicPipeline().generateCandidates(for: image)
+
+    #expect(!rois.isEmpty)
+}
+
 @Test func normalizedRectExpandedAndIntersection() {
     let rect = NormalizedRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
 
