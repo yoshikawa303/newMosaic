@@ -96,7 +96,7 @@
 - Phase 1: **実装済み**（2026-07-22, Build 10）。`VNGeneratePersonInstanceMaskRequest` + `VNDetectHumanBodyPoseRequest` + 解剖学的プライアROI生成。骨格ボーン表示・人物シルエット表示の保留も解除。
 - Phase 2: **暫定実装済み**（2026-07-22, Build 11）。`SaliencyCandidateDetector`（Visionオブジェクトネス顕著領域による候補精密化）をパイプライン既定に採用。本命の学習済み部位検出モデル（漫画+実写ファインチューニング）はデータセット・ライセンス確認後に `CandidateDetecting` 差し替えで導入する。
 - Phase 3: **実装済み**（2026-07-22, Build 12）。SAM系の代替として `VNGenerateForegroundInstanceMaskRequest` ベースの `ForegroundSegmentEngine` を「マスク生成」切替の第3項目として追加（外部モデル同梱不要）。
-- Phase 4: 未着手
+- Phase 4: **実装済み**（2026-07-22, Build 13）。`LearningEngine` による選択収集（正例/負例+パッチPNG）、人物相対の位置頻度学習、dHash知覚ハッシュによる近似画像参照、高頻度位置への `learned-prior` 自動提案。詳細は ARCHITECTURE §5.8。
 
 ## 7. リスク・留意事項
 

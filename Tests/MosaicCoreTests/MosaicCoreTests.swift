@@ -277,6 +277,76 @@ import Testing
     #expect(items[0].rois == [roi])
 }
 
+@Test func learningEngineDHashIsStableAndDiscriminative() throws {
+    let image = try makePatternImage(width: 200, height: 200)
+    let rectA = NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3)
+    let rectB = NormalizedRect(x: 0.6, y: 0.6, width: 0.3, height: 0.3)
+
+    let hashA1 = try #require(LearningEngine.dHash(of: image, in: rectA))
+    let hashA2 = try #require(LearningEngine.dHash(of: image, in: rectA))
+    let hashB = try #require(LearningEngine.dHash(of: image, in: rectB))
+
+    #expect(LearningEngine.hammingDistance(hashA1, hashA2) == 0)
+    #expect(LearningEngine.hammingDistance(hashA1, hashB) > 4)
+}
+
+@Test func learningEngineBoostsFrequentPositionsAndProposesROIs() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathComponent("Learning")
+    let engine = LearningEngine(rootURL: root)
+    let image = try makePatternImage(width: 200, height: 200)
+    let person = NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+    let roiRect = NormalizedRect(x: 0.45, y: 0.3, width: 0.1, height: 0.1)
+
+    for _ in 0..<5 {
+        let roi = MosaicROI(rect: roiRect, confidence: 1, source: "manual", shape: .ellipse, category: .nipple)
+        try engine.record(acceptedROIs: [roi], rejectedROIs: [], persons: [person], image: image)
+    }
+
+    // 同位置の自動候補は信頼度がブーストされる
+    let candidate = MosaicROI(rect: roiRect, confidence: 0.4, source: "pose-chest", shape: .ellipse, category: .nipple)
+    let refined = engine.refineCandidates([candidate], persons: [person], image: image)
+    let boosted = try #require(refined.first { $0.id == candidate.id })
+    #expect(boosted.confidence > 0.4)
+
+    // 候補ゼロでも高頻度セルからlearned-priorが提案される（別インスタンス=永続化の検証を兼ねる）
+    let reloaded = LearningEngine(rootURL: root)
+    let proposals = reloaded.refineCandidates([], persons: [person], image: image)
+    #expect(proposals.contains { $0.source == "learned-prior" && $0.category == .nipple })
+
+    // パッチPNGが正例フォルダへ収集されている
+    let patches = try FileManager.default.contentsOfDirectory(
+        at: root.appendingPathComponent("Patches/Positives"),
+        includingPropertiesForKeys: nil
+    )
+    #expect(patches.count == 5)
+}
+
+private func makePatternImage(width: Int, height: Int) throws -> CGImage {
+    guard let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width,
+        space: CGColorSpaceCreateDeviceGray(),
+        bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ), let data = context.data else {
+        throw CocoaError(.coderInvalidValue)
+    }
+    let pixels = data.assumingMemoryBound(to: UInt8.self)
+    for y in 0..<height {
+        for x in 0..<width {
+            pixels[y * width + x] = UInt8((x * 37 + y * 61) % 256)
+        }
+    }
+    guard let image = context.makeImage() else {
+        throw CocoaError(.coderInvalidValue)
+    }
+    return image
+}
+
 private func makeSolidImage(width: Int, height: Int) throws -> CGImage {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(

@@ -196,6 +196,7 @@ final class MosaicWindowController: NSObject {
     private let historyEngine = HistoryEngine()
     private let libraryEngine: LibraryEngine = (try? LibraryEngine.defaultLibrary())
         ?? LibraryEngine(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("newMosaic/Library"))
+    private let learningEngine: LearningEngine? = try? LearningEngine.defaultStore()
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -244,6 +245,9 @@ final class MosaicWindowController: NSObject {
     private var undoStack: [EditorState] = []
     private var redoStack: [EditorState] = []
     private var hasUnsavedChanges = false
+    private var lastAutoROIs: [MosaicROI] = []
+    private var lastPersonBounds: [NormalizedRect] = []
+    private var learnedROIIDs: Set<UUID> = []
 
     override init() {
         super.init()
@@ -645,7 +649,13 @@ final class MosaicWindowController: NSObject {
         do {
             let snapshot = try pipeline.generateDetailedCandidates(for: loadedImage.cgImage)
             pushUndoSnapshot(previousState)
-            canvas.rois = snapshot.rois
+            var rois = snapshot.rois
+            if let learningEngine {
+                rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
+            }
+            canvas.rois = rois
+            lastAutoROIs = rois
+            lastPersonBounds = snapshot.personBounds
             canvas.personLayerRects = snapshot.personBounds
             canvas.personLayerMasks = snapshot.persons.map { $0.maskImage.flatMap { self.tintedMask(from: $0) } }
             canvas.poseLayerRects = snapshot.poseHints.map { Self.poseDisplayRect(for: $0) }
@@ -726,6 +736,7 @@ final class MosaicWindowController: NSObject {
             if let item = currentLibraryItem {
                 currentLibraryItem = try libraryEngine.saveProcessedImage(output, rois: canvas.rois, for: item.id)
                 hasUnsavedChanges = false
+                recordLearningSamples()
                 reloadLibrary()
             }
             updateStatus("モザイク適用済み: ROI \(canvas.rois.count)件")
@@ -813,6 +824,7 @@ final class MosaicWindowController: NSObject {
             if let item = currentLibraryItem {
                 currentLibraryItem = try libraryEngine.saveProcessedImage(image, rois: canvas.rois, for: item.id)
                 hasUnsavedChanges = false
+                recordLearningSamples()
                 reloadLibrary()
             }
             updateStatus("保存しました: \(url.lastPathComponent)")
@@ -1063,9 +1075,30 @@ final class MosaicWindowController: NSObject {
             let output = renderedImage ?? loadedImage.cgImage
             currentLibraryItem = try libraryEngine.saveProcessedImage(output, rois: canvas.rois, for: item.id)
             hasUnsavedChanges = false
+            recordLearningSamples()
             reloadLibrary()
         } catch {
             showError(error)
+        }
+    }
+
+    /// 保存時に採用ROI（正例）と削除された自動候補（負例）を学習ストアへ記録する。
+    /// 同一ROIの二重計上は `learnedROIIDs` で防ぐ。画像切替でリセットされる。
+    private func recordLearningSamples() {
+        guard let learningEngine, let loadedImage else { return }
+        let accepted = canvas.rois.filter { !learnedROIIDs.contains($0.id) }
+        let rejected = lastAutoROIs.filter { auto in
+            !canvas.rois.contains { $0.id == auto.id } && !learnedROIIDs.contains(auto.id)
+        }
+        guard !accepted.isEmpty || !rejected.isEmpty else { return }
+        _ = try? learningEngine.record(
+            acceptedROIs: accepted,
+            rejectedROIs: rejected,
+            persons: lastPersonBounds,
+            image: loadedImage.cgImage
+        )
+        for roi in accepted + rejected {
+            learnedROIIDs.insert(roi.id)
         }
     }
 
@@ -1115,6 +1148,9 @@ final class MosaicWindowController: NSObject {
         syncLegacyLayerCheckboxes()
         resetUndoHistory()
         hasUnsavedChanges = false
+        lastAutoROIs = []
+        lastPersonBounds = []
+        learnedROIIDs = []
     }
 
     private func savePNG(_ image: CGImage, to url: URL) throws {
