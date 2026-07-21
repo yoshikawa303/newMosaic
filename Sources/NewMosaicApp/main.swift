@@ -221,9 +221,7 @@ final class MosaicWindowController: NSObject {
     private let poseLayerCheckbox = NSButton(checkboxWithTitle: "骨格検出レイヤ", target: nil, action: nil)
     private let categoryControl = NSPopUpButton(title: "", target: nil, action: nil)
     private let segmentEngineControl = NSPopUpButton(title: "", target: nil, action: nil)
-    private let layerButton = NSButton(title: "レイヤ...", target: nil, action: nil)
     private let layerOutlineView = NSOutlineView()
-    private let layerPopover = NSPopover()
     private let groupButton = NSButton(title: "グループ化", target: nil, action: nil)
     private let ungroupButton = NSButton(title: "グループ解除", target: nil, action: nil)
     private let autoGenerateCheckbox = NSButton(checkboxWithTitle: "自動候補生成", target: nil, action: nil)
@@ -319,7 +317,7 @@ final class MosaicWindowController: NSObject {
         let editToolbar = NSStackView(views: [
             shapeLabel, shapeControl, categoryLabel, categoryControl,
             segmentEngineLabel, segmentEngineControl,
-            personLayerCheckbox, poseLayerCheckbox, layerButton,
+            personLayerCheckbox, poseLayerCheckbox,
             autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox
         ])
         editToolbar.orientation = .horizontal
@@ -330,13 +328,28 @@ final class MosaicWindowController: NSObject {
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         let libraryPanel = makeLibraryPanel()
+        let layerPanel = makeLayerPanel()
+
+        // 右ペイン: 上=ライブラリ / 下=レイヤ。境界の上下ドラッグで比率変更できる。
+        let rightPane = NSSplitView()
+        rightPane.isVertical = false
+        rightPane.dividerStyle = .thin
+        rightPane.autosaveName = "RightPaneSplit"
+        rightPane.translatesAutoresizingMaskIntoConstraints = false
+        rightPane.addArrangedSubview(libraryPanel)
+        rightPane.addArrangedSubview(layerPanel)
+        libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+
+        // メイン分割: 左=キャンバス / 右=ライブラリ+レイヤ。左端境界の左右ドラッグで幅変更できる。
         let splitView = NSSplitView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
+        splitView.autosaveName = "MainSplit"
         splitView.translatesAutoresizingMaskIntoConstraints = false
         splitView.addArrangedSubview(canvas)
-        splitView.addArrangedSubview(libraryPanel)
-        libraryPanel.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+        splitView.addArrangedSubview(rightPane)
+        rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
         root.addSubview(toolbar)
         root.addSubview(editToolbar)
         root.addSubview(splitView)
@@ -384,11 +397,9 @@ final class MosaicWindowController: NSObject {
         personLayerCheckbox.action = #selector(toggleDetectionLayers)
         poseLayerCheckbox.target = self
         poseLayerCheckbox.action = #selector(toggleDetectionLayers)
-        layerButton.target = self
-        layerButton.action = #selector(toggleLayerPopover)
         mosaicPreviewCheckbox.target = self
         mosaicPreviewCheckbox.action = #selector(toggleMosaicPreview)
-        setUpLayerPopover()
+        reloadLayerList()
 
         canvas.currentShape = .ellipse
         canvas.currentCategory = .other
@@ -451,7 +462,7 @@ final class MosaicWindowController: NSObject {
             if leaf.kind.isPose { leaf.isVisible = poseOn }
         }
         applyLayerVisibility()
-        layerOutlineView.reloadData()
+        reloadLayerList()
     }
 
     /// 候補生成で得た人物・骨格の検出数に合わせてレイヤを再構築する。
@@ -481,12 +492,22 @@ final class MosaicWindowController: NSObject {
                 ungroupedLayers.append(LayerLeaf(kind: .pose(index), isVisible: false))
             }
         }
-        layerOutlineView.reloadData()
+        reloadLayerList()
     }
 
     // MARK: - レイヤ表示・グループ化
 
-    private func setUpLayerPopover() {
+    /// アプリウィンドウ右下（ライブラリの下）に常時表示するレイヤパネルを構築する。
+    private func makeLayerPanel() -> NSView {
+        let panel = NSView()
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.wantsLayer = true
+        panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        let title = NSTextField(labelWithString: "レイヤ")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
         layerOutlineView.headerView = nil
         layerOutlineView.dataSource = self
         layerOutlineView.delegate = self
@@ -511,36 +532,28 @@ final class MosaicWindowController: NSObject {
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
-        let panel = NSView()
-        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(title)
         panel.addSubview(scrollView)
         panel.addSubview(buttons)
         NSLayoutConstraint.activate([
-            panel.widthAnchor.constraint(equalToConstant: 260),
-            panel.heightAnchor.constraint(equalToConstant: 260),
-            scrollView.topAnchor.constraint(equalTo: panel.topAnchor, constant: 8),
+            title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            scrollView.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
             scrollView.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             scrollView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             buttons.topAnchor.constraint(equalTo: scrollView.bottomAnchor, constant: 8),
             buttons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             buttons.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
-            buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8),
-            scrollView.bottomAnchor.constraint(equalTo: buttons.topAnchor, constant: -8)
+            buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
         ])
-
-        let contentController = NSViewController()
-        contentController.view = panel
-        layerPopover.behavior = .transient
-        layerPopover.contentViewController = contentController
+        return panel
     }
 
-    @objc private func toggleLayerPopover() {
-        if layerPopover.isShown {
-            layerPopover.close()
-        } else {
-            layerOutlineView.reloadData()
-            layerPopover.show(relativeTo: layerButton.bounds, of: layerButton, preferredEdge: .maxY)
-        }
+    /// レイヤ一覧を再読込し、全階層を展開した状態で表示する（通常時は常に全展開）。
+    private func reloadLayerList() {
+        layerOutlineView.reloadData()
+        layerOutlineView.expandItem(nil, expandChildren: true)
     }
 
     @objc private func groupSelectedLayers() {
@@ -559,7 +572,7 @@ final class MosaicWindowController: NSObject {
         layerGroupCounter += 1
         let group = LayerGroup(name: "グループ\(layerGroupCounter)", children: leavesToGroup)
         layerGroups.append(group)
-        layerOutlineView.reloadData()
+        reloadLayerList()
         updateStatus("\(group.name) を作成しました")
     }
 
@@ -573,7 +586,7 @@ final class MosaicWindowController: NSObject {
             }
         }
         if didUngroup {
-            layerOutlineView.reloadData()
+            reloadLayerList()
             updateStatus("グループを解除しました")
         } else {
             updateStatus("解除するグループを選択してください")
@@ -584,7 +597,7 @@ final class MosaicWindowController: NSObject {
         leaf.isVisible.toggle()
         applyLayerVisibility()
         syncLegacyLayerCheckboxes()
-        layerOutlineView.reloadData()
+        reloadLayerList()
     }
 
     private func toggleGroupVisibility(_ group: LayerGroup) {
@@ -592,7 +605,7 @@ final class MosaicWindowController: NSObject {
         for child in group.children { child.isVisible = makeVisible }
         applyLayerVisibility()
         syncLegacyLayerCheckboxes()
-        layerOutlineView.reloadData()
+        reloadLayerList()
     }
 
     private func allLayerLeaves() -> [LayerLeaf] {
