@@ -110,6 +110,14 @@ Phase 1〜4の改善はVision（実写学習）前提であり、最重要ドメ
 
 **推奨マイルストーン**: C+A（ドメイン判定+既存アニメモデル評価導入。CoreML/ONNX統合基盤は一度作れば全モデルで再利用可能な投資ポイント）を次期、Bのエクスポート機能を先行実装、Dを後続とする。
 
+### 6.2 候補モデルのWeb調査結果（2026-07-22実施）
+
+- **deepghs/anime_censor_detection（HuggingFace）**: **MITライセンス・ONNX形式**。検出クラスは `nipple_f`（女性乳首）/`penis`/`pussy` で、本アプリのカテゴリ体系（乳首/性器（男性）/性器（女性））とほぼ一対一対応。モデルは3.01M〜11.1Mパラメータの軽量YOLO系でF1最高0.83。**アニメ部位検出の第一候補**。
+- **deepghs/nudenet_onnx（HuggingFace）**: **Apache 2.0**。実写向けNudeNetのONNX移植。実写側の内容ベース部位検出の強化にも利用可能。
+- **deepghs（DeepGHS）組織**: アニメ画像解析の非営利オープンソースコミュニティ。`dghs-imgutils` ライブラリに `detect_censors()`（部位検出）/`detect_person()`（アニメ人物検出）/顔・頭部・半身検出/アニメ・実写分類等が揃っており、前段（人物検出）のアニメ対応（§6.1 D）にも同系モデルを利用できる。
+- 統合方式: ONNX→CoreML変換（coremltools、配布がクリーン）を第一候補、ONNX Runtime直接統合を代替とする。
+- 実装状況: B（YOLOエクスポート）はBuild 28、C（ドメイン判定の初期実装）はBuild 29で実装済み。Aのモデル取得・変換・統合は**モデルダウンロードの承認待ち**（外部からの取得を伴うため）。
+
 ## 7. リスク・留意事項
 
 - `VNGeneratePersonInstanceMaskRequest` は最大4人。5人以上は矩形検出フォールバックで縮退。
