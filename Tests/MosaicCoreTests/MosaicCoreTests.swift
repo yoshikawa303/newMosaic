@@ -147,6 +147,9 @@ import Testing
     #expect(sampler.contains(x: 0.25, y: 0.5))
     #expect(!sampler.contains(x: 0.75, y: 0.5))
     #expect(!sampler.contains(x: 1.5, y: 0.5))
+    // 緩衝付き判定: 境界(x=0.5)のすぐ外側は許容し、遠く離れた点は拒否する
+    #expect(sampler.containsNear(x: 0.52, y: 0.5))
+    #expect(!sampler.containsNear(x: 0.9, y: 0.5))
 }
 
 @Test func poseHintDecodesLegacyJSONWithoutJoints() throws {
