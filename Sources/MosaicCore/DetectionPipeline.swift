@@ -120,7 +120,45 @@ public final class VisionPersonDetector: PersonDetecting {
     }
 }
 
-/// Vision複数人物骨格検出。人物ごとに最も近い骨格を対応付け、関節を `PoseJoint` として保持する。
+/// 人物シルエットマスクを縮小サンプリングし、正規化座標（左上原点）が人物領域内かを高速判定する。
+/// 骨格と人物の対応付け（関節の内包カウント）に使う。
+struct PersonMaskSampler {
+    private let width: Int
+    private let height: Int
+    private let data: [UInt8]
+
+    init?(maskImage: CGImage, sampleSize: Int = 128) {
+        var buffer = [UInt8](repeating: 0, count: sampleSize * sampleSize)
+        let drawn = buffer.withUnsafeMutableBytes { pointer -> Bool in
+            guard let context = CGContext(
+                data: pointer.baseAddress,
+                width: sampleSize,
+                height: sampleSize,
+                bitsPerComponent: 8,
+                bytesPerRow: sampleSize,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .low
+            context.draw(maskImage, in: CGRect(x: 0, y: 0, width: sampleSize, height: sampleSize))
+            return true
+        }
+        guard drawn else { return nil }
+        self.width = sampleSize
+        self.height = sampleSize
+        self.data = buffer
+    }
+
+    func contains(x: Double, y: Double) -> Bool {
+        guard x >= 0, x < 1, y >= 0, y < 1 else { return false }
+        let pixelX = Int(x * Double(width))
+        let pixelY = Int(y * Double(height))
+        return data[pixelY * width + pixelX] > 127
+    }
+}
+
+/// Vision複数人物骨格検出。シルエットマスク内の関節数を主基準とした貪欲マッチングで
+/// 骨格を人物へ対応付け、関節を `PoseJoint` として保持する。
 /// 骨格が得られない人物には従来の固定比率フォールバックを適用する。
 public final class VisionPoseEstimator: PoseEstimating {
     private static let jointMapping: [(VNHumanBodyPoseObservation.JointName, PoseJointName)] = [
@@ -140,52 +178,66 @@ public final class VisionPoseEstimator: PoseEstimating {
         let request = VNDetectHumanBodyPoseRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try? handler.perform([request])
-        var observations = request.results ?? []
+        let observations = request.results ?? []
 
-        return persons.map { person in
-            if let index = Self.bestObservationIndex(for: person.bounds, in: observations) {
-                let observation = observations.remove(at: index)
-                if let hint = Self.hint(from: observation, bodyBounds: person.bounds) {
-                    return hint
+        // 観測ごとの関節をまず抽出する（関節4点未満は骨格として採用しない）
+        let candidates: [[PoseJoint]] = observations.map { Self.joints(from: $0) }
+        // 人物ごとのシルエットマスクを縮小サンプリングし、関節の内包判定に使う
+        let samplers: [PersonMaskSampler?] = persons.map { $0.maskImage.flatMap { PersonMaskSampler(maskImage: $0) } }
+
+        // 人物矩形同士が大きく重なる構図では中心距離だけの対応付けが誤るため、
+        // 「シルエットマスク内に入る関節数」を主基準、中心距離をタイブレークとした貪欲マッチングを行う。
+        struct MatchPair {
+            let personIndex: Int
+            let observationIndex: Int
+            let insideCount: Int
+            let distance: Double
+        }
+        var pairs: [MatchPair] = []
+        for (personIndex, person) in persons.enumerated() {
+            for (observationIndex, joints) in candidates.enumerated() where joints.count >= 4 {
+                let insideCount: Int
+                if let sampler = samplers[personIndex] {
+                    insideCount = joints.filter { sampler.contains(x: $0.x, y: $0.y) }.count
+                } else {
+                    insideCount = joints.filter { person.bounds.contains(x: $0.x, y: $0.y) }.count
                 }
+                let center = Self.center(of: joints)
+                let dx = center.x - (person.bounds.x + person.bounds.width / 2)
+                let dy = center.y - (person.bounds.y + person.bounds.height / 2)
+                pairs.append(MatchPair(
+                    personIndex: personIndex,
+                    observationIndex: observationIndex,
+                    insideCount: insideCount,
+                    distance: hypot(dx, dy)
+                ))
+            }
+        }
+        pairs.sort { a, b in
+            if a.insideCount != b.insideCount { return a.insideCount > b.insideCount }
+            return a.distance < b.distance
+        }
+
+        var assigned: [Int: Int] = [:]
+        var usedObservations = Set<Int>()
+        for pair in pairs where assigned[pair.personIndex] == nil && !usedObservations.contains(pair.observationIndex) {
+            // シルエットマスクを持つ人物なのに関節が1つも入らない骨格は誤対応とみなし割り当てない
+            if samplers[pair.personIndex] != nil && pair.insideCount == 0 { continue }
+            assigned[pair.personIndex] = pair.observationIndex
+            usedObservations.insert(pair.observationIndex)
+        }
+
+        return persons.enumerated().map { index, person in
+            if let observationIndex = assigned[index] {
+                let joints = candidates[observationIndex]
+                let lower = Self.lowerBodyBounds(joints: joints) ?? HeuristicPoseEstimator.lowerBody(for: person.bounds)
+                return PoseHint(bodyBounds: person.bounds, lowerBodyBounds: lower, joints: joints)
             }
             return HeuristicPoseEstimator.fallbackHint(for: person.bounds)
         }
     }
 
-    private static func bestObservationIndex(
-        for bounds: NormalizedRect,
-        in observations: [VNHumanBodyPoseObservation]
-    ) -> Int? {
-        let centerX = bounds.x + bounds.width / 2
-        let centerY = bounds.y + bounds.height / 2
-        var best: (index: Int, score: Double)?
-        for (index, observation) in observations.enumerated() {
-            guard let torso = torsoCenter(of: observation) else { continue }
-            let inside = torso.x >= bounds.x && torso.x <= bounds.x + bounds.width
-                && torso.y >= bounds.y && torso.y <= bounds.y + bounds.height
-            let score = hypot(torso.x - centerX, torso.y - centerY) + (inside ? 0 : 1)
-            if best == nil || score < best!.score {
-                best = (index, score)
-            }
-        }
-        return best?.index
-    }
-
-    private static func torsoCenter(of observation: VNHumanBodyPoseObservation) -> CGPoint? {
-        let names: [VNHumanBodyPoseObservation.JointName] = [.root, .neck, .leftHip, .rightHip, .leftShoulder, .rightShoulder]
-        var xs: [Double] = []
-        var ys: [Double] = []
-        for name in names {
-            guard let point = try? observation.recognizedPoint(name), point.confidence > 0.1 else { continue }
-            xs.append(point.location.x)
-            ys.append(1 - point.location.y)
-        }
-        guard !xs.isEmpty else { return nil }
-        return CGPoint(x: xs.reduce(0, +) / Double(xs.count), y: ys.reduce(0, +) / Double(ys.count))
-    }
-
-    private static func hint(from observation: VNHumanBodyPoseObservation, bodyBounds: NormalizedRect) -> PoseHint? {
+    private static func joints(from observation: VNHumanBodyPoseObservation) -> [PoseJoint] {
         var joints: [PoseJoint] = []
         for (visionName, name) in jointMapping {
             guard let point = try? observation.recognizedPoint(visionName), point.confidence > 0.1 else { continue }
@@ -196,9 +248,14 @@ public final class VisionPoseEstimator: PoseEstimating {
                 confidence: Double(point.confidence)
             ))
         }
-        guard joints.count >= 4 else { return nil }
-        let lower = lowerBodyBounds(joints: joints) ?? HeuristicPoseEstimator.lowerBody(for: bodyBounds)
-        return PoseHint(bodyBounds: bodyBounds, lowerBodyBounds: lower, joints: joints)
+        return joints
+    }
+
+    private static func center(of joints: [PoseJoint]) -> CGPoint {
+        guard !joints.isEmpty else { return .zero }
+        let x = joints.map(\.x).reduce(0, +) / Double(joints.count)
+        let y = joints.map(\.y).reduce(0, +) / Double(joints.count)
+        return CGPoint(x: x, y: y)
     }
 
     private static func lowerBodyBounds(joints: [PoseJoint]) -> NormalizedRect? {

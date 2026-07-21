@@ -124,6 +124,31 @@ import Testing
     #expect(abs(lowerCenterY - 0.68) < 0.01)
 }
 
+@Test func personMaskSamplerDetectsInsideRegion() throws {
+    // 左半分=白（人物）、右半分=黒（背景）のマスクで内外判定を検証する
+    let size = 100
+    guard let context = CGContext(
+        data: nil,
+        width: size,
+        height: size,
+        bitsPerComponent: 8,
+        bytesPerRow: size,
+        space: CGColorSpaceCreateDeviceGray(),
+        bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ) else { throw CocoaError(.coderInvalidValue) }
+    context.setFillColor(CGColor(gray: 0, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+    context.setFillColor(CGColor(gray: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: size / 2, height: size))
+    let mask = try #require(context.makeImage())
+
+    let sampler = try #require(PersonMaskSampler(maskImage: mask))
+
+    #expect(sampler.contains(x: 0.25, y: 0.5))
+    #expect(!sampler.contains(x: 0.75, y: 0.5))
+    #expect(!sampler.contains(x: 1.5, y: 0.5))
+}
+
 @Test func poseHintDecodesLegacyJSONWithoutJoints() throws {
     let json = """
     {"bodyBounds":{"x":0.1,"y":0.1,"width":0.5,"height":0.5},"lowerBodyBounds":{"x":0.2,"y":0.4,"width":0.3,"height":0.2}}

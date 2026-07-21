@@ -856,8 +856,11 @@ final class MosaicWindowController: NSObject {
     }
 
     private static func boneSegments(for hint: PoseHint) -> [(from: CGPoint, to: CGPoint)] {
+        // 保持している関節（保存閾値0.1）はすべて描画する。既定のminConfidence(0.15)を使うと
+        // 保持済み関節すら描画されず「マスク内なのにボーンが出ない」度合いが悪化するため明示的に0.1を指定。
         PoseJointName.boneConnections.compactMap { pair in
-            guard let a = hint.joint(pair.0), let b = hint.joint(pair.1) else { return nil }
+            guard let a = hint.joint(pair.0, minConfidence: 0.1),
+                  let b = hint.joint(pair.1, minConfidence: 0.1) else { return nil }
             return (CGPoint(x: a.x, y: a.y), CGPoint(x: b.x, y: b.y))
         }
     }

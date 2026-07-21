@@ -40,6 +40,10 @@ public struct NormalizedRect: Codable, Equatable, Sendable {
         return NormalizedRect(x: centerX - newWidth / 2, y: centerY - newHeight / 2, width: newWidth, height: newHeight)
     }
 
+    public func contains(x: Double, y: Double) -> Bool {
+        x >= self.x && x <= self.x + width && y >= self.y && y <= self.y + height
+    }
+
     public func intersection(_ other: NormalizedRect) -> NormalizedRect? {
         let minX = max(x, other.x)
         let minY = max(y, other.y)
