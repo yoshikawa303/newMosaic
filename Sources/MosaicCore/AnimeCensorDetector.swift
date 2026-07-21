@@ -75,6 +75,34 @@ public enum YOLODecoder {
     }
 }
 
+/// レターボックス前処理（アスペクト比維持+パディング）の変換情報。
+/// モデル入力空間（640x640）の正規化座標を元画像の正規化座標へ逆変換する。
+public struct LetterboxTransform: Equatable, Sendable {
+    public let padX: Double
+    public let padY: Double
+    public let contentWidth: Double
+    public let contentHeight: Double
+
+    public init(padX: Double, padY: Double, contentWidth: Double, contentHeight: Double) {
+        self.padX = padX
+        self.padY = padY
+        self.contentWidth = contentWidth
+        self.contentHeight = contentHeight
+    }
+
+    /// モデル入力空間の正規化rect → 元画像の正規化rect
+    public func imageRect(from rect: NormalizedRect, inputSize: Int) -> NormalizedRect {
+        guard contentWidth > 0, contentHeight > 0 else { return rect }
+        let size = Double(inputSize)
+        return NormalizedRect(
+            x: (rect.x * size - padX) / contentWidth,
+            y: (rect.y * size - padY) / contentHeight,
+            width: rect.width * size / contentWidth,
+            height: rect.height * size / contentHeight
+        ).clamped()
+    }
+}
+
 /// 同梱YOLOv8系ONNXモデルの共通実行ヘルパー（前処理→ONNX Runtime推論→デコード）。
 /// 完全ローカル実行。画像・検出結果の外部送信は行わない。
 final class YOLOONNXModel {
@@ -134,7 +162,7 @@ final class YOLOONNXModel {
         classCount: Int,
         confidenceThreshold: Double
     ) throws -> [YOLODecoder.Detection] {
-        var tensor = Self.preprocess(image)
+        var (tensor, letterbox) = Self.preprocess(image)
         let data = NSMutableData(
             bytes: &tensor,
             length: tensor.count * MemoryLayout<Float>.size
@@ -158,13 +186,29 @@ final class YOLOONNXModel {
             classCount: classCount,
             confidenceThreshold: confidenceThreshold,
             inputSize: Self.inputSize
-        )
+        ).map { detection in
+            YOLODecoder.Detection(
+                rect: letterbox.imageRect(from: detection.rect, inputSize: Self.inputSize),
+                score: detection.score,
+                classIndex: detection.classIndex
+            )
+        }
     }
 
-    /// 640x640 RGB（0-1正規化）のCHW配列へ変換する（アスペクト比は無視して単純リサイズ）。
-    static func preprocess(_ image: CGImage) -> [Float] {
+    /// レターボックス方式（アスペクト比維持リサイズ+中央配置+グレー114パディング。学習時のultralytics標準と
+    /// 同条件）で 640x640 RGB（0-1正規化）CHW配列へ変換する。単純リサイズでは縦長の漫画ページ等で
+    /// 検出位置が微妙にずれるため（学習条件との不一致）、本方式へ変更した。
+    static func preprocess(_ image: CGImage) -> (tensor: [Float], letterbox: LetterboxTransform) {
         let size = inputSize
-        var rgba = [UInt8](repeating: 0, count: size * size * 4)
+        let imageWidth = Double(image.width)
+        let imageHeight = Double(image.height)
+        let scale = min(Double(size) / max(1, imageWidth), Double(size) / max(1, imageHeight))
+        let contentWidth = imageWidth * scale
+        let contentHeight = imageHeight * scale
+        let padX = (Double(size) - contentWidth) / 2
+        let padY = (Double(size) - contentHeight) / 2
+
+        var rgba = [UInt8](repeating: 114, count: size * size * 4)
         rgba.withUnsafeMutableBytes { pointer in
             guard let context = CGContext(
                 data: pointer.baseAddress,
@@ -176,7 +220,8 @@ final class YOLOONNXModel {
                 bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
             ) else { return }
             context.interpolationQuality = .medium
-            context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+            // 中央配置（上下パディングが対称のためCG座標系の上下反転の影響を受けない）
+            context.draw(image, in: CGRect(x: padX, y: padY, width: contentWidth, height: contentHeight))
         }
 
         let plane = size * size
@@ -187,7 +232,10 @@ final class YOLOONNXModel {
             tensor[plane + index] = Float(rgba[offset + 1]) / 255.0
             tensor[2 * plane + index] = Float(rgba[offset + 2]) / 255.0
         }
-        return tensor
+        return (
+            tensor,
+            LetterboxTransform(padX: padX, padY: padY, contentWidth: contentWidth, contentHeight: contentHeight)
+        )
     }
 }
 

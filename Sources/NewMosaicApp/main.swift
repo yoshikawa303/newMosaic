@@ -1022,6 +1022,7 @@ final class MosaicWindowController: NSObject {
         case .shape: return ShapeSegmentEngine()
         case .visionPersonSegmentation: return VisionPersonSegmentEngine()
         case .foregroundObjects: return ForegroundSegmentEngine()
+        case .regionForeground: return RegionForegroundSegmentEngine()
         }
     }
 

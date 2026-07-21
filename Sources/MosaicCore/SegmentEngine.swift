@@ -16,12 +16,14 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case shape
     case visionPersonSegmentation
     case foregroundObjects
+    case regionForeground
 
     public var displayName: String {
         switch self {
         case .shape: return "図形ベース（矩形/楕円）"
         case .visionPersonSegmentation: return "Vision人物セグメンテーション"
         case .foregroundObjects: return "前景オブジェクト"
+        case .regionForeground: return "対象の形状（ROI内前景）"
         }
     }
 }
@@ -113,6 +115,69 @@ public final class ForegroundSegmentEngine: Segmenting {
             let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
             return fullFrameMask.cropped(to: rect).composited(over: black)
         }
+    }
+}
+
+/// ROIごとに周辺をクロップして前景抽出を実行し、**検出範囲内の対象物の実形状**に沿ったマスクを生成する。
+/// 「矩形・楕円ではなく対象（性器等）の形どおりにモザイクしたい」という要望への対応。
+/// クロップにより対象物が主要被写体として大きく写るため、画像全体への前景抽出より対象の形を取りやすい。
+/// 前景が得られないROIは図形ベース（矩形/楕円）へフォールバックする。
+public final class RegionForegroundSegmentEngine: Segmenting {
+    private let fallback = ShapeSegmentEngine()
+
+    public init() {}
+
+    public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        var results: [CIImage] = []
+        for roi in rois {
+            if let mask = regionMask(for: roi, in: image, imageSize: imageSize, extent: extent) {
+                results.append(mask)
+            } else {
+                let fallbackMasks = try fallback.createMasks(for: [roi], in: image, extent: extent)
+                results.append(fallbackMasks[0])
+            }
+        }
+        return results
+    }
+
+    private func regionMask(
+        for roi: MosaicROI,
+        in image: CGImage,
+        imageSize: CGSize,
+        extent: CGRect
+    ) -> CIImage? {
+        let expanded = roi.rect.expanded(scale: 1.3).clamped()
+        let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
+        guard cropRect.width >= 16, cropRect.height >= 16,
+              let crop = image.cropping(to: cropRect) else { return nil }
+
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: crop, options: [:])
+        try? handler.perform([request])
+        guard let observation = request.results?.first,
+              !observation.allInstances.isEmpty,
+              let buffer = try? observation.generateScaledMaskForImage(
+                  forInstances: observation.allInstances,
+                  from: handler
+              ) else {
+            return nil
+        }
+
+        var mask = CIImage(cvPixelBuffer: buffer).verticallyFlippedForRaster()
+        guard mask.extent.width > 0, mask.extent.height > 0 else { return nil }
+        // クロップ実サイズへスケールし、CI座標（下原点）でクロップ位置に配置する
+        let scaleX = cropRect.width / mask.extent.width
+        let scaleY = cropRect.height / mask.extent.height
+        let cropRectCI = expanded.cgRect(imageSize: imageSize, origin: .bottomLeft)
+        mask = mask
+            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
+
+        let black = CIImage(color: .black).cropped(to: extent)
+        let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        // 前景マスクをROI範囲に制限して返す（ROI外へモザイクが漏れないようにする）
+        return mask.composited(over: black).cropped(to: roiRect).composited(over: black)
     }
 }
 

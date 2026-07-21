@@ -413,6 +413,42 @@ import Testing
     #expect(kept.contains { $0.classIndex == 1 })
 }
 
+@Test func letterboxTransformMapsCoordinatesBackToImage() {
+    // 縦長画像（幅320x高さ640相当）: scale=1.0, contentW=320, padX=160, padY=0 のレターボックスを想定
+    let letterbox = LetterboxTransform(padX: 160, padY: 0, contentWidth: 320, contentHeight: 640)
+    // モデル空間の中央 (320,320) を中心とする 64x64 の矩形
+    let modelRect = NormalizedRect(x: (320.0 - 32) / 640, y: (320.0 - 32) / 640, width: 64.0 / 640, height: 64.0 / 640)
+
+    let imageRect = letterbox.imageRect(from: modelRect, inputSize: 640)
+
+    // 画像空間では中央 (0.5, 0.5)、幅 64/320=0.2、高さ 64/640=0.1
+    #expect(abs((imageRect.x + imageRect.width / 2) - 0.5) < 0.001)
+    #expect(abs((imageRect.y + imageRect.height / 2) - 0.5) < 0.001)
+    #expect(abs(imageRect.width - 0.2) < 0.001)
+    #expect(abs(imageRect.height - 0.1) < 0.001)
+}
+
+@Test func regionForegroundSegmentEngineFallsBackOnPlainImage() throws {
+    // 単色画像には前景が無いため、図形ベースへのフォールバック経路を検証する
+    let image = try makeSolidImage(width: 120, height: 90)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+        confidence: 1,
+        source: "manual",
+        shape: .ellipse
+    )
+
+    let output = try MosaicEngine().applyMosaic(
+        to: image,
+        rois: [roi],
+        scale: 12,
+        segmentEngine: RegionForegroundSegmentEngine()
+    )
+
+    #expect(output.width == 120)
+    #expect(output.height == 90)
+}
+
 @Test func animeCensorDetectorLoadsModelAndRunsOnPlainImage() throws {
     // 同梱ONNXモデルのロードと推論実行のスモークテスト（単色画像では検出0件のはず）
     let detector = try AnimeCensorDetector()
