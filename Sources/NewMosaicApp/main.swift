@@ -352,10 +352,12 @@ final class MosaicWindowController: NSObject {
         optionToolbar.translatesAutoresizingMaskIntoConstraints = false
 
         // 縦の余白はキャンバス側（splitView）に吸収させ、ツールバー3段は内容ぴったりの高さに固定する。
-        // これが無いとAuto Layoutがツールバーを縦に引き伸ばし、コンテンツが下へ押し込まれるレイアウト崩れが起きる。
-        toolbar.setContentHuggingPriority(.required, for: .vertical)
-        editToolbar.setContentHuggingPriority(.required, for: .vertical)
-        optionToolbar.setContentHuggingPriority(.required, for: .vertical)
+        // NSStackViewは内在サイズを持たないため NSView汎用の setContentHuggingPriority は効かず、
+        // スタック境界を内容へフィットさせる専用API setHuggingPriority を使う必要がある
+        // （これが無いとAuto Layoutがツールバーを縦に引き伸ばし、コンテンツが下へ押し込まれる）。
+        toolbar.setHuggingPriority(.required, for: .vertical)
+        editToolbar.setHuggingPriority(.required, for: .vertical)
+        optionToolbar.setHuggingPriority(.required, for: .vertical)
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
         let libraryPanel = makeLibraryPanel()

@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.0.00001 - Build 22 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: Build 20の修正でも解消していなかったツールバーのレイアウト崩れを修正した（3度目の対処。今回はAPI選定誤りの是正）。
+
+■更新履歴
+
+- 原因: Build 20で使用した `setContentHuggingPriority`（NSView汎用API）は内在サイズを持つビュー向けで、内在サイズを持たない `NSStackView` には効かない。
+- 修正: スタック境界を内容へフィットさせる `NSStackView` 専用API `setHuggingPriority(.required, for: .vertical)` へ置き換え、ツールバー3段を内容ぴったりの高さに固定。縦余白は常にキャンバス側（splitView）が吸収する。
+
 ## v0.0.00001 - Build 21 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）
