@@ -228,6 +228,7 @@ final class MosaicWindowController: NSObject {
     private let ungroupButton = NSButton(title: "グループ解除", target: nil, action: nil)
     private let autoGenerateCheckbox = NSButton(checkboxWithTitle: "自動候補生成", target: nil, action: nil)
     private let autoSaveCheckbox = NSButton(checkboxWithTitle: "自動保存", target: nil, action: nil)
+    private let mosaicPreviewCheckbox = NSButton(checkboxWithTitle: "モザイク表示", target: nil, action: nil)
     private var ungroupedLayers: [LayerLeaf] = [
         LayerLeaf(kind: .image, isVisible: true),
         LayerLeaf(kind: .roi, isVisible: true)
@@ -248,6 +249,29 @@ final class MosaicWindowController: NSObject {
     private var lastAutoROIs: [MosaicROI] = []
     private var lastPersonBounds: [NormalizedRect] = []
     private var learnedROIIDs: Set<UUID> = []
+
+    /// 画像（ライブラリアイテム）ごとの編集状態。エクスポート/加工確定に関わらずセッション内で保持し、
+    /// 画像を切り替えて戻ってきたときにROI・検出レイヤ・アンドゥ履歴・モザイク表示状態を復元する。
+    private struct PerImageEditState {
+        var rois: [MosaicROI]
+        var renderedImage: CGImage?
+        var mosaicPreviewOn: Bool
+        var personLayerRects: [NormalizedRect]
+        var personLayerMasks: [CGImage?]
+        var poseLayerRects: [NormalizedRect]
+        var poseLayerBones: [[(from: CGPoint, to: CGPoint)]]
+        var poseLayerJointPoints: [[CGPoint]]
+        var undoStack: [EditorState]
+        var redoStack: [EditorState]
+        var hasUnsavedChanges: Bool
+        var lastAutoROIs: [MosaicROI]
+        var lastPersonBounds: [NormalizedRect]
+        var learnedROIIDs: Set<UUID>
+    }
+
+    private var imageEditStates: [UUID: PerImageEditState] = [:]
+    private var imageEditStateOrder: [UUID] = []
+    private let imageEditStateLimit = 8
 
     override init() {
         super.init()
@@ -296,7 +320,7 @@ final class MosaicWindowController: NSObject {
             shapeLabel, shapeControl, categoryLabel, categoryControl,
             segmentEngineLabel, segmentEngineControl,
             personLayerCheckbox, poseLayerCheckbox, layerButton,
-            autoGenerateCheckbox, autoSaveCheckbox
+            autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox
         ])
         editToolbar.orientation = .horizontal
         editToolbar.alignment = .centerY
@@ -362,6 +386,8 @@ final class MosaicWindowController: NSObject {
         poseLayerCheckbox.action = #selector(toggleDetectionLayers)
         layerButton.target = self
         layerButton.action = #selector(toggleLayerPopover)
+        mosaicPreviewCheckbox.target = self
+        mosaicPreviewCheckbox.action = #selector(toggleMosaicPreview)
         setUpLayerPopover()
 
         canvas.currentShape = .ellipse
@@ -372,6 +398,8 @@ final class MosaicWindowController: NSObject {
         canvas.onManualEditWillBegin = { [weak self] in
             guard let self else { return }
             self.pushUndoSnapshot(self.currentEditorState())
+            // 編集開始時はモザイク表示を解除し、元画像上でROIを再編集できるようにする
+            self.dismissMosaicPreview()
         }
         canvas.onROISelectionChanged = { [weak self] roi in
             guard let self, let roi else { return }
@@ -649,6 +677,7 @@ final class MosaicWindowController: NSObject {
         do {
             let snapshot = try pipeline.generateDetailedCandidates(for: loadedImage.cgImage)
             pushUndoSnapshot(previousState)
+            dismissMosaicPreview()
             var rois = snapshot.rois
             if let learningEngine {
                 rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
@@ -707,6 +736,45 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    // MARK: - モザイク表示切替（未保存プレビュー）
+
+    /// 「モザイク表示」チェックのON/OFF。ONで現在のROIにモザイクを適用した見た目を表示し、
+    /// OFFで元画像+ROI表示に戻す（ROI・レイヤ情報は保持され再編集可能。ライブラリ保存はしない）。
+    @objc private func toggleMosaicPreview() {
+        guard let loadedImage else {
+            mosaicPreviewCheckbox.state = .off
+            return
+        }
+        if mosaicPreviewCheckbox.state == .on {
+            do {
+                let output = try mosaicEngine.applyMosaic(
+                    to: loadedImage.cgImage,
+                    rois: canvas.rois,
+                    segmentEngine: currentSegmentEngine()
+                )
+                renderedImage = output
+                canvas.setImage(output)
+                updateStatus("モザイク表示中（未保存プレビュー。編集を始めると解除されます）")
+            } catch {
+                mosaicPreviewCheckbox.state = .off
+                showError(error)
+            }
+        } else {
+            canvas.setImage(loadedImage.cgImage)
+            updateStatus("モザイク解除表示（ROIは保持しています）")
+        }
+    }
+
+    /// モザイク表示を解除して元画像へ戻す（ROIは保持）。編集開始・候補生成・クリア時に呼ぶ。
+    private func dismissMosaicPreview() {
+        guard mosaicPreviewCheckbox.state == .on || renderedImage != nil else { return }
+        mosaicPreviewCheckbox.state = .off
+        renderedImage = nil
+        if let loadedImage {
+            canvas.setImage(loadedImage.cgImage)
+        }
+    }
+
     private func currentSegmentEngine() -> Segmenting {
         let index = segmentEngineControl.indexOfSelectedItem
         let kinds = SegmentEngineKind.allCases
@@ -733,13 +801,14 @@ final class MosaicWindowController: NSObject {
             pushUndoSnapshot(previousState)
             renderedImage = output
             canvas.setImage(output)
+            mosaicPreviewCheckbox.state = .on
             if let item = currentLibraryItem {
                 currentLibraryItem = try libraryEngine.saveProcessedImage(output, rois: canvas.rois, for: item.id)
                 hasUnsavedChanges = false
                 recordLearningSamples()
                 reloadLibrary()
             }
-            updateStatus("モザイク適用済み: ROI \(canvas.rois.count)件")
+            updateStatus("モザイク適用済み: ROI \(canvas.rois.count)件（「モザイク表示」で解除/再適用を切替できます）")
         } catch {
             showError(error)
         }
@@ -748,6 +817,7 @@ final class MosaicWindowController: NSObject {
     @objc private func clearROIs() {
         guard !canvas.rois.isEmpty else { return }
         pushUndoSnapshot(currentEditorState())
+        dismissMosaicPreview()
         canvas.rois = []
         updateStatus("ROIをクリアしました")
     }
@@ -777,6 +847,7 @@ final class MosaicWindowController: NSObject {
     private func applyEditorState(_ state: EditorState) {
         canvas.rois = state.rois
         renderedImage = state.renderedImage
+        mosaicPreviewCheckbox.state = state.renderedImage != nil ? .on : .off
         if let loadedImage {
             canvas.setImage(state.renderedImage ?? loadedImage.cgImage)
         }
@@ -1110,15 +1181,26 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    /// ライブラリ画像を作業対象として開く。作業画像は常に元画像とし、加工後表示は
+    /// モザイク表示（renderedImage）側に読み込むことで、解除/再適用の切替と再編集を可能にする。
     private func loadLibraryImage(at url: URL, item: MosaicLibraryItem, useProcessed: Bool) {
         do {
-            let loaded = try imageLoader.loadImage(from: url)
-            setWorkingImage(loaded.cgImage, sourceURL: url, item: item)
-            canvas.rois = useProcessed ? item.rois : []
-            renderedImage = useProcessed ? loaded.cgImage : nil
+            let originalURL = libraryEngine.originalURL(for: item)
+            let original = try imageLoader.loadImage(from: originalURL)
+            let restored = setWorkingImage(original.cgImage, sourceURL: originalURL, item: item)
             selectLibraryItemInUI(item)
+            if restored { return }
+
+            canvas.rois = item.rois
+            if useProcessed,
+               let processedURL = libraryEngine.processedURL(for: item),
+               let processed = try? imageLoader.loadImage(from: processedURL) {
+                renderedImage = processed.cgImage
+                mosaicPreviewCheckbox.state = .on
+                canvas.setImage(processed.cgImage)
+            }
             updateStatus("\(useProcessed ? "加工後" : "元画像")を開きました: \(item.sourceName)")
-            if !useProcessed || item.rois.isEmpty {
+            if item.rois.isEmpty {
                 autoGenerateIfEnabled()
             }
         } catch {
@@ -1131,10 +1213,70 @@ final class MosaicWindowController: NSObject {
         generateCandidates()
     }
 
-    private func setWorkingImage(_ image: CGImage, sourceURL: URL, item: MosaicLibraryItem) {
+    /// 現在の画像の編集状態（ROI・検出レイヤ・アンドゥ履歴・モザイク表示）をセッション内キャッシュへ退避する。
+    private func stashCurrentEditState() {
+        guard let current = currentLibraryItem else { return }
+        imageEditStates[current.id] = PerImageEditState(
+            rois: canvas.rois,
+            renderedImage: renderedImage,
+            mosaicPreviewOn: mosaicPreviewCheckbox.state == .on,
+            personLayerRects: canvas.personLayerRects,
+            personLayerMasks: canvas.personLayerMasks,
+            poseLayerRects: canvas.poseLayerRects,
+            poseLayerBones: canvas.poseLayerBones,
+            poseLayerJointPoints: canvas.poseLayerJointPoints,
+            undoStack: undoStack,
+            redoStack: redoStack,
+            hasUnsavedChanges: hasUnsavedChanges,
+            lastAutoROIs: lastAutoROIs,
+            lastPersonBounds: lastPersonBounds,
+            learnedROIIDs: learnedROIIDs
+        )
+        imageEditStateOrder.removeAll { $0 == current.id }
+        imageEditStateOrder.append(current.id)
+        while imageEditStateOrder.count > imageEditStateLimit {
+            let evicted = imageEditStateOrder.removeFirst()
+            imageEditStates[evicted] = nil
+        }
+    }
+
+    /// 作業画像を切り替える。退避済みの編集状態があれば復元し true を返す。
+    @discardableResult
+    private func setWorkingImage(_ image: CGImage, sourceURL: URL, item: MosaicLibraryItem) -> Bool {
+        stashCurrentEditState()
         loadedImage = LoadedImage(url: sourceURL, cgImage: image)
-        renderedImage = nil
         currentLibraryItem = item
+
+        if let saved = imageEditStates[item.id] {
+            renderedImage = saved.renderedImage
+            mosaicPreviewCheckbox.state = (saved.mosaicPreviewOn && saved.renderedImage != nil) ? .on : .off
+            canvas.setImage(mosaicPreviewCheckbox.state == .on ? saved.renderedImage! : image)
+            canvas.rois = saved.rois
+            canvas.personLayerRects = saved.personLayerRects
+            canvas.personLayerMasks = saved.personLayerMasks
+            canvas.poseLayerRects = saved.poseLayerRects
+            canvas.poseLayerBones = saved.poseLayerBones
+            canvas.poseLayerJointPoints = saved.poseLayerJointPoints
+            canvas.selectedROIID = nil
+            undoStack = saved.undoStack
+            redoStack = saved.redoStack
+            hasUnsavedChanges = saved.hasUnsavedChanges
+            lastAutoROIs = saved.lastAutoROIs
+            lastPersonBounds = saved.lastPersonBounds
+            learnedROIIDs = saved.learnedROIIDs
+            rebuildDetectionLayers(
+                personCount: saved.personLayerRects.count,
+                poseCount: saved.poseLayerRects.count
+            )
+            applyLayerVisibility()
+            syncLegacyLayerCheckboxes()
+            updateUndoRedoAvailability()
+            updateStatus("編集状態を復元しました: ROI \(saved.rois.count)件")
+            return true
+        }
+
+        renderedImage = nil
+        mosaicPreviewCheckbox.state = .off
         canvas.setImage(image)
         canvas.rois = []
         canvas.personLayerRects = []
@@ -1151,6 +1293,7 @@ final class MosaicWindowController: NSObject {
         lastAutoROIs = []
         lastPersonBounds = []
         learnedROIIDs = []
+        return false
     }
 
     private func savePNG(_ image: CGImage, to url: URL) throws {
