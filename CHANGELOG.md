@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.0.00001 - Build 11 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 自動認識Phase 2（暫定）: 自動候補ROIをVisionの顕著領域検出で精密化する `SaliencyCandidateDetector` を追加し、候補生成パイプラインの既定にした。
+
+■更新履歴
+
+- `SaliencyCandidateDetector` を新設。自動候補（pose-chest / pose-groin / heuristic-lower-body）の周辺1.8倍領域をクロップし `VNGenerateObjectnessBasedSaliencyImageRequest` を実行、元ROIとの重なり率0.2以上・面積4倍以内の顕著領域があればROIをそこへ精密化する。整合しない場合は元ROIを維持（再現率優先）。
+- `NormalizedRect` に `area` / `expanded(scale:)` / `intersection(_:)` を追加。
+- モデル選定: 学習済み部位検出モデル（Phase 2本命）はデータセットとライセンス確認が必要なため、追加コスト0のVisionサリエンシーを暫定採用。プロトコル境界は維持しており、部位検出モデル取得後に `CandidateDetecting` 実装を差し替えるだけで移行できる。
+
+■既知の問題（未修正・継続観測）
+
+- サリエンシーは「目立つ物体」への吸着であり部位の意味分類ではない。カテゴリ別の真の部位検出はデータセット整備後に対応。
+
 ## v0.0.00001 - Build 10 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）

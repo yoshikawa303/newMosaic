@@ -349,7 +349,7 @@ public final class StaticImageMosaicPipeline {
         personDetector: PersonDetecting = VisionPersonDetector(),
         poseEstimator: PoseEstimating = VisionPoseEstimator(),
         roiGenerator: ROIGenerating = SensitiveROIGenerator(),
-        candidateDetector: CandidateDetecting = PassThroughCandidateDetector()
+        candidateDetector: CandidateDetecting = SaliencyCandidateDetector()
     ) {
         self.personDetector = personDetector
         self.poseEstimator = poseEstimator

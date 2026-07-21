@@ -132,6 +132,37 @@ import Testing
     #expect(abs(bounds.height - 0.4) < 0.001)
 }
 
+@Test func normalizedRectExpandedAndIntersection() {
+    let rect = NormalizedRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2)
+
+    let expanded = rect.expanded(scale: 2)
+    #expect(abs(expanded.x - 0.3) < 0.001)
+    #expect(abs(expanded.width - 0.4) < 0.001)
+
+    let other = NormalizedRect(x: 0.5, y: 0.5, width: 0.3, height: 0.3)
+    let overlap = rect.intersection(other)
+    #expect(overlap != nil)
+    #expect(abs((overlap?.area ?? 0) - 0.01) < 0.001)
+
+    let far = NormalizedRect(x: 0.9, y: 0.9, width: 0.05, height: 0.05)
+    #expect(rect.intersection(far) == nil)
+}
+
+@Test func saliencyCandidateDetectorKeepsROIsOnPlainImage() throws {
+    // 単色画像には顕著領域が無いため、精密化されず元のROIがそのまま返る経路を検証する。
+    let image = try makeSolidImage(width: 200, height: 200)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.3, y: 0.3, width: 0.3, height: 0.3),
+        confidence: 0.5,
+        source: "pose-groin"
+    )
+
+    let refined = try SaliencyCandidateDetector().refineCandidates([roi], image: image)
+
+    #expect(refined.count == 1)
+    #expect(refined[0].id == roi.id)
+}
+
 @Test func shapeSegmentEngineProducesOneMaskPerROI() throws {
     let image = try makeSolidImage(width: 40, height: 40)
     let extent = CGRect(x: 0, y: 0, width: 40, height: 40)

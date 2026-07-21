@@ -94,7 +94,7 @@
 ## 6. 実装ステータス
 
 - Phase 1: **実装済み**（2026-07-22, Build 10）。`VNGeneratePersonInstanceMaskRequest` + `VNDetectHumanBodyPoseRequest` + 解剖学的プライアROI生成。骨格ボーン表示・人物シルエット表示の保留も解除。
-- Phase 2: 未着手
+- Phase 2: **暫定実装済み**（2026-07-22, Build 11）。`SaliencyCandidateDetector`（Visionオブジェクトネス顕著領域による候補精密化）をパイプライン既定に採用。本命の学習済み部位検出モデル（漫画+実写ファインチューニング）はデータセット・ライセンス確認後に `CandidateDetecting` 差し替えで導入する。
 - Phase 3: 未着手
 - Phase 4: 未着手
 

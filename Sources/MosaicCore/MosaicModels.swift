@@ -29,6 +29,26 @@ public struct NormalizedRect: Codable, Equatable, Sendable {
         return NormalizedRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
+    public var area: Double { max(0, width) * max(0, height) }
+
+    /// 中心を固定したまま指定倍率へ拡大した矩形を返す（クランプはしない）。
+    public func expanded(scale: Double) -> NormalizedRect {
+        let centerX = x + width / 2
+        let centerY = y + height / 2
+        let newWidth = width * scale
+        let newHeight = height * scale
+        return NormalizedRect(x: centerX - newWidth / 2, y: centerY - newHeight / 2, width: newWidth, height: newHeight)
+    }
+
+    public func intersection(_ other: NormalizedRect) -> NormalizedRect? {
+        let minX = max(x, other.x)
+        let minY = max(y, other.y)
+        let maxX = min(x + width, other.x + other.width)
+        let maxY = min(y + height, other.y + other.height)
+        guard maxX > minX, maxY > minY else { return nil }
+        return NormalizedRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+    }
+
     public func cgRect(imageSize: CGSize, origin: CoordinateOrigin = .topLeft) -> CGRect {
         let rect = clamped()
         let width = rect.width * imageSize.width
