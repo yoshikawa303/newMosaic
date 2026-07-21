@@ -432,6 +432,34 @@ import Testing
     #expect(DomainClassifier.classify(textured) == .photo)
 }
 
+@Test func domainClassifierDetectsMonochromeManga() throws {
+    // 白黒漫画風の合成画像（紙白背景+黒線+グレー塗り面）をイラスト/漫画と判定できることを検証する
+    let size = 200
+    guard let context = CGContext(
+        data: nil,
+        width: size,
+        height: size,
+        bitsPerComponent: 8,
+        bytesPerRow: size * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+    ) else { throw CocoaError(.coderInvalidValue) }
+    // 紙白背景
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+    // グレーのトーン風塗り面
+    context.setFillColor(CGColor(red: 0.6, green: 0.6, blue: 0.6, alpha: 1))
+    context.fill(CGRect(x: 30, y: 30, width: 80, height: 100))
+    // 黒い輪郭線
+    context.setStrokeColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+    context.setLineWidth(3)
+    context.stroke(CGRect(x: 20, y: 20, width: 150, height: 150))
+    context.stroke(CGRect(x: 60, y: 90, width: 90, height: 60))
+    let manga = try #require(context.makeImage())
+
+    #expect(DomainClassifier.classify(manga) == .illustration)
+}
+
 @Test func yoloDatasetExporterWritesImagesAndLabels() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)

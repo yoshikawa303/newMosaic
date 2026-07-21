@@ -238,6 +238,8 @@ final class MosaicWindowController: NSObject {
     private let poseLayerCheckbox = NSButton(checkboxWithTitle: "骨格検出レイヤ", target: nil, action: nil)
     private let categoryControl = NSPopUpButton(title: "", target: nil, action: nil)
     private let segmentEngineControl = NSPopUpButton(title: "", target: nil, action: nil)
+    private let domainModeControl = NSPopUpButton(title: "", target: nil, action: nil)
+    private static let domainModeDefaultsKey = "DetectionDomainMode"
     private let layerOutlineView = NSOutlineView()
     private let groupButton = NSButton(title: "グループ化", target: nil, action: nil)
     private let ungroupButton = NSButton(title: "グループ解除", target: nil, action: nil)
@@ -346,10 +348,18 @@ final class MosaicWindowController: NSObject {
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
         segmentEngineControl.selectItem(at: 0)
 
+        // 画像種別（自動判定の誤りを手動で上書きできるようにする）
+        let domainModeLabel = NSTextField(labelWithString: "画像種別:")
+        domainModeControl.removeAllItems()
+        domainModeControl.addItems(withTitles: ["自動判定", "実写", "イラスト・漫画"])
+        let savedDomainMode = UserDefaults.standard.integer(forKey: Self.domainModeDefaultsKey)
+        domainModeControl.selectItem(at: (0...2).contains(savedDomainMode) ? savedDomainMode : 0)
+
         // 項目過多による幅超過（レイアウト破綻）を防ぐため、編集ツールバーは2行に分ける
         let editToolbar = NSStackView(views: [
             shapeLabel, shapeControl, categoryLabel, categoryControl,
-            segmentEngineLabel, segmentEngineControl
+            segmentEngineLabel, segmentEngineControl,
+            domainModeLabel, domainModeControl
         ])
         editToolbar.orientation = .horizontal
         editToolbar.alignment = .centerY
@@ -460,6 +470,8 @@ final class MosaicWindowController: NSObject {
         mosaicPreviewCheckbox.action = #selector(toggleMosaicPreview)
         groinPositionSlider.target = self
         groinPositionSlider.action = #selector(groinPositionChanged)
+        domainModeControl.target = self
+        domainModeControl.action = #selector(domainModeChanged)
         reloadLayerList()
 
         canvas.currentShape = .ellipse
@@ -537,6 +549,16 @@ final class MosaicWindowController: NSObject {
         layerHeight = max(160, min(layerHeight, total - 200 - divider))
         rightPane.setPosition(total - divider - layerHeight, ofDividerAt: 0)
         UserDefaults.standard.set(true, forKey: appliedKey)
+    }
+
+    /// 画像種別（自動判定/実写/イラスト・漫画）の手動指定。永続化され、次回の候補生成から適用される。
+    @objc private func domainModeChanged() {
+        let index = domainModeControl.indexOfSelectedItem
+        UserDefaults.standard.set(index, forKey: Self.domainModeDefaultsKey)
+        let labels = ["自動判定", "実写（固定）", "イラスト・漫画（固定）"]
+        if (0..<labels.count).contains(index) {
+            updateStatus("画像種別: \(labels[index])（次回の候補生成から適用）")
+        }
     }
 
     /// 鼠径部ROIの位置基準（腰0%〜膝100%の比率）を事前補正する。設定は永続化され、次回の候補生成から適用される。
@@ -797,8 +819,21 @@ final class MosaicWindowController: NSObject {
             dismissMosaicPreview()
             var rois = snapshot.rois
 
-            // 実写/イラスト・漫画を判定し、イラスト系はアニメ部位検出モデル（内容ベース検出）を実行して統合する
-            let domain = DomainClassifier.classify(loadedImage.cgImage)
+            // 実写/イラスト・漫画を判定し、イラスト系はアニメ部位検出モデル（内容ベース検出）を実行して統合する。
+            // 「画像種別」が手動指定の場合は自動判定より優先する。
+            let domain: ImageDomain
+            let domainSourceNote: String
+            switch domainModeControl.indexOfSelectedItem {
+            case 1:
+                domain = .photo
+                domainSourceNote = "手動指定"
+            case 2:
+                domain = .illustration
+                domainSourceNote = "手動指定"
+            default:
+                domain = DomainClassifier.classify(loadedImage.cgImage)
+                domainSourceNote = "自動判定"
+            }
             var animeDetectionCount = 0
             if domain == .illustration, let detector = animeCensorDetector {
                 let animeROIs = (try? detector.detect(in: loadedImage.cgImage)) ?? []
@@ -831,10 +866,10 @@ final class MosaicWindowController: NSObject {
             let domainNote: String
             if domain == .illustration {
                 domainNote = animeCensorDetector != nil
-                    ? "イラスト/漫画と判定（アニメ部位検出: \(animeDetectionCount)件）: "
-                    : "イラスト/漫画と判定（アニメ用検出モデルを読み込めませんでした）: "
+                    ? "イラスト/漫画（\(domainSourceNote)・アニメ部位検出: \(animeDetectionCount)件）: "
+                    : "イラスト/漫画（\(domainSourceNote)・アニメ用検出モデルを読み込めませんでした）: "
             } else {
-                domainNote = ""
+                domainNote = "実写（\(domainSourceNote)）: "
             }
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {
                 updateStatus(domainNote + "人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
