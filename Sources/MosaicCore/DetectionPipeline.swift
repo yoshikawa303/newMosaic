@@ -252,13 +252,22 @@ public final class SensitiveROIGenerator: ROIGenerating {
     /// UIのスライダーから事前補正できる（次回の候補生成から適用）。
     public var groinPositionRatio: Double
 
-    public init(groinPositionRatio: Double = 0.45) {
+    /// 乳首ROIの縦位置。肩(0.0)から腰(1.0)へ向かう胴体上の比率。
+    /// 実画像フィードバック「上過ぎる」を受け 0.32→0.42 へ下方修正。
+    public var chestPositionRatio: Double
+
+    public init(groinPositionRatio: Double = 0.45, chestPositionRatio: Double = 0.42) {
         self.groinPositionRatio = groinPositionRatio
+        self.chestPositionRatio = chestPositionRatio
     }
 
     public func generateROIs(from poseHints: [PoseHint], imageSize: CGSize) -> [MosaicROI] {
         poseHints.flatMap { hint in
-            chestROIs(for: hint) + [groinROI(for: hint)]
+            var rois = chestROIs(for: hint)
+            if let groin = groinROI(for: hint) {
+                rois.append(groin)
+            }
+            return rois
         }
     }
 
@@ -270,11 +279,13 @@ public final class SensitiveROIGenerator: ROIGenerating {
         let shoulderY = (left.y + right.y) / 2
         let hipY = hipCenter(for: hint)?.y ?? (shoulderY + shoulderWidth * 1.4)
         let torsoHeight = max(0.02, hipY - shoulderY)
-        let nippleY = shoulderY + torsoHeight * 0.32
-        let size = max(0.02, shoulderWidth * 0.24)
+        // 実画像フィードバック（上過ぎ・大き過ぎ・幅広過ぎで手や他部位を覆う）を受け、
+        // 位置0.32→chestPositionRatio(0.42)、サイズ0.24→0.14、横オフセット0.27→0.22へ調整。
+        let nippleY = shoulderY + torsoHeight * min(max(chestPositionRatio, 0.1), 0.9)
+        let size = max(0.015, shoulderWidth * 0.14)
         let confidence = Double(min(left.confidence, right.confidence))
         return [-1.0, 1.0].map { side in
-            let centerXOffset = centerX + side * shoulderWidth * 0.27
+            let centerXOffset = centerX + side * shoulderWidth * 0.22
             return MosaicROI(
                 rect: NormalizedRect(x: centerXOffset - size / 2, y: nippleY - size / 2, width: size, height: size),
                 confidence: confidence,
@@ -285,33 +296,24 @@ public final class SensitiveROIGenerator: ROIGenerating {
         }
     }
 
-    private func groinROI(for hint: PoseHint) -> MosaicROI {
-        if let hip = hipCenter(for: hint) {
-            let leftHip = hint.joint(.leftHip)
-            let rightHip = hint.joint(.rightHip)
-            let hipWidth = (leftHip != nil && rightHip != nil)
-                ? max(0.02, abs(leftHip!.x - rightHip!.x))
-                : max(0.02, hint.bodyBounds.width * 0.3)
-            let ratio = min(max(groinPositionRatio, 0.05), 0.95)
-            let drop = kneeCenterY(for: hint).map { max(0.01, ($0 - hip.y) * ratio) } ?? hipWidth * ratio * 1.6
-            let width = hipWidth * 0.9
-            let height = hipWidth * 0.7
-            return MosaicROI(
-                rect: NormalizedRect(x: hip.x - width / 2, y: hip.y + drop - height / 2, width: width, height: height),
-                confidence: 0.6,
-                source: "pose-groin",
-                shape: .ellipse,
-                category: .other
-            )
-        }
-        let lower = hint.lowerBodyBounds
-        let focus = NormalizedRect(
-            x: lower.x + lower.width * 0.18,
-            y: lower.y + lower.height * 0.12,
-            width: lower.width * 0.64,
-            height: lower.height * 0.42
+    /// 鼠径部ROI。左右の腰関節が両方検出できた場合のみ生成する。
+    /// root関節のみ・関節なしの推定（旧 heuristic-lower-body フォールバック）は位置精度が低く、
+    /// 肩付近へ巨大な誤ROIが出る事例があったため廃止した（「検出していないものは表示しない」方針）。
+    private func groinROI(for hint: PoseHint) -> MosaicROI? {
+        guard let leftHip = hint.joint(.leftHip), let rightHip = hint.joint(.rightHip) else { return nil }
+        let hip = CGPoint(x: (leftHip.x + rightHip.x) / 2, y: (leftHip.y + rightHip.y) / 2)
+        let hipWidth = max(0.02, abs(leftHip.x - rightHip.x))
+        let ratio = min(max(groinPositionRatio, 0.05), 0.95)
+        let drop = kneeCenterY(for: hint).map { max(0.01, ($0 - hip.y) * ratio) } ?? hipWidth * ratio * 1.6
+        let width = hipWidth * 0.9
+        let height = hipWidth * 0.7
+        return MosaicROI(
+            rect: NormalizedRect(x: hip.x - width / 2, y: hip.y + drop - height / 2, width: width, height: height),
+            confidence: Double(min(leftHip.confidence, rightHip.confidence)),
+            source: "pose-groin",
+            shape: .ellipse,
+            category: .other
         )
-        return MosaicROI(rect: focus, confidence: 0.42, source: "heuristic-lower-body", shape: .ellipse, category: .other)
     }
 
     private func hipCenter(for hint: PoseHint) -> CGPoint? {

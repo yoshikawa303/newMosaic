@@ -13,7 +13,9 @@ import Testing
     #expect(cgRect.height == 100)
 }
 
-@Test func roiGeneratorProducesClampedCandidate() {
+@Test func roiGeneratorProducesNoCandidatesWithoutJoints() {
+    // 関節が取れないヒントからは候補を生成しない（精度の低い固定比率フォールバックは
+    // 肩付近への巨大な誤ROIを生むため廃止。「検出していないものは表示しない」方針）。
     let generator = SensitiveROIGenerator()
     let hint = PoseHint(
         bodyBounds: NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8),
@@ -22,11 +24,7 @@ import Testing
 
     let rois = generator.generateROIs(from: [hint], imageSize: CGSize(width: 640, height: 480))
 
-    #expect(rois.count == 1)
-    #expect(rois[0].rect.x >= 0)
-    #expect(rois[0].rect.y >= 0)
-    #expect(rois[0].rect.x + rois[0].rect.width <= 1)
-    #expect(rois[0].source == "heuristic-lower-body")
+    #expect(rois.isEmpty)
 }
 
 @Test func mosaicEnginePreservesImageSize() throws {
@@ -90,7 +88,7 @@ import Testing
     #expect(rois.contains { $0.source == "pose-groin" })
     for roi in nipples {
         let centerY = roi.rect.y + roi.rect.height / 2
-        #expect(abs(centerY - (0.30 + 0.30 * 0.32)) < 0.05)
+        #expect(abs(centerY - (0.30 + 0.30 * 0.42)) < 0.05)
     }
     if let groin = rois.first(where: { $0.source == "pose-groin" }) {
         let centerX = groin.rect.x + groin.rect.width / 2
