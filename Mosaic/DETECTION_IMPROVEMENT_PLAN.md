@@ -116,7 +116,7 @@ Phase 1〜4の改善はVision（実写学習）前提であり、最重要ドメ
 - **deepghs/nudenet_onnx（HuggingFace）**: **Apache 2.0**。実写向けNudeNetのONNX移植。実写側の内容ベース部位検出の強化にも利用可能。
 - **deepghs（DeepGHS）組織**: アニメ画像解析の非営利オープンソースコミュニティ。`dghs-imgutils` ライブラリに `detect_censors()`（部位検出）/`detect_person()`（アニメ人物検出）/顔・頭部・半身検出/アニメ・実写分類等が揃っており、前段（人物検出）のアニメ対応（§6.1 D）にも同系モデルを利用できる。
 - 統合方式: ONNX→CoreML変換（coremltools、配布がクリーン）を第一候補、ONNX Runtime直接統合を代替とする。
-- 実装状況: B（YOLOエクスポート）はBuild 28、C（ドメイン判定の初期実装）はBuild 29で実装済み。Aのモデル取得・変換・統合は**モデルダウンロードの承認待ち**（外部からの取得を伴うため）。
+- 実装状況: B（YOLOエクスポート）はBuild 28、C（ドメイン判定の初期実装）はBuild 29で実装済み。**A（アニメ部位検出）はユーザー承認を受けBuild 30で実装済み**: censor_detect_v1.0_s（MIT）を同梱し、ONNX Runtime（SwiftPM 1.24.2）でローカル実行。ONNX→CoreML変換は不要になった（ONNX Runtime直接統合を採用。変換工数・変換リスクを回避）。残: D（アニメ人物・骨格検出の導入）、実写側のnudenet_onnx導入、ドメイン判定のモデル化。
 
 ## 7. リスク・留意事項
 

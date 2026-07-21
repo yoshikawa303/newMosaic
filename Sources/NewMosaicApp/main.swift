@@ -212,6 +212,8 @@ final class MosaicWindowController: NSObject {
     private let libraryEngine: LibraryEngine = (try? LibraryEngine.defaultLibrary())
         ?? LibraryEngine(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("newMosaic/Library"))
     private let learningEngine: LearningEngine? = try? LearningEngine.defaultStore()
+    /// アニメ・イラスト用のNSFW部位検出器（初回アクセス時にモデルロード。失敗時はnil=従来動作）
+    private lazy var animeCensorDetector: AnimeCensorDetector? = try? AnimeCensorDetector()
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -794,6 +796,16 @@ final class MosaicWindowController: NSObject {
             pushUndoSnapshot(previousState)
             dismissMosaicPreview()
             var rois = snapshot.rois
+
+            // 実写/イラスト・漫画を判定し、イラスト系はアニメ部位検出モデル（内容ベース検出）を実行して統合する
+            let domain = DomainClassifier.classify(loadedImage.cgImage)
+            var animeDetectionCount = 0
+            if domain == .illustration, let detector = animeCensorDetector {
+                let animeROIs = (try? detector.detect(in: loadedImage.cgImage)) ?? []
+                animeDetectionCount = animeROIs.count
+                rois = Self.mergeCandidates(base: rois, adding: animeROIs)
+            }
+
             if let learningEngine {
                 rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
             }
@@ -815,11 +827,15 @@ final class MosaicWindowController: NSObject {
             rebuildDetectionLayers(personCount: snapshot.personBounds.count, poseCount: snapshot.poseHints.count)
             // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
             showAllLayers()
-            // 実写/イラスト・漫画を判定し、イラスト系はアニメ用モデル未導入である旨を明示する
-            let domain = DomainClassifier.classify(loadedImage.cgImage)
-            let domainNote = domain == .illustration
-                ? "イラスト/漫画と判定（アニメ用検出モデル未導入のため自動検出は限定的）: "
-                : ""
+
+            let domainNote: String
+            if domain == .illustration {
+                domainNote = animeCensorDetector != nil
+                    ? "イラスト/漫画と判定（アニメ部位検出: \(animeDetectionCount)件）: "
+                    : "イラスト/漫画と判定（アニメ用検出モデルを読み込めませんでした）: "
+            } else {
+                domainNote = ""
+            }
             if snapshot.persons.isEmpty && canvas.rois.isEmpty {
                 updateStatus(domainNote + "人物を検出できませんでした（候補0件）。ドラッグで手動追加してください")
             } else {
@@ -828,6 +844,19 @@ final class MosaicWindowController: NSObject {
         } catch {
             showError(error)
         }
+    }
+
+    /// 内容ベース検出（アニメ部位検出）の結果を既存候補へ統合する。
+    /// 大きく重なる既存の自動候補（骨格ベース推定）は内容ベース検出を優先して置き換える。
+    private static func mergeCandidates(base: [MosaicROI], adding: [MosaicROI]) -> [MosaicROI] {
+        var result = base
+        for roi in adding {
+            result.removeAll { existing in
+                existing.source != "manual" && existing.rect.iou(with: roi.rect) > 0.5
+            }
+            result.append(roi)
+        }
+        return result
     }
 
     private let maskTintContext = CIContext(options: [.cacheIntermediates: false])

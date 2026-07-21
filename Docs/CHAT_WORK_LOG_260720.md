@@ -612,3 +612,27 @@
   検証は `swift build` / `swift test` 25/25 PASS / 品質ゲート全PASS、Build 29で再パッケージ。
 
 - 作業時間: 約40分
+
+### 2026-07-22 11:05 JST - Claude Code - 種別: 依頼内容 - モデル統合の承認
+
+- 内容:
+
+  ```text
+  ★作業をすすめて
+  ```
+
+### 2026-07-22 11:45 JST - Claude Code - 種別: 作業結果 - アニメNSFW部位検出モデルを統合（Build 30）
+
+- 内容:
+
+  ユーザー承認を受け、アニメ特化検出モデルの統合を完了した。
+
+  - **モデル取得**: deepghs/anime_censor_detection の censor_detect_v1.0_s（MITライセンス, YOLOv8系ONNX, 44.6MB, クラス nipple_f/penis/pussy）をHuggingFaceから取得し `Sources/MosaicCore/Resources/` へ同梱。labels.jsonでクラス順を確認。
+  - **推論基盤**: ONNX→CoreML変換は変換リスクがあるため回避し、**ONNX Runtime（microsoft/onnxruntime-swift-package-manager 1.24.2）のSwiftPM直接統合**を採用。完全ローカル実行で画像の外部送信なし。
+  - **実装**: `AnimeCensorDetector`（前処理: 640x640 RGB CHW正規化 / 推論 / クラス→カテゴリ対応付け）と `YOLODecoder`（属性メジャー配列デコード+クラス別NMS, 信頼度0.3/IoU 0.7）を新設。候補生成時に `DomainClassifier` がイラスト/漫画と判定した場合に実行し、骨格ベース候補とIoU 0.5で統合（内容ベース優先）。ステータスへ「アニメ部位検出: N件」を表示。
+  - **同梱対応**: パッケージスクリプトへSwiftPMリソースバンドルのコピーを追加（これが無いと配布アプリでモデルが見つからない）。`Mosaic/THIRD_PARTY_NOTICES.md` を新設しモデル・ライブラリのライセンスを記録。
+  - **検証**: swift test 28/28 PASS（新規4件: YOLOデコード・NMS・モデルロード+推論スモーク・既存）。モデルロードと推論の実働をテストで確認済み。品質ゲート全PASS、Build 30で再パッケージ。
+
+  残課題（計画書§6.2更新済み）: アニメ人物・骨格検出の導入（イラストでは人物/骨格レイヤが空のまま）、実写側のnudenet_onnx導入、ドメイン判定のモデル化。GUI動作確認（実際の漫画・イラストでの検出精度）はユーザー担当。
+
+- 作業時間: 約45分

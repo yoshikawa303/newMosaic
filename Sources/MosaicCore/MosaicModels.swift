@@ -53,6 +53,13 @@ public struct NormalizedRect: Codable, Equatable, Sendable {
         return NormalizedRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
     }
 
+    public func iou(with other: NormalizedRect) -> Double {
+        guard let overlap = intersection(other) else { return 0 }
+        let union = area + other.area - overlap.area
+        guard union > 0 else { return 0 }
+        return overlap.area / union
+    }
+
     public func cgRect(imageSize: CGSize, origin: CoordinateOrigin = .topLeft) -> CGRect {
         let rect = clamped()
         let width = rect.width * imageSize.width

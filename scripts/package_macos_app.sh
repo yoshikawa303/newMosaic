@@ -16,6 +16,10 @@ rm -rf "$APP_DIR"
 mkdir -p "$MACOS_DIR"
 cp ".build/release/$EXECUTABLE_NAME" "$MACOS_DIR/$EXECUTABLE_NAME"
 
+# SwiftPMリソースバンドル（アニメ部位検出ONNXモデル等）を同梱する。
+# Bundle.module は実行ファイルと同じディレクトリのバンドルも探すため MacOS/ 直下へ配置する。
+cp -R ".build/release/newMosaic_MosaicCore.bundle" "$MACOS_DIR/"
+
 cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -38,7 +42,7 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundleShortVersionString</key>
   <string>0.0.00001</string>
   <key>CFBundleVersion</key>
-  <string>29</string>
+  <string>30</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>NSHighResolutionCapable</key>

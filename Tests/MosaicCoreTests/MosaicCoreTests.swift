@@ -373,6 +373,56 @@ import Testing
     }
 }
 
+@Test func yoloDecoderDecodesAttributeMajorOutput() {
+    // アンカー2・クラス3の属性メジャー配列（4+3=7行 × 2列）を合成してデコードを検証する。
+    // アンカー0: cx=320,cy=320,w=64,h=64, スコア(0.9, 0.1, 0.05) → class0
+    // アンカー1: 低信頼（全クラス0.1）→ 閾値0.3で除外
+    let output: [Float] = [
+        320, 100,   // cx
+        320, 100,   // cy
+        64, 32,     // w
+        64, 32,     // h
+        0.9, 0.1,   // class0
+        0.1, 0.1,   // class1
+        0.05, 0.1   // class2
+    ]
+
+    let detections = YOLODecoder.decode(output: output, classCount: 3, confidenceThreshold: 0.3)
+
+    #expect(detections.count == 1)
+    let detection = detections[0]
+    #expect(detection.classIndex == 0)
+    #expect(abs(detection.score - 0.9) < 0.001)
+    #expect(abs(detection.rect.x - (0.5 - 0.05)) < 0.001)
+    #expect(abs(detection.rect.width - 0.1) < 0.001)
+}
+
+@Test func yoloDecoderNMSKeepsHighestScorePerOverlap() {
+    let a = YOLODecoder.Detection(
+        rect: NormalizedRect(x: 0.4, y: 0.4, width: 0.2, height: 0.2), score: 0.9, classIndex: 0)
+    let b = YOLODecoder.Detection(
+        rect: NormalizedRect(x: 0.41, y: 0.41, width: 0.2, height: 0.2), score: 0.6, classIndex: 0)
+    let c = YOLODecoder.Detection(
+        rect: NormalizedRect(x: 0.41, y: 0.41, width: 0.2, height: 0.2), score: 0.5, classIndex: 1)
+
+    let kept = YOLODecoder.nonMaxSuppression([a, b, c], iouThreshold: 0.7)
+
+    // 同クラスの重複bは抑制、別クラスcは残る
+    #expect(kept.count == 2)
+    #expect(kept.contains { $0.classIndex == 0 && $0.score == 0.9 })
+    #expect(kept.contains { $0.classIndex == 1 })
+}
+
+@Test func animeCensorDetectorLoadsModelAndRunsOnPlainImage() throws {
+    // 同梱ONNXモデルのロードと推論実行のスモークテスト（単色画像では検出0件のはず）
+    let detector = try AnimeCensorDetector()
+    let image = try makeSolidImage(width: 320, height: 240)
+
+    let rois = try detector.detect(in: image)
+
+    #expect(rois.isEmpty)
+}
+
 @Test func domainClassifierSeparatesFlatAndTexturedImages() throws {
     // 単色（平坦=イラスト的）とテクスチャ（隣接差分が大きい=実写的）を判別できることを検証する
     let flat = try makeSolidImage(width: 200, height: 200)
