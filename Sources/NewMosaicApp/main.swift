@@ -151,12 +151,17 @@ private final class LayerRowView: NSTableCellView {
     }
 }
 
-/// ライブラリ一覧で上下（左右）矢印キーによる画像切替を可能にするテーブルビュー。
+/// ライブラリ一覧で上下（左右）矢印キーによる画像切替と、Deleteキーによる削除を可能にするテーブルビュー。
 @MainActor
 private final class NavigableTableView: NSTableView {
     var onNavigate: ((Int) -> Void)?
+    var onDelete: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117 {
+            onDelete?()
+            return
+        }
         switch Int(event.specialKey?.rawValue ?? 0) {
         case Int(NSUpArrowFunctionKey), Int(NSLeftArrowFunctionKey):
             onNavigate?(-1)
@@ -168,14 +173,19 @@ private final class NavigableTableView: NSTableView {
     }
 }
 
-/// ライブラリ一覧（グリッド表示）で矢印キーによる画像切替を可能にするコレクションビュー。
+/// ライブラリ一覧（グリッド表示）で矢印キーによる画像切替と、Deleteキーによる削除を可能にするコレクションビュー。
 @MainActor
 private final class NavigableCollectionView: NSCollectionView {
     var onNavigate: ((Int) -> Void)?
+    var onDelete: (() -> Void)?
 
     override var acceptsFirstResponder: Bool { true }
 
     override func keyDown(with event: NSEvent) {
+        if event.keyCode == 51 || event.keyCode == 117 {
+            onDelete?()
+            return
+        }
         switch Int(event.specialKey?.rawValue ?? 0) {
         case Int(NSUpArrowFunctionKey), Int(NSLeftArrowFunctionKey):
             onNavigate?(-1)
@@ -449,6 +459,12 @@ final class MosaicWindowController: NSObject {
         }
         collectionView.onNavigate = { [weak self] delta in
             self?.navigateLibrary(by: delta)
+        }
+        tableView.onDelete = { [weak self] in
+            self?.deleteSelectedLibraryItems()
+        }
+        collectionView.onDelete = { [weak self] in
+            self?.deleteSelectedLibraryItems()
         }
         applyLayerVisibility()
         updateUndoRedoAvailability()
@@ -1014,6 +1030,7 @@ final class MosaicWindowController: NSObject {
         tableView.dataSource = self
         tableView.target = self
         tableView.doubleAction = #selector(openSelectedLibraryOriginal)
+        tableView.allowsMultipleSelection = true
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
         column.title = "Item"
         column.width = 260
@@ -1024,7 +1041,8 @@ final class MosaicWindowController: NSObject {
 
         let openOriginalButton = NSButton(title: "元画像を開く", target: self, action: #selector(openSelectedLibraryOriginal))
         let openProcessedButton = NSButton(title: "加工後を開く", target: self, action: #selector(openSelectedLibraryProcessed))
-        let buttons = NSStackView(views: [openOriginalButton, openProcessedButton])
+        let deleteButton = NSButton(title: "選択画像を削除", target: self, action: #selector(deleteSelectedLibraryItems))
+        let buttons = NSStackView(views: [openOriginalButton, openProcessedButton, deleteButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
@@ -1062,6 +1080,7 @@ final class MosaicWindowController: NSObject {
         collectionView.dataSource = self
         collectionView.delegate = self
         collectionView.isSelectable = true
+        collectionView.allowsMultipleSelection = true
         collectionView.backgroundColors = [.clear]
         collectionView.register(LibraryGridItem.self, forItemWithIdentifier: LibraryGridItem.identifier)
         let doubleClickRecognizer = NSClickGestureRecognizer(target: self, action: #selector(collectionViewDoubleClicked(_:)))
@@ -1152,6 +1171,69 @@ final class MosaicWindowController: NSObject {
             let row = tableView.selectedRow
             guard row >= 0, row < libraryItems.count else { return nil }
             return libraryItems[row]
+        }
+    }
+
+    /// 現在の表示モードで選択中の全アイテムを返す（Shift=範囲選択 / Cmd=個別追加選択に対応）。
+    private func selectedLibraryItems() -> [MosaicLibraryItem] {
+        switch libraryViewMode {
+        case .thumbnailGrid:
+            return collectionView.selectionIndexPaths
+                .map(\.item)
+                .sorted()
+                .compactMap { $0 < libraryItems.count ? libraryItems[$0] : nil }
+        case .textList, .thumbnailList:
+            return tableView.selectedRowIndexes.compactMap { $0 < libraryItems.count ? libraryItems[$0] : nil }
+        }
+    }
+
+    /// 選択中の画像をライブラリから一括削除する（確認ダイアログあり。元画像・加工後画像とも完全削除）。
+    @objc private func deleteSelectedLibraryItems() {
+        let items = selectedLibraryItems()
+        guard !items.isEmpty else {
+            updateStatus("削除する画像を選択してください（Shift/Cmd+クリックで複数選択できます）")
+            return
+        }
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "選択した\(items.count)件の画像を削除しますか？"
+        alert.informativeText = "元画像と加工後画像がライブラリから完全に削除されます。この操作は取り消せません。"
+        alert.addButton(withTitle: "削除")
+        alert.addButton(withTitle: "キャンセル")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        do {
+            try libraryEngine.deleteItems(ids: items.map(\.id))
+            let deletedIDs = Set(items.map(\.id))
+            for id in deletedIDs {
+                imageEditStates[id] = nil
+                imageEditStateOrder.removeAll { $0 == id }
+            }
+            if let current = currentLibraryItem, deletedIDs.contains(current.id) {
+                currentLibraryItem = nil
+                loadedImage = nil
+                renderedImage = nil
+                mosaicPreviewCheckbox.state = .off
+                canvas.clearImage()
+                canvas.rois = []
+                canvas.personLayerRects = []
+                canvas.poseLayerRects = []
+                canvas.personLayerMasks = []
+                canvas.poseLayerBones = []
+                canvas.poseLayerJointPoints = []
+                rebuildDetectionLayers(personCount: 0, poseCount: 0)
+                applyLayerVisibility()
+                syncLegacyLayerCheckboxes()
+                resetUndoHistory()
+                hasUnsavedChanges = false
+            }
+            if let selectedID = selectedLibraryItemID, deletedIDs.contains(selectedID) {
+                selectedLibraryItemID = nil
+            }
+            reloadLibrary()
+            updateStatus("\(items.count)件の画像を削除しました")
+        } catch {
+            showError(error)
         }
     }
 
@@ -1636,6 +1718,13 @@ final class ImageCanvasView: NSView {
     func setImage(_ cgImage: CGImage) {
         image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         imagePixelSize = CGSize(width: cgImage.width, height: cgImage.height)
+        needsDisplay = true
+    }
+
+    /// 表示画像を破棄してプレースホルダ表示に戻す（ライブラリから表示中画像を削除した場合など）。
+    func clearImage() {
+        image = nil
+        imagePixelSize = .zero
         needsDisplay = true
     }
 

@@ -296,6 +296,29 @@ import Testing
     #expect(items[0].rois == [roi])
 }
 
+@Test func libraryEngineDeletesItemsAndFiles() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent(UUID().uuidString)
+        .appendingPathComponent("Library")
+    let engine = LibraryEngine(rootURL: root)
+    let image = try makeSolidImage(width: 32, height: 24)
+
+    let itemA = try engine.importOriginal(image, sourceName: "a.png")
+    let itemB = try engine.importOriginal(image, sourceName: "b.png")
+    _ = try engine.saveProcessedImage(image, rois: [], for: itemA.id)
+    let processedURLA = engine.processedURL(for: try #require(engine.loadItems().first { $0.id == itemA.id }))
+
+    try engine.deleteItems(ids: [itemA.id])
+
+    let remaining = try engine.loadItems()
+    #expect(remaining.count == 1)
+    #expect(remaining[0].id == itemB.id)
+    #expect(!FileManager.default.fileExists(atPath: engine.originalURL(for: itemA).path))
+    if let processedURLA {
+        #expect(!FileManager.default.fileExists(atPath: processedURLA.path))
+    }
+}
+
 @Test func learningEngineDHashIsStableAndDiscriminative() throws {
     let image = try makePatternImage(width: 200, height: 200)
     let rectA = NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3)

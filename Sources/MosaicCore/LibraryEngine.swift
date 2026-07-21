@@ -120,6 +120,23 @@ public final class LibraryEngine {
         return items[index]
     }
 
+    /// 指定IDのアイテムをライブラリから削除する（索引・元画像PNG・加工後PNGすべて）。
+    /// 存在しないIDは無視する。ファイル削除に失敗しても索引からは取り除く。
+    public func deleteItems(ids: [UUID]) throws {
+        let idSet = Set(ids)
+        var items = try loadItems()
+        let targets = items.filter { idSet.contains($0.id) }
+        guard !targets.isEmpty else { return }
+        for item in targets {
+            try? FileManager.default.removeItem(at: originalURL(for: item))
+            if let processedURL = processedURL(for: item) {
+                try? FileManager.default.removeItem(at: processedURL)
+            }
+        }
+        items.removeAll { idSet.contains($0.id) }
+        try saveItems(items)
+    }
+
     public func originalURL(for item: MosaicLibraryItem) -> URL {
         rootURL.appendingPathComponent(item.originalRelativePath)
     }

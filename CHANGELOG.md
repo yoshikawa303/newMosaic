@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.0.00001 - Build 21 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- ライブラリからの選択画像削除機能を追加した（「選択画像を削除」ボタンまたはDeleteキー。確認ダイアログ付きで元画像・加工後画像とも完全削除）。
+- ライブラリの複数選択に対応した。Shift+クリックで範囲選択、Cmd+クリックで個別追加選択ができ、一括削除が可能（グリッド/テキスト/サムネイルの全表示モード対応）。
+
+■更新履歴
+
+- `LibraryEngine.deleteItems(ids:)` を追加（索引・元画像PNG・加工後PNGを削除。単体テスト追加）。
+- `NSTableView` / `NSCollectionView` の `allowsMultipleSelection` を有効化し、Deleteキー（backspace/forward delete）でも削除確認を起動。
+- 表示中の画像を削除した場合はキャンバスをプレースホルダへ戻し、編集状態キャッシュ・アンドゥ履歴も破棄。
+
+■補足
+
+- macOSの標準操作に合わせ、個別追加選択は **Cmd+クリック**（WindowsのCtrl+クリック相当）。Ctrl+クリックはmacOSでは右クリック扱いのため使用しない。
+
 ## v0.0.00001 - Build 20 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）
