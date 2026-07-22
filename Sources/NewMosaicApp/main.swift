@@ -2376,10 +2376,20 @@ final class ImageCanvasView: NSView {
     private var dragCurrent: CGPoint?
     private var resizeState: ResizeState?
     private var moveState: MoveState?
+    private var rotationState: RotationState?
 
     private struct ResizeState {
         var roiID: UUID
+        /// ローカル（無回転）座標系でのアンカー点
         var anchor: NSPoint
+        /// ドラッグ開始時のROI中心（ビュー座標）
+        var center: NSPoint
+        var rotationDegrees: Double
+    }
+
+    private struct RotationState {
+        var roiID: UUID
+        var center: NSPoint
     }
 
     private struct MoveState {
@@ -2433,12 +2443,50 @@ final class ImageCanvasView: NSView {
         }
     }
 
+    // MARK: - 回転ヘルパー
+
+    /// ビュー座標での点の回転（フリップ座標系のため正の角度が画面上で時計回りに見える）。
+    private func rotatedPoint(_ point: NSPoint, around center: NSPoint, degrees: Double) -> NSPoint {
+        guard abs(degrees) > 0.001 else { return point }
+        let radians = degrees * .pi / 180
+        let dx = point.x - center.x
+        let dy = point.y - center.y
+        return NSPoint(
+            x: center.x + dx * cos(radians) - dy * sin(radians),
+            y: center.y + dx * sin(radians) + dy * cos(radians)
+        )
+    }
+
+    /// -180〜180度へ正規化する。
+    private func normalizedDegrees(_ degrees: Double) -> Double {
+        var value = degrees.truncatingRemainder(dividingBy: 360)
+        if value > 180 { value -= 360 }
+        if value < -180 { value += 360 }
+        return value
+    }
+
+    /// 回転を考慮したROIの当たり判定（点を無回転ローカル座標へ逆回転して矩形判定）。
+    private func roiHit(at point: NSPoint, imageRect: NSRect) -> MosaicROI? {
+        rois.last(where: { roi in
+            let rect = viewRect(from: roi.rect, imageRect: imageRect)
+            let center = NSPoint(x: rect.midX, y: rect.midY)
+            let local = rotatedPoint(point, around: center, degrees: -roi.rotation)
+            return rect.contains(local)
+        })
+    }
+
+    /// 回転ハンドル（選択ROI上部の丸）の位置。
+    private func rotationHandlePoint(rect: NSRect, rotation: Double) -> NSPoint {
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        return rotatedPoint(NSPoint(x: rect.midX, y: rect.minY - 22), around: center, degrees: rotation)
+    }
+
     /// ROI上の右クリックで対象カテゴリを変更するコンテキストメニューを表示する。
     override func menu(for event: NSEvent) -> NSMenu? {
         guard image != nil else { return nil }
         let point = convert(event.locationInWindow, from: nil)
         let imageRect = imageDrawRect()
-        guard let hit = rois.last(where: { viewRect(from: $0.rect, imageRect: imageRect).contains(point) }) else {
+        guard let hit = roiHit(at: point, imageRect: imageRect) else {
             return nil
         }
         selectedROIID = hit.id
@@ -2466,11 +2514,37 @@ final class ImageCanvasView: NSView {
     override func mouseDown(with event: NSEvent) {
         guard image != nil else { return }
         let point = convert(event.locationInWindow, from: nil)
+
+        // 回転・リサイズハンドルは画像端のROIで画像範囲の外側に出ることがあるため、
+        // 画像範囲ガードより先に判定する
+        if event.clickCount < 2,
+           let selectedID = selectedROIID,
+           let roi = rois.first(where: { $0.id == selectedID }) {
+            let imageRect = imageDrawRect()
+            let rect = viewRect(from: roi.rect, imageRect: imageRect)
+            let handle = rotationHandlePoint(rect: rect, rotation: roi.rotation)
+            if hypot(handle.x - point.x, handle.y - point.y) <= handleRadius + 2 {
+                onManualEditWillBegin?()
+                rotationState = RotationState(roiID: selectedID, center: NSPoint(x: rect.midX, y: rect.midY))
+                return
+            }
+            if let anchor = handleAnchor(at: point, roi: roi, imageRect: imageRect) {
+                onManualEditWillBegin?()
+                resizeState = ResizeState(
+                    roiID: selectedID,
+                    anchor: anchor,
+                    center: NSPoint(x: rect.midX, y: rect.midY),
+                    rotationDegrees: roi.rotation
+                )
+                return
+            }
+        }
+
         guard imageDrawRect().contains(point) else { return }
 
         if event.clickCount >= 2 {
             let imageRect = imageDrawRect()
-            if let hit = rois.last(where: { viewRect(from: $0.rect, imageRect: imageRect).contains(point) }) {
+            if let hit = roiHit(at: point, imageRect: imageRect) {
                 onManualEditWillBegin?()
                 if selectedROIID == hit.id { selectedROIID = nil }
                 rois.removeAll { $0.id == hit.id }
@@ -2479,16 +2553,8 @@ final class ImageCanvasView: NSView {
             }
         }
 
-        if let selectedID = selectedROIID,
-           let roi = rois.first(where: { $0.id == selectedID }),
-           let anchor = handleAnchor(at: point, roi: roi, imageRect: imageDrawRect()) {
-            onManualEditWillBegin?()
-            resizeState = ResizeState(roiID: selectedID, anchor: anchor)
-            return
-        }
-
         let imageRect = imageDrawRect()
-        if let hit = rois.last(where: { viewRect(from: $0.rect, imageRect: imageRect).contains(point) }) {
+        if let hit = roiHit(at: point, imageRect: imageRect) {
             selectedROIID = hit.id
             moveState = MoveState(roiID: hit.id, lastPoint: point)
             return
@@ -2503,12 +2569,25 @@ final class ImageCanvasView: NSView {
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
 
+        if let rotation = rotationState {
+            guard let index = rois.firstIndex(where: { $0.id == rotation.roiID }) else { return }
+            // ハンドルはROI上方に付くため、マウス方向の角度+90度が回転角になる
+            let angle = atan2(point.y - rotation.center.y, point.x - rotation.center.x) * 180 / .pi + 90
+            // 45度の倍数の近く（±3度）はスナップ
+            let nearest = (angle / 45).rounded() * 45
+            let snapped = abs(angle - nearest) <= 3 ? nearest : angle
+            rois[index].rotation = normalizedDegrees(snapped)
+            return
+        }
+
         if let resize = resizeState {
+            // 回転中のROIはマウス点を無回転ローカル座標へ逆回転してからリサイズする
+            let local = rotatedPoint(point, around: resize.center, degrees: -resize.rotationDegrees)
             let newViewRect = NSRect(
-                x: min(resize.anchor.x, point.x),
-                y: min(resize.anchor.y, point.y),
-                width: abs(point.x - resize.anchor.x),
-                height: abs(point.y - resize.anchor.y)
+                x: min(resize.anchor.x, local.x),
+                y: min(resize.anchor.y, local.y),
+                width: abs(local.x - resize.anchor.x),
+                height: abs(local.y - resize.anchor.y)
             )
             if let normalized = normalizedRect(fromViewRect: newViewRect),
                let index = rois.firstIndex(where: { $0.id == resize.roiID }) {
@@ -2544,6 +2623,13 @@ final class ImageCanvasView: NSView {
 
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+
+        if rotationState != nil {
+            rotationState = nil
+            needsDisplay = true
+            onManualEditDidEnd?()
+            return
+        }
 
         if let resize = resizeState {
             resizeState = nil
@@ -2615,15 +2701,19 @@ final class ImageCanvasView: NSView {
         onManualEditDidEnd?()
     }
 
+    /// 四隅リサイズハンドルの判定。回転中のROIはマウス点をローカル座標へ逆回転して判定し、
+    /// アンカー（対角）もローカル座標で返す。
     private func handleAnchor(at point: NSPoint, roi: MosaicROI, imageRect: NSRect) -> NSPoint? {
         let rect = viewRect(from: roi.rect, imageRect: imageRect)
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let local = rotatedPoint(point, around: center, degrees: -roi.rotation)
         let corners: [(handle: NSPoint, anchor: NSPoint)] = [
             (NSPoint(x: rect.minX, y: rect.minY), NSPoint(x: rect.maxX, y: rect.maxY)),
             (NSPoint(x: rect.maxX, y: rect.minY), NSPoint(x: rect.minX, y: rect.maxY)),
             (NSPoint(x: rect.minX, y: rect.maxY), NSPoint(x: rect.maxX, y: rect.minY)),
             (NSPoint(x: rect.maxX, y: rect.maxY), NSPoint(x: rect.minX, y: rect.minY))
         ]
-        for corner in corners where abs(corner.handle.x - point.x) <= handleRadius && abs(corner.handle.y - point.y) <= handleRadius {
+        for corner in corners where abs(corner.handle.x - local.x) <= handleRadius && abs(corner.handle.y - local.y) <= handleRadius {
             return corner.anchor
         }
         return nil
@@ -2646,10 +2736,11 @@ final class ImageCanvasView: NSView {
         for roi in rois {
             let rect = viewRect(from: roi.rect, imageRect: target)
             let color: NSColor = roi.source == "manual" ? .systemGreen : .systemRed
-            drawShape(roi.shape, rect: rect, color: color)
+            drawShape(roi, rect: rect, color: color)
             drawCategoryLabel(roi, near: rect, color: color)
             if roi.id == selectedROIID {
-                drawSelectionHandles(rect)
+                drawSelectionHandles(rect, rotation: roi.rotation)
+                drawRotationHandle(rect: rect, rotation: roi.rotation)
             }
         }
     }
@@ -2667,13 +2758,43 @@ final class ImageCanvasView: NSView {
         text.draw(at: CGPoint(x: max(0, rect.minX), y: y), withAttributes: attributes)
     }
 
-    private func drawShape(_ shape: ROIShape, rect: NSRect, color: NSColor) {
-        let path = shape == .ellipse ? NSBezierPath(ovalIn: rect) : NSBezierPath(rect: rect)
+    private func drawShape(_ roi: MosaicROI, rect: NSRect, color: NSColor) {
+        let path = roi.shape == .ellipse ? NSBezierPath(ovalIn: rect) : NSBezierPath(rect: rect)
+        applyRotation(to: path, rect: rect, degrees: roi.rotation)
         color.withAlphaComponent(0.18).setFill()
         path.fill()
         color.setStroke()
         path.lineWidth = 2
         path.stroke()
+    }
+
+    /// パスへ矩形中心基準の回転を適用する。
+    private func applyRotation(to path: NSBezierPath, rect: NSRect, degrees: Double) {
+        guard abs(degrees) > 0.01 else { return }
+        let transform = NSAffineTransform()
+        transform.translateX(by: rect.midX, yBy: rect.midY)
+        transform.rotate(byDegrees: degrees)
+        transform.translateX(by: -rect.midX, yBy: -rect.midY)
+        path.transform(using: transform as AffineTransform)
+    }
+
+    /// 回転ハンドル（選択ROI上部の丸と接続線）を描画する。
+    private func drawRotationHandle(rect: NSRect, rotation: Double) {
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let top = rotatedPoint(NSPoint(x: rect.midX, y: rect.minY), around: center, degrees: rotation)
+        let handle = rotationHandlePoint(rect: rect, rotation: rotation)
+        NSColor.controlAccentColor.setStroke()
+        let line = NSBezierPath()
+        line.move(to: top)
+        line.line(to: handle)
+        line.lineWidth = 1
+        line.stroke()
+        let circle = NSBezierPath(ovalIn: NSRect(x: handle.x - 5, y: handle.y - 5, width: 10, height: 10))
+        NSColor.white.setFill()
+        circle.fill()
+        NSColor.controlAccentColor.setStroke()
+        circle.lineWidth = 1.5
+        circle.stroke()
     }
 
     private func drawPreviewShape(_ rect: NSRect) {
@@ -2683,12 +2804,13 @@ final class ImageCanvasView: NSView {
         path.stroke()
     }
 
-    private func drawSelectionHandles(_ rect: NSRect) {
+    private func drawSelectionHandles(_ rect: NSRect, rotation: Double = 0) {
         let size: CGFloat = 8
+        let center = NSPoint(x: rect.midX, y: rect.midY)
         let points = [
             NSPoint(x: rect.minX, y: rect.minY), NSPoint(x: rect.maxX, y: rect.minY),
             NSPoint(x: rect.minX, y: rect.maxY), NSPoint(x: rect.maxX, y: rect.maxY)
-        ]
+        ].map { rotatedPoint($0, around: center, degrees: rotation) }
         for point in points {
             let handleRect = NSRect(x: point.x - size / 2, y: point.y - size / 2, width: size, height: size)
             let path = NSBezierPath(rect: handleRect)

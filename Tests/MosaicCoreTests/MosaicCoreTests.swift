@@ -302,6 +302,45 @@ import Testing
     #expect(result.confidence <= 1.0)
 }
 
+@Test func shapeMaskRotationRotatesRectangle() throws {
+    // 横長矩形を90度回転すると、元の右端中央（回転後は範囲外）が黒になり、
+    // 上下中央（回転後の縦長帯の内側）が白になることを検証する
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let base = MosaicROI(
+        rect: NormalizedRect(x: 0.1, y: 0.4, width: 0.8, height: 0.2),
+        confidence: 1,
+        source: "manual",
+        shape: .rectangle
+    )
+    var rotated = base
+    rotated.rotation = 90
+
+    let engine = ShapeSegmentEngine()
+    let masks = try engine.createMasks(
+        for: [base, rotated],
+        in: try makeSolidImage(width: 100, height: 100),
+        extent: extent
+    )
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func luminance(_ image: CIImage, x: Int, y: Int) -> Double {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            image, toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Double(pixel[0]) / 255
+    }
+
+    // 元の矩形: 右端寄り(85,50)は白 / 上端中央(50,85)は黒
+    #expect(luminance(masks[0], x: 85, y: 50) > 0.9)
+    #expect(luminance(masks[0], x: 50, y: 85) < 0.1)
+    // 90度回転後: 右端寄りは黒 / 上下方向の帯内は白
+    #expect(luminance(masks[1], x: 85, y: 50) < 0.1)
+    #expect(luminance(masks[1], x: 50, y: 85) > 0.9)
+    #expect(masks[1].extent == extent)
+}
+
 @Test func regionForegroundCoverageRatioMeasuresMaskArea() {
     // 被覆率判定: 全白マスク≈1.0、全黒マスク≈0.0 を返すことを検証する
     let engine = RegionForegroundSegmentEngine()

@@ -39,24 +39,38 @@ public final class ShapeSegmentEngine: Segmenting {
     public init() {}
 
     public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
-        rois.map { roi in
-            let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-            switch roi.shape {
-            case .rectangle:
-                return Self.rectangleMask(rect: rect, extent: extent)
-            case .ellipse:
-                return Self.ellipseMask(rect: rect, extent: extent)
-            }
+        rois.map { Self.shapeMask(for: $0, extent: extent) }
+    }
+
+    /// ROIの形状（矩形/楕円）と回転角から幾何学的マスクを生成する。
+    /// 他のSegmentEngineがROI範囲へマスクを制限する用途でも共用する（回転・楕円形状を正しく反映するため）。
+    static func shapeMask(for roi: MosaicROI, extent: CGRect) -> CIImage {
+        let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        switch roi.shape {
+        case .rectangle:
+            return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
+        case .ellipse:
+            return ellipseMask(rect: rect, extent: extent, rotation: roi.rotation)
         }
     }
 
-    static func rectangleMask(rect: CGRect, extent: CGRect) -> CIImage {
-        let white = CIImage(color: .white).cropped(to: rect)
-        let black = CIImage(color: .black).cropped(to: extent)
-        return white.composited(over: black)
+    /// ビュー座標（上原点・時計回り）の回転角を、CI座標（下原点）の回転変換へ変換する。
+    static func ciRotation(around center: CGPoint, degrees: Double) -> CGAffineTransform {
+        CGAffineTransform(translationX: center.x, y: center.y)
+            .rotated(by: -degrees * .pi / 180)
+            .translatedBy(x: -center.x, y: -center.y)
     }
 
-    static func ellipseMask(rect: CGRect, extent: CGRect) -> CIImage {
+    static func rectangleMask(rect: CGRect, extent: CGRect, rotation: Double = 0) -> CIImage {
+        var white = CIImage(color: .white).cropped(to: rect)
+        if abs(rotation) > 0.01 {
+            white = white.transformed(by: ciRotation(around: CGPoint(x: rect.midX, y: rect.midY), degrees: rotation))
+        }
+        let black = CIImage(color: .black).cropped(to: extent)
+        return white.composited(over: black).cropped(to: extent)
+    }
+
+    static func ellipseMask(rect: CGRect, extent: CGRect, rotation: Double = 0) -> CIImage {
         let radial = CIFilter(name: "CIRadialGradient", parameters: [
             "inputCenter": CIVector(x: rect.midX, y: rect.midY),
             "inputRadius0": min(rect.width, rect.height) * 0.44,
@@ -67,12 +81,23 @@ public final class ShapeSegmentEngine: Segmenting {
 
         let scaleX = rect.width / max(1, min(rect.width, rect.height))
         let scaleY = rect.height / max(1, min(rect.width, rect.height))
-        let transformed = radial
+        var transformed = radial
             .transformed(by: CGAffineTransform(translationX: -rect.midX, y: -rect.midY))
             .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
             .transformed(by: CGAffineTransform(translationX: rect.midX, y: rect.midY))
-
+        if abs(rotation) > 0.01 {
+            transformed = transformed.transformed(by: ciRotation(around: CGPoint(x: rect.midX, y: rect.midY), degrees: rotation))
+        }
         return transformed.cropped(to: extent)
+    }
+
+    /// 全面マスクをROIの形状マスク（矩形/楕円+回転）へ制限する。
+    /// 従来の矩形クロップと異なり、楕円ROI・回転ROIでも形状どおりに制限される。
+    static func restrict(_ mask: CIImage, to roi: MosaicROI, extent: CGRect) -> CIImage {
+        let shape = shapeMask(for: roi, extent: extent)
+        return mask.applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: shape
+        ]).cropped(to: extent)
     }
 }
 
@@ -112,9 +137,12 @@ public final class ForegroundSegmentEngine: Segmenting {
             .composited(over: black)
 
         return rois.map { roi in
-            let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-            return fullFrameMask.cropped(to: rect).composited(over: black)
+            Self.restrictToROI(fullFrameMask, roi: roi, extent: extent)
         }
+    }
+
+    static func restrictToROI(_ mask: CIImage, roi: MosaicROI, extent: CGRect) -> CIImage {
+        ShapeSegmentEngine.restrict(mask, to: roi, extent: extent)
     }
 }
 
@@ -176,9 +204,8 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
 
         let black = CIImage(color: .black).cropped(to: extent)
-        let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-        // 前景マスクをROI範囲に制限して返す（ROI外へモザイクが漏れないようにする）
-        return mask.composited(over: black).cropped(to: roiRect).composited(over: black)
+        // 前景マスクをROIの形状範囲（矩形/楕円+回転）に制限して返す（ROI外へモザイクが漏れないようにする）
+        return ShapeSegmentEngine.restrict(mask.composited(over: black), to: roi, extent: extent)
     }
 
     /// クロップ画像の前景マスク（クロップ画素座標系）。
@@ -270,8 +297,7 @@ public final class VisionPersonSegmentEngine: Segmenting {
             .composited(over: black)
 
         return rois.map { roi in
-            let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-            return fullFrameMask.cropped(to: rect).composited(over: black)
+            ShapeSegmentEngine.restrict(fullFrameMask, to: roi, extent: extent)
         }
     }
 }

@@ -114,6 +114,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var source: String
     public var shape: ROIShape
     public var category: MosaicTargetCategory
+    /// 回転角（度。時計回り、矩形中心基準。0=回転なし）
+    public var rotation: Double
 
     public init(
         id: UUID = UUID(),
@@ -121,7 +123,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         confidence: Double,
         source: String,
         shape: ROIShape = .ellipse,
-        category: MosaicTargetCategory = .other
+        category: MosaicTargetCategory = .other,
+        rotation: Double = 0
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -129,10 +132,11 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.source = source
         self.shape = shape
         self.category = category
+        self.rotation = rotation
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, rect, confidence, source, shape, category
+        case id, rect, confidence, source, shape, category, rotation
     }
 
     public init(from decoder: Decoder) throws {
@@ -143,6 +147,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         source = try container.decode(String.self, forKey: .source)
         shape = try container.decodeIfPresent(ROIShape.self, forKey: .shape) ?? .ellipse
         category = try container.decodeIfPresent(MosaicTargetCategory.self, forKey: .category) ?? .other
+        rotation = try container.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
     }
 }
 
