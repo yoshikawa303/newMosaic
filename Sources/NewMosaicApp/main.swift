@@ -290,6 +290,9 @@ final class MosaicWindowController: NSObject {
     private let styleStripeWidthValueLabel = NSTextField(labelWithString: "12px")
     private let styleStripeSpacingSlider = NSSlider(value: 12, minValue: 0, maxValue: 60, target: nil, action: nil)
     private let styleStripeSpacingValueLabel = NSTextField(labelWithString: "12px")
+    private let styleCloudDensitySlider = NSSlider(value: 0.5, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
+    private let styleCloudDensityValueLabel = NSTextField(labelWithString: "50%")
+    private let styleCloudToneCheckbox = NSButton(checkboxWithTitle: "トーン化（漫画トーン）", target: nil, action: nil)
     private let stylePatternImageButton = NSButton(title: "パターン画像を選択...", target: nil, action: nil)
     private let stylePatternImageLabel = NSTextField(labelWithString: "未選択")
     private var customPatternImage: CGImage?
@@ -665,7 +668,7 @@ final class MosaicWindowController: NSObject {
         stylePatternPopUp.addItems(withTitles: MosaicFillPattern.allCases.map(\.displayName))
         stylePatternPopUp.target = self
         stylePatternPopUp.action = #selector(mosaicStyleChanged)
-        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider] {
+        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider] {
             slider.target = self
             slider.action = #selector(mosaicStyleChanged)
             slider.translatesAutoresizingMaskIntoConstraints = false
@@ -673,6 +676,8 @@ final class MosaicWindowController: NSObject {
         }
         styleTintCheckbox.target = self
         styleTintCheckbox.action = #selector(mosaicStyleChanged)
+        styleCloudToneCheckbox.target = self
+        styleCloudToneCheckbox.action = #selector(mosaicStyleChanged)
         styleTintColorWell.target = self
         styleTintColorWell.action = #selector(mosaicStyleChanged)
         styleTintColorWell.translatesAutoresizingMaskIntoConstraints = false
@@ -692,6 +697,8 @@ final class MosaicWindowController: NSObject {
             [NSTextField(labelWithString: "範囲輪郭ぼかし:"), styleFeatherSlider, styleFeatherValueLabel],
             [NSTextField(labelWithString: "帯の太さ:"), styleStripeWidthSlider, styleStripeWidthValueLabel],
             [NSTextField(labelWithString: "帯の間隔（透明）:"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
+            [NSTextField(labelWithString: "雲の密度:"), styleCloudDensitySlider, styleCloudDensityValueLabel],
+            [NSTextField(labelWithString: "雲:"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
             [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
         ])
         grid.rowSpacing = 10
@@ -739,6 +746,8 @@ final class MosaicWindowController: NSObject {
         style.edgeFeather = styleFeatherSlider.doubleValue
         style.stripeWidth = styleStripeWidthSlider.doubleValue
         style.stripeSpacing = styleStripeSpacingSlider.doubleValue
+        style.cloudDensity = styleCloudDensitySlider.doubleValue
+        style.cloudTone = styleCloudToneCheckbox.state == .on
         style.patternImage = customPatternImage
         return style
     }
@@ -754,10 +763,12 @@ final class MosaicWindowController: NSObject {
         let patterns = MosaicFillPattern.allCases
         let index = stylePatternPopUp.indexOfSelectedItem
         let pattern = (0..<patterns.count).contains(index) ? patterns[index] : .pixelate
-        let isStripes = pattern == .stripesVertical || pattern == .stripesHorizontal
-        styleStripeWidthSlider.isEnabled = isStripes
-        styleStripeSpacingSlider.isEnabled = isStripes
+        styleStripeWidthSlider.isEnabled = pattern.isStripes
+        styleStripeSpacingSlider.isEnabled = pattern.isStripes
+        styleCloudDensitySlider.isEnabled = pattern == .clouds
+        styleCloudToneCheckbox.isEnabled = pattern == .clouds
         stylePatternImageButton.isEnabled = pattern == .customImage
+        styleCloudDensityValueLabel.stringValue = "\(Int(styleCloudDensitySlider.doubleValue * 100))%"
         styleOpacityValueLabel.stringValue = "\(Int(styleOpacitySlider.doubleValue * 100))%"
         styleBlockScaleValueLabel.stringValue = "\(Int(styleBlockScaleSlider.doubleValue))"
         styleFeatherValueLabel.stringValue = "\(Int(styleFeatherSlider.doubleValue))px"
@@ -818,6 +829,8 @@ final class MosaicWindowController: NSObject {
         defaults.set(styleFeatherSlider.doubleValue, forKey: "MosaicStyle.edgeFeather")
         defaults.set(styleStripeWidthSlider.doubleValue, forKey: "MosaicStyle.stripeWidth")
         defaults.set(styleStripeSpacingSlider.doubleValue, forKey: "MosaicStyle.stripeSpacing")
+        defaults.set(styleCloudDensitySlider.doubleValue, forKey: "MosaicStyle.cloudDensity")
+        defaults.set(styleCloudToneCheckbox.state == .on, forKey: "MosaicStyle.cloudTone")
     }
 
     private func loadMosaicStyleSettings() {
@@ -851,6 +864,10 @@ final class MosaicWindowController: NSObject {
         if defaults.object(forKey: "MosaicStyle.stripeSpacing") != nil {
             styleStripeSpacingSlider.doubleValue = defaults.double(forKey: "MosaicStyle.stripeSpacing")
         }
+        if defaults.object(forKey: "MosaicStyle.cloudDensity") != nil {
+            styleCloudDensitySlider.doubleValue = defaults.double(forKey: "MosaicStyle.cloudDensity")
+        }
+        styleCloudToneCheckbox.state = defaults.bool(forKey: "MosaicStyle.cloudTone") ? .on : .off
         if let storeURL = try? Self.patternImageStoreURL(),
            FileManager.default.fileExists(atPath: storeURL.path),
            let loaded = try? imageLoader.loadImage(from: storeURL) {

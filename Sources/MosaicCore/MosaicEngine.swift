@@ -19,8 +19,11 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Sendable {
     case noise
     case blur
     case edgeBlur
+    case unsharpEdges
     case stripesVertical
     case stripesHorizontal
+    case stripesRandom
+    case clouds
     case customImage
 
     public var displayName: String {
@@ -29,10 +32,18 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Sendable {
         case .noise: return "ノイズ"
         case .blur: return "ボケ"
         case .edgeBlur: return "線・エッジぼかし"
+        case .unsharpEdges: return "アンシャープ（エッジ強調）"
         case .stripesVertical: return "ボーダー（縦）"
         case .stripesHorizontal: return "ボーダー（横）"
+        case .stripesRandom: return "ボーダーランダム"
+        case .clouds: return "雲"
         case .customImage: return "任意パターン画像"
         }
+    }
+
+    /// ボーダー系（帯太さ・間隔パラメータを使う）パターンか。
+    public var isStripes: Bool {
+        self == .stripesVertical || self == .stripesHorizontal || self == .stripesRandom
     }
 }
 
@@ -51,6 +62,10 @@ public struct MosaicStyle {
     public var stripeWidth: Double
     /// ボーダー: 帯の間隔（px。間隔部分は透明=元画像が見える）
     public var stripeSpacing: Double
+    /// 雲: 密度（0〜1。大きいほど雲=塗り部分が多い）
+    public var cloudDensity: Double
+    /// 雲: 漫画のトーンパターン化（網点変換）ON/OFF
+    public var cloudTone: Bool
     /// 任意パターン画像（customImage時。タイル状に敷き詰める）
     public var patternImage: CGImage?
 
@@ -62,6 +77,8 @@ public struct MosaicStyle {
         edgeFeather: Double = 0,
         stripeWidth: Double = 12,
         stripeSpacing: Double = 12,
+        cloudDensity: Double = 0.5,
+        cloudTone: Bool = false,
         patternImage: CGImage? = nil
     ) {
         self.pattern = pattern
@@ -71,7 +88,27 @@ public struct MosaicStyle {
         self.edgeFeather = edgeFeather
         self.stripeWidth = stripeWidth
         self.stripeSpacing = stripeSpacing
+        self.cloudDensity = cloudDensity
+        self.cloudTone = cloudTone
         self.patternImage = patternImage
+    }
+}
+
+/// 乱数パターンの再現性のためのシード付き乱数生成器（SplitMix64）。
+/// ボーダーランダムのプレビューが再レンダリングのたびに変わらないよう固定シードで使う。
+struct SeededRandomGenerator: RandomNumberGenerator {
+    private var state: UInt64
+
+    init(seed: UInt64) {
+        state = seed
+    }
+
+    mutating func next() -> UInt64 {
+        state &+= 0x9E3779B97F4A7C15
+        var z = state
+        z = (z ^ (z >> 30)) &* 0xBF58476D1CE4E5B9
+        z = (z ^ (z >> 27)) &* 0x94D049BB133111EB
+        return z ^ (z >> 31)
     }
 }
 
@@ -191,7 +228,27 @@ public final class MosaicEngine {
                 kCIInputBackgroundImageKey: original,
                 kCIInputMaskImageKey: edges
             ]).cropped(to: extent)
-        case .stripesVertical, .stripesHorizontal:
+        case .unsharpEdges:
+            // 範囲内の描画線・輪郭・内部模様のエッジのみをアンシャープ（強調）する。エッジ以外は元画像を保つ
+            let sharpened = original
+                .clampedToExtent()
+                .applyingFilter("CIUnsharpMask", parameters: [
+                    kCIInputRadiusKey: max(1, style.blockScale / 2),
+                    kCIInputIntensityKey: 2.5
+                ])
+                .cropped(to: extent)
+            let edges = original
+                .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 10])
+                .clampedToExtent()
+                .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: max(1, style.blockScale / 8)])
+                .cropped(to: extent)
+            fill = sharpened.applyingFilter("CIBlendWithMask", parameters: [
+                kCIInputBackgroundImageKey: original,
+                kCIInputMaskImageKey: edges
+            ]).cropped(to: extent)
+        case .clouds:
+            fill = Self.cloudLayer(style: style, extent: extent)
+        case .stripesVertical, .stripesHorizontal, .stripesRandom:
             // 帯の色（既定は黒。tintColor指定時はその色）。間隔の透明はマスク側で表現する。
             let color = style.tintColor ?? (red: 0, green: 0, blue: 0)
             fill = CIImage(color: CIColor(red: color.red, green: color.green, blue: color.blue)).cropped(to: extent)
@@ -212,8 +269,7 @@ public final class MosaicEngine {
         }
 
         // 色付け（ボーダーは帯色として適用済みのため対象外）
-        if let tint = style.tintColor,
-           style.pattern != .stripesVertical, style.pattern != .stripesHorizontal {
+        if let tint = style.tintColor, !style.pattern.isStripes {
             fill = fill.applyingFilter("CIColorMonochrome", parameters: [
                 kCIInputColorKey: CIColor(red: tint.red, green: tint.green, blue: tint.blue),
                 kCIInputIntensityKey: 1.0
@@ -224,42 +280,147 @@ public final class MosaicEngine {
 
     /// ボーダー用の縞アルファマスク（帯=白、間隔=黒=透明）。ボーダー以外はnil。
     static func stripePatternMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
-        let vertical: Bool
         switch style.pattern {
-        case .stripesVertical: vertical = true
-        case .stripesHorizontal: vertical = false
-        default: return nil
+        case .stripesVertical, .stripesHorizontal:
+            return regularStripeMask(style: style, extent: extent)
+        case .stripesRandom:
+            return randomStripeMask(style: style, extent: extent)
+        default:
+            return nil
         }
+    }
+
+    private static func regularStripeMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
+        let vertical = style.pattern == .stripesVertical
         let band = max(1, Int(style.stripeWidth.rounded()))
         let gap = max(0, Int(style.stripeSpacing.rounded()))
         let period = band + gap
 
-        let width = vertical ? period : 1
-        let height = vertical ? 1 : period
-        var buffer = [UInt8](repeating: 0, count: width * height)
-        for index in 0..<period where index < band {
-            if vertical {
-                buffer[index] = 255
-            } else {
-                buffer[index] = 255
-            }
-        }
-        guard let provider = CGDataProvider(data: Data(buffer) as CFData),
-              let tile = CGImage(
-                  width: width,
-                  height: height,
-                  bitsPerComponent: 8,
-                  bitsPerPixel: 8,
-                  bytesPerRow: width,
-                  space: CGColorSpaceCreateDeviceGray(),
-                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                  provider: provider,
-                  decode: nil,
-                  shouldInterpolate: false,
-                  intent: .defaultIntent
-              ) else { return nil }
+        var buffer = [UInt8](repeating: 0, count: period)
+        for index in 0..<band { buffer[index] = 255 }
+        guard let tile = makeGrayTile(
+            buffer: buffer,
+            width: vertical ? period : 1,
+            height: vertical ? 1 : period
+        ) else { return nil }
         return CIImage(cgImage: tile)
             .applyingFilter("CIAffineTile", parameters: [:])
             .cropped(to: extent)
+    }
+
+    /// ボーダーランダム: 帯幅・間隔を±40%揺らした帯パターンを斜め回転で敷き詰め、
+    /// ノイズ変位で角度にも揺れを出す。シード固定で再レンダリングしても同じ模様になる。
+    private static func randomStripeMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
+        let band = max(1.0, style.stripeWidth)
+        let gap = max(0.0, style.stripeSpacing)
+        var rng = SeededRandomGenerator(seed: 0x6D6F_7A61)
+
+        let length = 512
+        var buffer = [UInt8](repeating: 0, count: length)
+        var pos = 0
+        while pos < length {
+            let bandLen = max(1, Int((band * Double.random(in: 0.6...1.4, using: &rng)).rounded()))
+            let gapLen = max(0, Int((gap * Double.random(in: 0.6...1.4, using: &rng)).rounded()))
+            for index in pos..<min(length, pos + bandLen) { buffer[index] = 255 }
+            pos += max(1, bandLen + gapLen)
+        }
+        guard let tile = makeGrayTile(buffer: buffer, width: length, height: 1) else { return nil }
+
+        // 斜め回転（約20°±9°）で敷き詰める
+        let angle = 0.35 + Double.random(in: -0.15...0.15, using: &rng)
+        let rotation = NSAffineTransform()
+        rotation.rotate(byRadians: CGFloat(angle))
+        var mask = CIImage(cgImage: tile)
+            .applyingFilter("CIAffineTile", parameters: ["inputTransform": rotation])
+            .cropped(to: extent)
+
+        // なめらかなノイズで帯を変位させ、間隔・角度の揺れを出す
+        let wobbleScale = max(8, band * 4)
+        let wobble = (CIFilter(name: "CIRandomGenerator")?.outputImage ?? CIImage(color: .gray))
+            .transformed(by: CGAffineTransform(scaleX: wobbleScale, y: wobbleScale))
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: wobbleScale / 2])
+            .cropped(to: extent)
+        mask = mask
+            .clampedToExtent()
+            .applyingFilter("CIDisplacementDistortion", parameters: [
+                "inputDisplacementImage": wobble,
+                kCIInputScaleKey: band * 0.8
+            ])
+            .cropped(to: extent)
+        return mask
+    }
+
+    /// 雲パターン: 白ノイズを拡大+ぼかしした2オクターブ合成でPhotoshopの雲フィルタ風テクスチャを作る。
+    /// 密度はガンマ補正で塗り部分の面積を調整し、トーン化ONでは網点（漫画トーン風）へ変換する。
+    static func cloudLayer(style: MosaicStyle, extent: CGRect) -> CIImage {
+        let noise = CIFilter(name: "CIRandomGenerator")?.outputImage ?? CIImage(color: .gray)
+        let granularity = max(8, style.blockScale)
+
+        // オクターブ1: 大きな雲の塊（ノイズ1画素→granularity画素へ拡大し、ぼかして滑らかに）
+        let octave1 = noise
+            .transformed(by: CGAffineTransform(scaleX: granularity * 2, y: granularity * 2))
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: granularity])
+        // オクターブ2: 細部（位置をずらした別サンプル）
+        let octave2 = noise
+            .transformed(by: CGAffineTransform(translationX: 137, y: 89))
+            .transformed(by: CGAffineTransform(scaleX: granularity, y: granularity))
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: granularity / 2])
+
+        // 60% + 40% で合成し、グレースケール化
+        let scaled1 = octave1.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 0.6, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 0.6, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 0.6, w: 0)
+        ])
+        let scaled2 = octave2.applyingFilter("CIColorMatrix", parameters: [
+            "inputRVector": CIVector(x: 0.4, y: 0, z: 0, w: 0),
+            "inputGVector": CIVector(x: 0, y: 0.4, z: 0, w: 0),
+            "inputBVector": CIVector(x: 0, y: 0, z: 0.4, w: 0)
+        ])
+        var clouds = scaled1
+            .applyingFilter("CIAdditionCompositing", parameters: [kCIInputBackgroundImageKey: scaled2])
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 0,
+                kCIInputContrastKey: 1.6
+            ])
+            .cropped(to: extent)
+
+        // 密度: ガンマで明部（雲）の面積を調整（密度大→塗り多い）
+        let density = min(max(style.cloudDensity, 0.05), 1.0)
+        clouds = clouds.applyingFilter("CIGammaAdjust", parameters: [
+            "inputPower": 2.0 - density * 1.5
+        ]).cropped(to: extent)
+
+        // 漫画のトーンパターン化（網点変換）
+        if style.cloudTone {
+            clouds = clouds.applyingFilter("CIDotScreen", parameters: [
+                kCIInputCenterKey: CIVector(x: extent.midX, y: extent.midY),
+                kCIInputAngleKey: 0.3,
+                kCIInputWidthKey: max(3, granularity / 4),
+                kCIInputSharpnessKey: 0.7
+            ]).cropped(to: extent)
+        }
+        return clouds
+    }
+
+    /// 8bitグレースケールのタイルCGImageを生成する（縞・帯パターン用）。
+    private static func makeGrayTile(buffer: [UInt8], width: Int, height: Int) -> CGImage? {
+        guard let provider = CGDataProvider(data: Data(buffer) as CFData) else { return nil }
+        return CGImage(
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 8,
+            bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
     }
 }

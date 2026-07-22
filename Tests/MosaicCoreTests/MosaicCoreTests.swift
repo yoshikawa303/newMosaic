@@ -323,6 +323,8 @@ import Testing
         style.edgeFeather = 4
         style.stripeWidth = 8
         style.stripeSpacing = 6
+        style.cloudDensity = 0.7
+        style.cloudTone = true
         style.patternImage = patternTile
 
         let output = try engine.applyMosaic(to: image, rois: [roi], style: style)
@@ -341,7 +343,14 @@ import Testing
 
     let mask = MosaicEngine.stripePatternMask(style: style, extent: CGRect(x: 0, y: 0, width: 64, height: 64))
 
+    var randomStyle = MosaicStyle()
+    randomStyle.pattern = .stripesRandom
+    randomStyle.stripeWidth = 8
+    randomStyle.stripeSpacing = 4
+    let randomMask = MosaicEngine.stripePatternMask(style: randomStyle, extent: CGRect(x: 0, y: 0, width: 64, height: 64))
+
     #expect(mask != nil)
+    #expect(randomMask != nil)
     #expect(MosaicEngine.stripePatternMask(
         style: MosaicStyle(),
         extent: CGRect(x: 0, y: 0, width: 64, height: 64)
