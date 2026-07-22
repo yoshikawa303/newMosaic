@@ -232,6 +232,8 @@ final class MosaicWindowController: NSObject {
     private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
     /// 実写用のNSFW部位検出器（NudeNet。実写でも性器・乳首を内容ベースで検出する）
     private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
+    /// 画像種別（実写/アニメ）のモデルベース分類器（読み込めない場合は統計判定へフォールバック）
+    private lazy var domainModelClassifier: DomainModelClassifier? = try? DomainModelClassifier()
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -1213,8 +1215,14 @@ final class MosaicWindowController: NSObject {
                 domain = .illustration
                 domainSourceNote = "手動指定"
             default:
-                domain = DomainClassifier.classify(loadedImage.cgImage)
-                domainSourceNote = "自動判定"
+                // モデルベース分類器（deepghs/anime_real_cls）を優先し、読み込めない場合は統計判定
+                if let result = try? domainModelClassifier?.classify(loadedImage.cgImage) {
+                    domain = result.domain
+                    domainSourceNote = "自動判定 \(Int(result.confidence * 100))%"
+                } else {
+                    domain = DomainClassifier.classify(loadedImage.cgImage)
+                    domainSourceNote = "自動判定"
+                }
             }
 
             // 検出経路をドメインで切替える:

@@ -1,5 +1,6 @@
 import CoreGraphics
 import Foundation
+import OnnxRuntimeBindings
 
 public enum ImageDomain: String, Sendable {
     case photo
@@ -100,5 +101,93 @@ public enum DomainClassifier {
             whiteRatio: Double(whiteCount) / pixelCount,
             saturationMean: Double(saturationSum) / pixelCount
         )
+    }
+}
+
+/// 実写/アニメ判定のモデルベース分類器。
+/// モデル: deepghs/anime_real_cls mobilenetv3_v1.4_dist（OpenRAILライセンス, ONNX, 入力384x384,
+/// 出力2クラス [anime, real]）。統計ベースの `DomainClassifier` より高精度で、
+/// 白黒漫画・実写風イラスト等の誤判定を減らす。読み込めない場合は従来の統計判定へフォールバックする想定。
+/// 完全ローカル実行。画像・判定結果の外部送信は行わない。
+public final class DomainModelClassifier {
+    private static let inputSize = 384
+
+    private let env: ORTEnv
+    private let session: ORTSession
+    private let inputName: String
+    private let outputName: String
+
+    public init() throws {
+        let modelURL = try YOLOONNXModel.cachedModelURL(resourceName: "domain_cls")
+        env = try ORTEnv(loggingLevel: .warning)
+        let options = try ORTSessionOptions()
+        session = try ORTSession(env: env, modelPath: modelURL.path, sessionOptions: options)
+        inputName = try session.inputNames().first ?? "input"
+        outputName = try session.outputNames().first ?? "output"
+    }
+
+    /// 画像の種別（実写/イラスト・漫画）と確信度（softmax確率 0.5〜1.0）を返す。
+    public func classify(_ image: CGImage) throws -> (domain: ImageDomain, confidence: Double) {
+        var tensor = Self.preprocess(image)
+        let data = NSMutableData(bytes: &tensor, length: tensor.count * MemoryLayout<Float>.size)
+        let inputValue = try ORTValue(
+            tensorData: data,
+            elementType: .float,
+            shape: [1, 3, NSNumber(value: Self.inputSize), NSNumber(value: Self.inputSize)]
+        )
+        let outputs = try session.run(
+            withInputs: [inputName: inputValue],
+            outputNames: [outputName],
+            runOptions: nil
+        )
+        guard let output = outputs[outputName] else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey: "画像種別判定モデルの出力を取得できませんでした"
+            ])
+        }
+        let outputData = try output.tensorData() as Data
+        let logits = outputData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
+        guard logits.count >= 2 else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey: "画像種別判定モデルの出力形式が不正です"
+            ])
+        }
+        // softmax（ラベル順: [anime, real]）
+        let maxLogit = max(logits[0], logits[1])
+        let expAnime = exp(Double(logits[0] - maxLogit))
+        let expReal = exp(Double(logits[1] - maxLogit))
+        let animeProb = expAnime / (expAnime + expReal)
+        return animeProb >= 0.5
+            ? (.illustration, animeProb)
+            : (.photo, 1 - animeProb)
+    }
+
+    /// imgutils標準の分類前処理: 384x384への単純リサイズ・RGB・(v/255 - 0.5)/0.5 正規化のCHW配列。
+    static func preprocess(_ image: CGImage) -> [Float] {
+        let size = inputSize
+        var rgba = [UInt8](repeating: 0, count: size * size * 4)
+        rgba.withUnsafeMutableBytes { pointer in
+            guard let context = CGContext(
+                data: pointer.baseAddress,
+                width: size,
+                height: size,
+                bitsPerComponent: 8,
+                bytesPerRow: size * 4,
+                space: CGColorSpaceCreateDeviceRGB(),
+                bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+            ) else { return }
+            context.interpolationQuality = .medium
+            context.draw(image, in: CGRect(x: 0, y: 0, width: size, height: size))
+        }
+
+        let plane = size * size
+        var tensor = [Float](repeating: 0, count: 3 * plane)
+        for index in 0..<plane {
+            let offset = index * 4
+            tensor[index] = Float(rgba[offset]) / 127.5 - 1.0
+            tensor[plane + index] = Float(rgba[offset + 1]) / 127.5 - 1.0
+            tensor[2 * plane + index] = Float(rgba[offset + 2]) / 127.5 - 1.0
+        }
+        return tensor
     }
 }

@@ -1,5 +1,18 @@
 # Changelog
 
+## v0.0.00001 - Build 43 - 2026-07-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 改善: 画像種別（実写/イラスト・漫画）の自動判定をモデルベースへ強化した。専用の分類モデルを同梱し、白黒漫画・実写風イラスト等の誤判定を削減。判定の確信度もステータスに表示する（例:「自動判定 97%」）。従来の統計判定はモデルが読み込めない場合のフォールバックとして維持。
+
+■更新履歴
+
+- `DomainModelClassifier` を新設: deepghs/anime_real_cls mobilenetv3_v1.4_dist（OpenRAILライセンス, MobileNetV3系ONNX, 入力384x384, 2クラス[anime, real], 約16.8MB）を同梱し、softmax確率で判定。前処理はimgutils標準（単純リサイズ・(v/255-0.5)/0.5正規化）。
+- 既存のモデルキャッシュ機構（Application Support/newMosaic/Models）を共用し、リムーバブル許可ダイアログは発生しない。
+- 「画像種別」の手動指定は従来どおり最優先。テスト1件追加で計41テスト。
+
+
 ## v0.0.00001 - Build 42 - 2026-07-22
 
 ■更新履歴（Readme / ChangeLog 用）

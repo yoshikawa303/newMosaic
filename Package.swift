@@ -27,7 +27,9 @@ let package = Package(
                 // deepghs/anime_person_detection person_detect_v1.3_s (MIT License)
                 .copy("Resources/person_detect.onnx"),
                 // deepghs/nudenet_onnx 320n (Apache-2.0 License, NudeNet v3)
-                .copy("Resources/photo_censor_detect.onnx")
+                .copy("Resources/photo_censor_detect.onnx"),
+                // deepghs/anime_real_cls mobilenetv3_v1.4_dist (OpenRAIL License)
+                .copy("Resources/domain_cls.onnx")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),

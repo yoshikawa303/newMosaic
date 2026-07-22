@@ -903,3 +903,13 @@
   検証は `swift build` / `swift test` 40/40 PASS（全10パターンの描画検証ループ含む）。見た目の確認はユーザー担当。
 
 - 作業時間: 約25分
+
+### 2026-07-22 20:15 JST - Claude Code - 種別: 作業結果 - 画像種別判定をモデルベースへ強化（Build 43）
+
+- 内容:
+
+  残項目「ドメイン判定のモデル化」の対応。deepghs/anime_real_cls mobilenetv3_v1.4_dist（OpenRAILライセンス、MobileNetV3系ONNX、入力384x384、2クラス[anime, real]、約16.8MB）を同梱し、`DomainModelClassifier` として実装。自動判定はモデル判定を優先し、確信度をステータスへ表示（例:「自動判定 97%」）。統計判定はフォールバックとして維持、手動指定は従来どおり最優先。既存のモデルキャッシュ機構を共用。
+
+  検証は `swift build` / `swift test` 41/41 PASS / 品質ゲート全PASS、Build 43で再パッケージ。実画像での判定精度確認はユーザー担当。
+
+- 作業時間: 約20分

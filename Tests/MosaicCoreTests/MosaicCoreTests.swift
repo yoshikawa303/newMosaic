@@ -291,6 +291,17 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func domainModelClassifierLoadsModelAndClassifies() throws {
+    // 画像種別判定モデルのロードと推論実行のスモークテスト（判定結果と確信度の妥当性のみ検証）
+    let classifier = try DomainModelClassifier()
+    let image = try makeSolidImage(width: 320, height: 240)
+
+    let result = try classifier.classify(image)
+
+    #expect(result.confidence >= 0.5)
+    #expect(result.confidence <= 1.0)
+}
+
 @Test func regionForegroundCoverageRatioMeasuresMaskArea() {
     // 被覆率判定: 全白マスク≈1.0、全黒マスク≈0.0 を返すことを検証する
     let engine = RegionForegroundSegmentEngine()
