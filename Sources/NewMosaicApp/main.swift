@@ -518,7 +518,7 @@ final class MosaicWindowController: NSObject {
         saveButton.target = self
         saveButton.action = #selector(saveImage)
         reloadLibraryButton.target = self
-        reloadLibraryButton.action = #selector(reloadLibrary)
+        reloadLibraryButton.action = #selector(reloadLibraryFromButton)
         revealButton.target = self
         revealButton.action = #selector(revealLibrary)
         shapeControl.target = self
@@ -1583,9 +1583,28 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    /// 「ライブラリ更新」ボタン: 明示操作なので最新の並び（更新日時降順）で再読込する。
+    @objc private func reloadLibraryFromButton() {
+        reloadLibrary(preserveOrder: false)
+    }
+
     @objc private func reloadLibrary() {
+        reloadLibrary(preserveOrder: true)
+    }
+
+    private func reloadLibrary(preserveOrder: Bool) {
         do {
-            libraryItems = try libraryEngine.loadItems()
+            let loaded = try libraryEngine.loadItems()
+            // アイテムの集合が変わらない再読込（自動保存・上書き保存など）では現在の表示順を維持する。
+            // 並びは updatedAt 降順のため、従来はカーソルキー移動中の自動保存のたびに
+            // 一覧の並びが変わり、ブラウズ順が崩れていた（既知の注意点への対応）。
+            let currentIDs = libraryItems.map(\.id)
+            if preserveOrder, !currentIDs.isEmpty, Set(currentIDs) == Set(loaded.map(\.id)) {
+                let byID = Dictionary(uniqueKeysWithValues: loaded.map { ($0.id, $0) })
+                libraryItems = currentIDs.compactMap { byID[$0] }
+            } else {
+                libraryItems = loaded
+            }
             pruneThumbnailCache()
             tableView.reloadData()
             collectionView.reloadData()
