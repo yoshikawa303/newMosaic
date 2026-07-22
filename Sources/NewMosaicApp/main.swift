@@ -83,10 +83,20 @@ private enum LayerKind: Equatable {
 private final class LayerLeaf {
     let kind: LayerKind
     var isVisible: Bool
+    /// レイヤの輪郭（枠線）表示ON/OFF
+    var showsOutline = true
+    /// レイヤのタグ（名称・カテゴリラベル）表示ON/OFF
+    var showsTag = true
 
     init(kind: LayerKind, isVisible: Bool) {
         self.kind = kind
         self.isVisible = isVisible
+    }
+
+    /// 輪郭/タグのトグルを表示する対象か（画像レイヤは対象外）
+    var supportsDetailToggles: Bool {
+        if case .image = kind { return false }
+        return true
     }
 }
 
@@ -126,7 +136,11 @@ private final class LayerGroup {
 private final class LayerRowView: NSTableCellView {
     private let checkbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     private let label = NSTextField(labelWithString: "")
+    private let outlineCheckbox = NSButton(checkboxWithTitle: "輪郭", target: nil, action: nil)
+    private let tagCheckbox = NSButton(checkboxWithTitle: "タグ", target: nil, action: nil)
     var onToggle: (() -> Void)?
+    var onOutlineToggle: (() -> Void)?
+    var onTagToggle: (() -> Void)?
 
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
@@ -145,26 +159,65 @@ private final class LayerRowView: NSTableCellView {
         checkbox.action = #selector(handleToggle)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = .systemFont(ofSize: 12)
+        label.lineBreakMode = .byTruncatingTail
+        label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        for detail in [outlineCheckbox, tagCheckbox] {
+            detail.translatesAutoresizingMaskIntoConstraints = false
+            detail.controlSize = .mini
+            detail.font = .systemFont(ofSize: 10)
+            detail.target = self
+        }
+        outlineCheckbox.action = #selector(handleOutlineToggle)
+        tagCheckbox.action = #selector(handleTagToggle)
         addSubview(checkbox)
         addSubview(label)
+        addSubview(outlineCheckbox)
+        addSubview(tagCheckbox)
         NSLayoutConstraint.activate([
             checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 4),
-            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2),
-            label.centerYAnchor.constraint(equalTo: centerYAnchor)
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+            outlineCheckbox.leadingAnchor.constraint(greaterThanOrEqualTo: label.trailingAnchor, constant: 6),
+            outlineCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+            tagCheckbox.leadingAnchor.constraint(equalTo: outlineCheckbox.trailingAnchor, constant: 4),
+            tagCheckbox.centerYAnchor.constraint(equalTo: centerYAnchor),
+            tagCheckbox.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2)
         ])
     }
 
-    func configure(title: String, state: NSControl.StateValue, allowsMixed: Bool, showsCheckbox: Bool = true) {
+    func configure(
+        title: String,
+        state: NSControl.StateValue,
+        allowsMixed: Bool,
+        showsCheckbox: Bool = true,
+        detailToggles: (outline: NSControl.StateValue, tag: NSControl.StateValue)? = nil
+    ) {
         label.stringValue = title
         checkbox.allowsMixedState = allowsMixed
         checkbox.state = state
         checkbox.isHidden = !showsCheckbox
+        if let detailToggles {
+            outlineCheckbox.isHidden = false
+            tagCheckbox.isHidden = false
+            outlineCheckbox.state = detailToggles.outline
+            tagCheckbox.state = detailToggles.tag
+        } else {
+            outlineCheckbox.isHidden = true
+            tagCheckbox.isHidden = true
+        }
     }
 
     @objc private func handleToggle() {
         onToggle?()
+    }
+
+    @objc private func handleOutlineToggle() {
+        onOutlineToggle?()
+    }
+
+    @objc private func handleTagToggle() {
+        onTagToggle?()
     }
 }
 
@@ -1146,18 +1199,37 @@ final class MosaicWindowController: NSObject {
     private func applyLayerVisibility() {
         var personVisibility = [Bool](repeating: false, count: canvas.personLayerRects.count)
         var poseVisibility = [Bool](repeating: false, count: canvas.poseLayerRects.count)
+        var personOutline = [Bool](repeating: true, count: canvas.personLayerRects.count)
+        var personTag = [Bool](repeating: true, count: canvas.personLayerRects.count)
+        var poseOutline = [Bool](repeating: true, count: canvas.poseLayerRects.count)
+        var poseTag = [Bool](repeating: true, count: canvas.poseLayerRects.count)
         for leaf in allLayerLeaves() {
             switch leaf.kind {
             case .image: canvas.showImageLayer = leaf.isVisible
-            case .roi: canvas.showROILayer = leaf.isVisible
+            case .roi:
+                canvas.showROILayer = leaf.isVisible
+                canvas.showROIOutlines = leaf.showsOutline
+                canvas.showROITags = leaf.showsTag
             case .person(let index):
-                if index < personVisibility.count { personVisibility[index] = leaf.isVisible }
+                if index < personVisibility.count {
+                    personVisibility[index] = leaf.isVisible
+                    personOutline[index] = leaf.showsOutline
+                    personTag[index] = leaf.showsTag
+                }
             case .pose(let index):
-                if index < poseVisibility.count { poseVisibility[index] = leaf.isVisible }
+                if index < poseVisibility.count {
+                    poseVisibility[index] = leaf.isVisible
+                    poseOutline[index] = leaf.showsOutline
+                    poseTag[index] = leaf.showsTag
+                }
             }
         }
         canvas.personLayerVisibility = personVisibility
         canvas.poseLayerVisibility = poseVisibility
+        canvas.personLayerOutlineVisibility = personOutline
+        canvas.personLayerTagVisibility = personTag
+        canvas.poseLayerOutlineVisibility = poseOutline
+        canvas.poseLayerTagVisibility = poseTag
     }
 
     /// レイヤパネル先頭の表示トグルを、各レイヤの実際の表示状態と同期する。
@@ -2277,13 +2349,32 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
         if let group = item as? LayerGroup {
             cell.configure(title: group.name, state: group.visibilityState, allowsMixed: true)
             cell.onToggle = { [weak self] in self?.toggleGroupVisibility(group) }
+            cell.onOutlineToggle = nil
+            cell.onTagToggle = nil
         } else if let leaf = item as? LayerLeaf {
-            cell.configure(title: leaf.kind.title, state: leaf.isVisible ? .on : .off, allowsMixed: false)
+            cell.configure(
+                title: leaf.kind.title,
+                state: leaf.isVisible ? .on : .off,
+                allowsMixed: false,
+                detailToggles: leaf.supportsDetailToggles
+                    ? (outline: leaf.showsOutline ? .on : .off, tag: leaf.showsTag ? .on : .off)
+                    : nil
+            )
             cell.onToggle = { [weak self] in self?.toggleLeafVisibility(leaf) }
+            cell.onOutlineToggle = { [weak self] in
+                leaf.showsOutline.toggle()
+                self?.applyLayerVisibility()
+            }
+            cell.onTagToggle = { [weak self] in
+                leaf.showsTag.toggle()
+                self?.applyLayerVisibility()
+            }
         } else if let entry = item as? ROIListEntry {
             // ROI選択リストの行（表示チェックなし。クリックでキャンバス上のROIを選択）
             cell.configure(title: entry.title, state: .off, allowsMixed: false, showsCheckbox: false)
             cell.onToggle = nil
+            cell.onOutlineToggle = nil
+            cell.onTagToggle = nil
         }
         return cell
     }
@@ -2381,6 +2472,13 @@ final class ImageCanvasView: NSView {
     var poseLayerJointPoints: [[CGPoint]] = [] { didSet { needsDisplay = true } }
     var showImageLayer = true { didSet { needsDisplay = true } }
     var showROILayer = true { didSet { needsDisplay = true } }
+    // レイヤ毎の輪郭（枠線）・タグ（名称ラベル）表示（レイヤパネルの輪郭/タグチェックから制御）
+    var showROIOutlines = true { didSet { needsDisplay = true } }
+    var showROITags = true { didSet { needsDisplay = true } }
+    var personLayerOutlineVisibility: [Bool] = [] { didSet { needsDisplay = true } }
+    var personLayerTagVisibility: [Bool] = [] { didSet { needsDisplay = true } }
+    var poseLayerOutlineVisibility: [Bool] = [] { didSet { needsDisplay = true } }
+    var poseLayerTagVisibility: [Bool] = [] { didSet { needsDisplay = true } }
 
     var onROIsChanged: (([MosaicROI]) -> Void)?
     var onManualEditWillBegin: (() -> Void)?
@@ -2936,8 +3034,12 @@ final class ImageCanvasView: NSView {
         for roi in rois {
             let rect = viewRect(from: roi.rect, imageRect: target)
             let color: NSColor = roi.source == "manual" ? .systemGreen : .systemRed
-            drawShape(roi, rect: rect, color: color)
-            drawCategoryLabel(roi, near: rect, color: color)
+            if showROIOutlines {
+                drawShape(roi, rect: rect, color: color)
+            }
+            if showROITags {
+                drawCategoryLabel(roi, near: rect, color: color)
+            }
             if roi.id == selectedROIID {
                 drawSelectionHandles(rect, rotation: roi.rotation)
                 drawRotationHandle(rect: rect, rotation: roi.rotation)
@@ -3072,20 +3174,30 @@ final class ImageCanvasView: NSView {
     private func drawDetectionLayers(in target: NSRect) {
         for (index, rect) in personLayerRects.enumerated() {
             guard index < personLayerVisibility.count, personLayerVisibility[index] else { continue }
+            let showsOutline = index < personLayerOutlineVisibility.count ? personLayerOutlineVisibility[index] : true
+            let showsTag = index < personLayerTagVisibility.count ? personLayerTagVisibility[index] : true
             let viewR = viewRect(from: rect, imageRect: target)
             if index < personLayerMasks.count, let mask = personLayerMasks[index] {
                 NSImage(cgImage: mask, size: NSSize(width: mask.width, height: mask.height))
                     .draw(in: target, from: .zero, operation: .sourceOver, fraction: 0.9)
-                drawDashedRect(viewR, color: .systemBlue)
-            } else {
+                if showsOutline {
+                    drawDashedRect(viewR, color: .systemBlue)
+                }
+            } else if showsOutline {
                 drawLayerRect(viewR, color: .systemBlue)
             }
-            drawLayerName("人物検出\(index + 1)", in: viewR, color: .systemBlue)
+            if showsTag {
+                drawLayerName("人物検出\(index + 1)", in: viewR, color: .systemBlue)
+            }
         }
         for (index, rect) in poseLayerRects.enumerated() {
             guard index < poseLayerVisibility.count, poseLayerVisibility[index] else { continue }
+            let showsOutline = index < poseLayerOutlineVisibility.count ? poseLayerOutlineVisibility[index] : true
+            let showsTag = index < poseLayerTagVisibility.count ? poseLayerTagVisibility[index] : true
             let viewR = viewRect(from: rect, imageRect: target)
-            drawLayerRect(viewR, color: .systemOrange)
+            if showsOutline {
+                drawLayerRect(viewR, color: .systemOrange)
+            }
             if index < poseLayerBones.count {
                 drawBones(
                     poseLayerBones[index],
@@ -3093,7 +3205,9 @@ final class ImageCanvasView: NSView {
                     imageRect: target
                 )
             }
-            drawLayerName("骨格検出\(index + 1)", in: viewR, color: .systemOrange)
+            if showsTag {
+                drawLayerName("骨格検出\(index + 1)", in: viewR, color: .systemOrange)
+            }
         }
     }
 
