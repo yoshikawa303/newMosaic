@@ -291,6 +291,17 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func regionForegroundCoverageRatioMeasuresMaskArea() {
+    // 被覆率判定: 全白マスク≈1.0、全黒マスク≈0.0 を返すことを検証する
+    let engine = RegionForegroundSegmentEngine()
+    let bounds = CGRect(x: 0, y: 0, width: 32, height: 32)
+    let white = CIImage(color: .white).cropped(to: bounds)
+    let black = CIImage(color: .black).cropped(to: bounds)
+
+    #expect(engine.coverageRatio(of: white) > 0.95)
+    #expect(engine.coverageRatio(of: black) < 0.05)
+}
+
 @Test func mosaicEngineSupportsAllFillPatterns() throws {
     // 全パターン+共通パラメータ（透明度・色・細かさ・輪郭ぼかし・帯設定）で出力サイズが保たれることを検証する
     let image = try makePatternImage(width: 100, height: 80)

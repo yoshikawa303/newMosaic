@@ -121,9 +121,16 @@ public final class ForegroundSegmentEngine: Segmenting {
 /// ROIごとに周辺をクロップして前景抽出を実行し、**検出範囲内の対象物の実形状**に沿ったマスクを生成する。
 /// 「矩形・楕円ではなく対象（性器等）の形どおりにモザイクしたい」という要望への対応。
 /// クロップにより対象物が主要被写体として大きく写るため、画像全体への前景抽出より対象の形を取りやすい。
-/// 前景が得られないROIは図形ベース（矩形/楕円）へフォールバックする。
+///
+/// Build 41での修正（GUI報告に基づく）:
+/// - クロップ経路の前景マスクへ上下反転補正を適用していたため対象形状が上下反転していた → 補正を除去。
+/// - 人物が枠いっぱいに写るクロップでは前景抽出が「人物全体」を返し、複数ROIへ同じような
+///   マスクが適用されて見えた → 前景がクロップほぼ全面を覆う場合は顕著領域（オブジェクトネス）
+///   マスクへ切替え、ROIごとの対象物の形状を取る。
+/// 前景・顕著領域とも得られないROIは図形ベース（矩形/楕円）へフォールバックする。
 public final class RegionForegroundSegmentEngine: Segmenting {
     private let fallback = ShapeSegmentEngine()
+    private let measureContext = CIContext(options: [.cacheIntermediates: false])
 
     public init() {}
 
@@ -147,25 +154,19 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         imageSize: CGSize,
         extent: CGRect
     ) -> CIImage? {
-        let expanded = roi.rect.expanded(scale: 1.3).clamped()
+        let expanded = roi.rect.expanded(scale: 1.15).clamped()
         let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
         guard cropRect.width >= 16, cropRect.height >= 16,
               let crop = image.cropping(to: cropRect) else { return nil }
 
-        let request = VNGenerateForegroundInstanceMaskRequest()
-        let handler = VNImageRequestHandler(cgImage: crop, options: [:])
-        try? handler.perform([request])
-        guard let observation = request.results?.first,
-              !observation.allInstances.isEmpty,
-              let buffer = try? observation.generateScaledMaskForImage(
-                  forInstances: observation.allInstances,
-                  from: handler
-              ) else {
-            return nil
+        var localMask = Self.foregroundMask(in: crop)
+        // 前景がクロップのほぼ全面を覆う場合（ROI周辺が人物で埋まっていて対象物を分離できていない）
+        // や前景が得られない場合は、顕著領域マスクでROI内の対象物の形状を取る
+        if localMask == nil || coverageRatio(of: localMask!) > 0.85 {
+            localMask = Self.saliencyMask(in: crop) ?? localMask
         }
+        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
 
-        var mask = CIImage(cvPixelBuffer: buffer).verticallyFlippedForRaster()
-        guard mask.extent.width > 0, mask.extent.height > 0 else { return nil }
         // クロップ実サイズへスケールし、CI座標（下原点）でクロップ位置に配置する
         let scaleX = cropRect.width / mask.extent.width
         let scaleY = cropRect.height / mask.extent.height
@@ -178,6 +179,59 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
         // 前景マスクをROI範囲に制限して返す（ROI外へモザイクが漏れないようにする）
         return mask.composited(over: black).cropped(to: roiRect).composited(over: black)
+    }
+
+    /// クロップ画像の前景マスク（クロップ画素座標系）。
+    /// クロップ経路ではバッファの行方向が画像と一致するため上下反転補正は行わない
+    /// （補正を入れると対象形状が上下反転して表示される — GUI報告により確定）。
+    static func foregroundMask(in crop: CGImage) -> CIImage? {
+        let request = VNGenerateForegroundInstanceMaskRequest()
+        let handler = VNImageRequestHandler(cgImage: crop, options: [:])
+        try? handler.perform([request])
+        guard let observation = request.results?.first,
+              !observation.allInstances.isEmpty,
+              let buffer = try? observation.generateScaledMaskForImage(
+                  forInstances: observation.allInstances,
+                  from: handler
+              ) else {
+            return nil
+        }
+        return CIImage(cvPixelBuffer: buffer)
+    }
+
+    /// クロップ画像の顕著領域（オブジェクトネス）マスク。ヒートマップを強調して軟マスク化する。
+    static func saliencyMask(in crop: CGImage) -> CIImage? {
+        let request = VNGenerateObjectnessBasedSaliencyImageRequest()
+        try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
+        guard let observation = request.results?.first else { return nil }
+        let heat = CIImage(cvPixelBuffer: observation.pixelBuffer)
+        guard heat.extent.width > 0, heat.extent.height > 0 else { return nil }
+        return heat
+            .applyingFilter("CIColorControls", parameters: [
+                kCIInputSaturationKey: 0,
+                kCIInputContrastKey: 2.2,
+                kCIInputBrightnessKey: -0.05
+            ])
+            .clampedToExtent()
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.5])
+            .cropped(to: heat.extent)
+    }
+
+    /// マスクの白領域被覆率（0〜1）。前景抽出が対象物を分離できているかの判定に使う。
+    func coverageRatio(of mask: CIImage) -> Double {
+        let average = mask.applyingFilter("CIAreaAverage", parameters: [
+            kCIInputExtentKey: CIVector(cgRect: mask.extent)
+        ])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        measureContext.render(
+            average,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Double(pixel[0]) / 255.0
     }
 }
 
