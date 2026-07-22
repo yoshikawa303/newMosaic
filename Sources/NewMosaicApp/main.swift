@@ -249,7 +249,7 @@ final class MosaicWindowController: NSObject {
     private let undoButton = NSButton(title: "元に戻す", target: nil, action: nil)
     private let redoButton = NSButton(title: "やり直す", target: nil, action: nil)
     private let shapeControl = NSSegmentedControl(
-        labels: ["矩形", "楕円"],
+        labels: ["矩形", "楕円", "多角形"],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -577,7 +577,11 @@ final class MosaicWindowController: NSObject {
         canvas.onROISelectionChanged = { [weak self] roi in
             guard let self else { return }
             if let roi {
-                self.shapeControl.selectedSegment = roi.shape == .rectangle ? 0 : 1
+                switch roi.shape {
+                case .rectangle: self.shapeControl.selectedSegment = 0
+                case .ellipse: self.shapeControl.selectedSegment = 1
+                case .polygon: self.shapeControl.selectedSegment = 2
+                }
             }
             self.syncROIListSelectionFromCanvas()
         }
@@ -599,13 +603,26 @@ final class MosaicWindowController: NSObject {
     }
 
     @objc private func shapeControlChanged() {
-        let shape: ROIShape = shapeControl.selectedSegment == 0 ? .rectangle : .ellipse
+        let shapes: [ROIShape] = [.rectangle, .ellipse, .polygon]
+        let index = shapeControl.selectedSegment
+        guard (0..<shapes.count).contains(index) else { return }
+        let shape = shapes[index]
         canvas.currentShape = shape
         if let selectedID = canvas.selectedROIID,
-           let index = canvas.rois.firstIndex(where: { $0.id == selectedID }),
-           canvas.rois[index].shape != shape {
+           let roiIndex = canvas.rois.firstIndex(where: { $0.id == selectedID }),
+           canvas.rois[roiIndex].shape != shape {
             pushUndoSnapshot(currentEditorState())
-            canvas.rois[index].shape = shape
+            canvas.rois[roiIndex].shape = shape
+            if shape == .polygon {
+                if canvas.rois[roiIndex].polygonPoints == nil {
+                    canvas.rois[roiIndex].polygonPoints = MosaicROI.defaultPolygonPoints
+                }
+                updateStatus("多角形へ変更しました。頂点をドラッグで変形、Option+クリックで頂点の追加/削除ができます")
+            } else {
+                canvas.rois[roiIndex].polygonPoints = nil
+            }
+        } else if shape == .polygon {
+            updateStatus("追加形状: 多角形（ドラッグで追加後、頂点ドラッグで変形、Option+クリックで頂点の追加/削除）")
         }
     }
 
@@ -1277,6 +1294,9 @@ final class MosaicWindowController: NSObject {
             rois = rois.map { roi in
                 var updated = roi
                 updated.shape = selectedShape
+                if selectedShape == .polygon && updated.polygonPoints == nil {
+                    updated.polygonPoints = MosaicROI.defaultPolygonPoints
+                }
                 return updated
             }
             canvas.rois = rois
@@ -2377,6 +2397,7 @@ final class ImageCanvasView: NSView {
     private var resizeState: ResizeState?
     private var moveState: MoveState?
     private var rotationState: RotationState?
+    private var vertexDragState: VertexDragState?
 
     private struct ResizeState {
         var roiID: UUID
@@ -2390,6 +2411,15 @@ final class ImageCanvasView: NSView {
     private struct RotationState {
         var roiID: UUID
         var center: NSPoint
+    }
+
+    private struct VertexDragState {
+        var roiID: UUID
+        var vertexIndex: Int
+        /// ドラッグ開始時のビュー座標rect（ドラッグ中は凍結し、終了時に外接矩形を再計算する）
+        var rect: NSRect
+        var center: NSPoint
+        var rotationDegrees: Double
     }
 
     private struct MoveState {
@@ -2471,6 +2501,9 @@ final class ImageCanvasView: NSView {
             let rect = viewRect(from: roi.rect, imageRect: imageRect)
             let center = NSPoint(x: rect.midX, y: rect.midY)
             let local = rotatedPoint(point, around: center, degrees: -roi.rotation)
+            if roi.shape == .polygon {
+                return polygonContains(localPoint: local, roi: roi, rect: rect)
+            }
             return rect.contains(local)
         })
     }
@@ -2479,6 +2512,121 @@ final class ImageCanvasView: NSView {
     private func rotationHandlePoint(rect: NSRect, rotation: Double) -> NSPoint {
         let center = NSPoint(x: rect.midX, y: rect.midY)
         return rotatedPoint(NSPoint(x: rect.midX, y: rect.minY - 22), around: center, degrees: rotation)
+    }
+
+    // MARK: - 多角形ヘルパー
+
+    /// 多角形頂点のビュー座標（回転適用済み）。
+    private func polygonVertexViewPoints(roi: MosaicROI, rect: NSRect) -> [NSPoint] {
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        return (roi.polygonPoints ?? MosaicROI.defaultPolygonPoints).map { point in
+            rotatedPoint(
+                NSPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height),
+                around: center,
+                degrees: roi.rotation
+            )
+        }
+    }
+
+    /// 無回転ローカル座標での多角形内包判定（レイキャスティング）。
+    private func polygonContains(localPoint: NSPoint, roi: MosaicROI, rect: NSRect) -> Bool {
+        let points = (roi.polygonPoints ?? MosaicROI.defaultPolygonPoints).map { point in
+            NSPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height)
+        }
+        guard points.count >= 3 else { return rect.contains(localPoint) }
+        var inside = false
+        var j = points.count - 1
+        for i in 0..<points.count {
+            let a = points[i]
+            let b = points[j]
+            if (a.y > localPoint.y) != (b.y > localPoint.y),
+               localPoint.x < (b.x - a.x) * (localPoint.y - a.y) / (b.y - a.y) + a.x {
+                inside.toggle()
+            }
+            j = i
+        }
+        return inside
+    }
+
+    /// 頂点ドラッグ終了後に、多角形の外接矩形へrect/頂点座標を正規化し直す。
+    /// 回転中のROIは回転中心がずれて見た目が跳ぶため正規化しない（頂点は0-1の範囲外も許容される）。
+    private func renormalizePolygonBounds(roiID: UUID) {
+        guard let index = rois.firstIndex(where: { $0.id == roiID }),
+              abs(rois[index].rotation) < 0.01,
+              let points = rois[index].polygonPoints, points.count >= 3 else { return }
+        let rect = rois[index].rect
+        let imagePoints = points.map { point in
+            (x: rect.x + point.x * rect.width, y: rect.y + point.y * rect.height)
+        }
+        guard let minX = imagePoints.map(\.x).min(),
+              let maxX = imagePoints.map(\.x).max(),
+              let minY = imagePoints.map(\.y).min(),
+              let maxY = imagePoints.map(\.y).max(),
+              maxX - minX > 0.005, maxY - minY > 0.005 else { return }
+        let newRect = NormalizedRect(x: minX, y: minY, width: maxX - minX, height: maxY - minY)
+        rois[index].rect = newRect
+        rois[index].polygonPoints = imagePoints.map { point in
+            NormalizedPoint(
+                x: (point.x - newRect.x) / newRect.width,
+                y: (point.y - newRect.y) / newRect.height
+            )
+        }
+        lastSize[.polygon] = NSSize(width: newRect.width, height: newRect.height)
+    }
+
+    /// Option+クリックによる多角形頂点の追加（辺上）/削除（頂点上）。処理した場合true。
+    private func handlePolygonVertexOptionClick(at point: NSPoint, imageRect: NSRect) -> Bool {
+        guard let selectedID = selectedROIID,
+              let index = rois.firstIndex(where: { $0.id == selectedID }),
+              rois[index].shape == .polygon else { return false }
+        let roi = rois[index]
+        let rect = viewRect(from: roi.rect, imageRect: imageRect)
+        let vertices = polygonVertexViewPoints(roi: roi, rect: rect)
+        var points = roi.polygonPoints ?? MosaicROI.defaultPolygonPoints
+
+        // 頂点上: 削除（3頂点は下限）
+        if let vertexIndex = vertices.firstIndex(where: { hypot($0.x - point.x, $0.y - point.y) <= handleRadius }) {
+            guard points.count > 3 else { return true }
+            onManualEditWillBegin?()
+            points.remove(at: vertexIndex)
+            rois[index].polygonPoints = points
+            onManualEditDidEnd?()
+            return true
+        }
+
+        // 辺上: 最寄りの辺へ頂点を挿入
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let local = rotatedPoint(point, around: center, degrees: -roi.rotation)
+        var best: (edgeIndex: Int, distance: CGFloat, projection: NSPoint)?
+        let localVertices = points.map { p in
+            NSPoint(x: rect.minX + p.x * rect.width, y: rect.minY + p.y * rect.height)
+        }
+        for i in 0..<localVertices.count {
+            let a = localVertices[i]
+            let b = localVertices[(i + 1) % localVertices.count]
+            let abx = b.x - a.x
+            let aby = b.y - a.y
+            let lengthSq = abx * abx + aby * aby
+            guard lengthSq > 0.001 else { continue }
+            let t = max(0, min(1, ((local.x - a.x) * abx + (local.y - a.y) * aby) / lengthSq))
+            let projection = NSPoint(x: a.x + t * abx, y: a.y + t * aby)
+            let distance = hypot(local.x - projection.x, local.y - projection.y)
+            if best == nil || distance < best!.distance {
+                best = (i, distance, projection)
+            }
+        }
+        guard let best, best.distance <= 8, rect.width > 0, rect.height > 0 else { return false }
+        onManualEditWillBegin?()
+        points.insert(
+            NormalizedPoint(
+                x: (best.projection.x - rect.minX) / rect.width,
+                y: (best.projection.y - rect.minY) / rect.height
+            ),
+            at: best.edgeIndex + 1
+        )
+        rois[index].polygonPoints = points
+        onManualEditDidEnd?()
+        return true
     }
 
     /// ROI上の右クリックで対象カテゴリを変更するコンテキストメニューを表示する。
@@ -2515,7 +2663,13 @@ final class ImageCanvasView: NSView {
         guard image != nil else { return }
         let point = convert(event.locationInWindow, from: nil)
 
-        // 回転・リサイズハンドルは画像端のROIで画像範囲の外側に出ることがあるため、
+        // Option+クリック: 多角形の頂点追加（辺上）/削除（頂点上）
+        if event.clickCount < 2, event.modifierFlags.contains(.option),
+           handlePolygonVertexOptionClick(at: point, imageRect: imageDrawRect()) {
+            return
+        }
+
+        // 回転・リサイズ・頂点ハンドルは画像端のROIで画像範囲の外側に出ることがあるため、
         // 画像範囲ガードより先に判定する
         if event.clickCount < 2,
            let selectedID = selectedROIID,
@@ -2527,6 +2681,23 @@ final class ImageCanvasView: NSView {
                 onManualEditWillBegin?()
                 rotationState = RotationState(roiID: selectedID, center: NSPoint(x: rect.midX, y: rect.midY))
                 return
+            }
+            // 多角形の頂点ドラッグ（四隅リサイズより優先）
+            if roi.shape == .polygon {
+                let vertices = polygonVertexViewPoints(roi: roi, rect: rect)
+                if let vertexIndex = vertices.firstIndex(where: {
+                    hypot($0.x - point.x, $0.y - point.y) <= handleRadius
+                }) {
+                    onManualEditWillBegin?()
+                    vertexDragState = VertexDragState(
+                        roiID: selectedID,
+                        vertexIndex: vertexIndex,
+                        rect: rect,
+                        center: NSPoint(x: rect.midX, y: rect.midY),
+                        rotationDegrees: roi.rotation
+                    )
+                    return
+                }
             }
             if let anchor = handleAnchor(at: point, roi: roi, imageRect: imageRect) {
                 onManualEditWillBegin?()
@@ -2568,6 +2739,21 @@ final class ImageCanvasView: NSView {
 
     override func mouseDragged(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
+
+        if let vertexDrag = vertexDragState {
+            guard let index = rois.firstIndex(where: { $0.id == vertexDrag.roiID }),
+                  var points = rois[index].polygonPoints,
+                  vertexDrag.vertexIndex < points.count,
+                  vertexDrag.rect.width > 0, vertexDrag.rect.height > 0 else { return }
+            // 回転中のROIはマウス点を無回転ローカル座標へ逆回転してから頂点を更新する
+            let local = rotatedPoint(point, around: vertexDrag.center, degrees: -vertexDrag.rotationDegrees)
+            points[vertexDrag.vertexIndex] = NormalizedPoint(
+                x: (local.x - vertexDrag.rect.minX) / vertexDrag.rect.width,
+                y: (local.y - vertexDrag.rect.minY) / vertexDrag.rect.height
+            )
+            rois[index].polygonPoints = points
+            return
+        }
 
         if let rotation = rotationState {
             guard let index = rois.firstIndex(where: { $0.id == rotation.roiID }) else { return }
@@ -2624,6 +2810,14 @@ final class ImageCanvasView: NSView {
     override func mouseUp(with event: NSEvent) {
         let point = convert(event.locationInWindow, from: nil)
 
+        if let vertexDrag = vertexDragState {
+            vertexDragState = nil
+            renormalizePolygonBounds(roiID: vertexDrag.roiID)
+            needsDisplay = true
+            onManualEditDidEnd?()
+            return
+        }
+
         if rotationState != nil {
             rotationState = nil
             needsDisplay = true
@@ -2674,7 +2868,10 @@ final class ImageCanvasView: NSView {
         guard let normalized = normalizedRect(fromViewRect: rect) else { return }
         onManualEditWillBegin?()
         lastSize[currentShape] = NSSize(width: normalized.width, height: normalized.height)
-        let roi = MosaicROI(rect: normalized, confidence: 1, source: "manual", shape: currentShape, category: currentCategory)
+        var roi = MosaicROI(rect: normalized, confidence: 1, source: "manual", shape: currentShape, category: currentCategory)
+        if currentShape == .polygon {
+            roi.polygonPoints = MosaicROI.defaultPolygonPoints
+        }
         rois.append(roi)
         selectedROIID = roi.id
         onManualEditDidEnd?()
@@ -2695,7 +2892,10 @@ final class ImageCanvasView: NSView {
             height: size.height
         ).clamped()
         onManualEditWillBegin?()
-        let roi = MosaicROI(rect: rect, confidence: 1, source: "manual", shape: currentShape, category: currentCategory)
+        var roi = MosaicROI(rect: rect, confidence: 1, source: "manual", shape: currentShape, category: currentCategory)
+        if currentShape == .polygon {
+            roi.polygonPoints = MosaicROI.defaultPolygonPoints
+        }
         rois.append(roi)
         selectedROIID = roi.id
         onManualEditDidEnd?()
@@ -2741,6 +2941,9 @@ final class ImageCanvasView: NSView {
             if roi.id == selectedROIID {
                 drawSelectionHandles(rect, rotation: roi.rotation)
                 drawRotationHandle(rect: rect, rotation: roi.rotation)
+                if roi.shape == .polygon {
+                    drawPolygonVertexHandles(roi: roi, rect: rect)
+                }
             }
         }
     }
@@ -2759,13 +2962,40 @@ final class ImageCanvasView: NSView {
     }
 
     private func drawShape(_ roi: MosaicROI, rect: NSRect, color: NSColor) {
-        let path = roi.shape == .ellipse ? NSBezierPath(ovalIn: rect) : NSBezierPath(rect: rect)
+        let path: NSBezierPath
+        switch roi.shape {
+        case .ellipse:
+            path = NSBezierPath(ovalIn: rect)
+        case .rectangle:
+            path = NSBezierPath(rect: rect)
+        case .polygon:
+            path = Self.polygonPath(points: roi.polygonPoints ?? MosaicROI.defaultPolygonPoints, rect: rect)
+        }
         applyRotation(to: path, rect: rect, degrees: roi.rotation)
         color.withAlphaComponent(0.18).setFill()
         path.fill()
         color.setStroke()
         path.lineWidth = 2
         path.stroke()
+    }
+
+    /// 多角形頂点（rectローカル正規化座標）からビュー座標のパスを構築する。
+    private static func polygonPath(points: [NormalizedPoint], rect: NSRect) -> NSBezierPath {
+        let path = NSBezierPath()
+        guard points.count >= 3 else {
+            path.appendRect(rect)
+            return path
+        }
+        for (index, point) in points.enumerated() {
+            let viewPoint = NSPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height)
+            if index == 0 {
+                path.move(to: viewPoint)
+            } else {
+                path.line(to: viewPoint)
+            }
+        }
+        path.close()
+        return path
     }
 
     /// パスへ矩形中心基準の回転を適用する。
@@ -2797,8 +3027,25 @@ final class ImageCanvasView: NSView {
         circle.stroke()
     }
 
+    /// 多角形の頂点ハンドル（丸）を描画する。ドラッグで変形、Option+クリックで追加/削除。
+    private func drawPolygonVertexHandles(roi: MosaicROI, rect: NSRect) {
+        for vertex in polygonVertexViewPoints(roi: roi, rect: rect) {
+            let handle = NSBezierPath(ovalIn: NSRect(x: vertex.x - 4, y: vertex.y - 4, width: 8, height: 8))
+            NSColor.white.setFill()
+            handle.fill()
+            NSColor.systemGreen.setStroke()
+            handle.lineWidth = 1.5
+            handle.stroke()
+        }
+    }
+
     private func drawPreviewShape(_ rect: NSRect) {
-        let path = currentShape == .ellipse ? NSBezierPath(ovalIn: rect) : NSBezierPath(rect: rect)
+        let path: NSBezierPath
+        switch currentShape {
+        case .ellipse: path = NSBezierPath(ovalIn: rect)
+        case .rectangle: path = NSBezierPath(rect: rect)
+        case .polygon: path = Self.polygonPath(points: MosaicROI.defaultPolygonPoints, rect: rect)
+        }
         NSColor.systemYellow.setStroke()
         path.lineWidth = 2
         path.stroke()

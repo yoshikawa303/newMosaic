@@ -341,6 +341,67 @@ import Testing
     #expect(masks[1].extent == extent)
 }
 
+@Test func shapeMaskPolygonDrawsVertexShape() throws {
+    // 三角形（上頂点+左右下）マスク: 中心は白、矩形の左上隅（三角形の外）は黒になることを検証する
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
+        confidence: 1,
+        source: "manual",
+        shape: .polygon,
+        polygonPoints: [
+            NormalizedPoint(x: 0.5, y: 0.0),
+            NormalizedPoint(x: 1.0, y: 1.0),
+            NormalizedPoint(x: 0.0, y: 1.0)
+        ]
+    )
+    let masks = try ShapeSegmentEngine().createMasks(
+        for: [roi],
+        in: try makeSolidImage(width: 100, height: 100),
+        extent: extent
+    )
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func luminance(x: Int, y: Int) -> Double {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            masks[0], toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Double(pixel[0]) / 255
+    }
+
+    // 中心(50,50)は三角形内=白 / ROI矩形左上隅付近(25,70 CI座標=画像上側)は三角形外=黒
+    #expect(luminance(x: 50, y: 50) > 0.9)
+    #expect(luminance(x: 25, y: 70) < 0.1)
+    #expect(masks[0].extent == extent)
+}
+
+@Test func polygonROICodableRoundTripsPoints() throws {
+    // 多角形ROIの頂点がエンコード/デコードで保持され、旧データ（頂点なし）はnilになることを検証する
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5),
+        confidence: 1,
+        source: "manual",
+        shape: .polygon,
+        rotation: 30,
+        polygonPoints: MosaicROI.defaultPolygonPoints
+    )
+    let data = try JSONEncoder().encode(roi)
+    let decoded = try JSONDecoder().decode(MosaicROI.self, from: data)
+
+    #expect(decoded.shape == .polygon)
+    #expect(decoded.rotation == 30)
+    #expect(decoded.polygonPoints?.count == 6)
+
+    let legacyJSON = """
+    {"id":"\(UUID().uuidString)","rect":{"x":0.1,"y":0.1,"width":0.5,"height":0.5},"confidence":1,"source":"manual"}
+    """
+    let legacy = try JSONDecoder().decode(MosaicROI.self, from: Data(legacyJSON.utf8))
+    #expect(legacy.polygonPoints == nil)
+    #expect(legacy.rotation == 0)
+}
+
 @Test func regionForegroundCoverageRatioMeasuresMaskArea() {
     // 被覆率判定: 全白マスク≈1.0、全黒マスク≈0.0 を返すことを検証する
     let engine = RegionForegroundSegmentEngine()

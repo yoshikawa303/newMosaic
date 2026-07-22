@@ -84,6 +84,19 @@ public enum CoordinateOrigin: Sendable {
 public enum ROIShape: String, Codable, Sendable {
     case rectangle
     case ellipse
+    case polygon
+}
+
+/// 多角形ROIの頂点。ROIの矩形（rect）に対するローカル正規化座標（0〜1、左上原点）。
+/// 矩形の移動・リサイズに追従して多角形全体が拡縮される。
+public struct NormalizedPoint: Codable, Equatable, Sendable {
+    public var x: Double
+    public var y: Double
+
+    public init(x: Double, y: Double) {
+        self.x = x
+        self.y = y
+    }
 }
 
 /// モザイク検出対象のカテゴリ分類。
@@ -116,6 +129,14 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var category: MosaicTargetCategory
     /// 回転角（度。時計回り、矩形中心基準。0=回転なし）
     public var rotation: Double
+    /// 多角形ROIの頂点（shape == .polygon のとき使用。nilなら既定の六角形）
+    public var polygonPoints: [NormalizedPoint]?
+
+    /// 多角形の既定形状（矩形に内接する六角形。上頂点から時計回り）
+    public static let defaultPolygonPoints: [NormalizedPoint] = (0..<6).map { index in
+        let angle = -Double.pi / 2 + Double(index) * .pi / 3
+        return NormalizedPoint(x: 0.5 + 0.5 * cos(angle), y: 0.5 + 0.5 * sin(angle))
+    }
 
     public init(
         id: UUID = UUID(),
@@ -124,7 +145,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         source: String,
         shape: ROIShape = .ellipse,
         category: MosaicTargetCategory = .other,
-        rotation: Double = 0
+        rotation: Double = 0,
+        polygonPoints: [NormalizedPoint]? = nil
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -133,10 +155,11 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.shape = shape
         self.category = category
         self.rotation = rotation
+        self.polygonPoints = polygonPoints
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, rect, confidence, source, shape, category, rotation
+        case id, rect, confidence, source, shape, category, rotation, polygonPoints
     }
 
     public init(from decoder: Decoder) throws {
@@ -148,6 +171,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         shape = try container.decodeIfPresent(ROIShape.self, forKey: .shape) ?? .ellipse
         category = try container.decodeIfPresent(MosaicTargetCategory.self, forKey: .category) ?? .other
         rotation = try container.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
+        polygonPoints = try container.decodeIfPresent([NormalizedPoint].self, forKey: .polygonPoints)
     }
 }
 

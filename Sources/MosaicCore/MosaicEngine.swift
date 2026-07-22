@@ -173,10 +173,19 @@ public final class MosaicEngine {
                 ])
             }
 
-            // フェザー分だけ塗りパッチを広げる（輪郭ぼかしがROI境界で途切れないように）
-            let expandedRect = rect
-                .insetBy(dx: -style.edgeFeather * 2, dy: -style.edgeFeather * 2)
-                .intersection(extent)
+            // フェザー分だけ塗りパッチを広げる（輪郭ぼかしがROI境界で途切れないように）。
+            // 回転ROIは軸平行矩形からはみ出すため、外接円を覆う正方形まで拡張する
+            var expandedRect = rect.insetBy(dx: -style.edgeFeather * 2, dy: -style.edgeFeather * 2)
+            if abs(roi.rotation) > 0.01 {
+                let radius = sqrt(rect.width * rect.width + rect.height * rect.height) / 2 + style.edgeFeather * 2
+                expandedRect = CGRect(
+                    x: rect.midX - radius,
+                    y: rect.midY - radius,
+                    width: radius * 2,
+                    height: radius * 2
+                )
+            }
+            expandedRect = expandedRect.intersection(extent)
             let patch = fill
                 .cropped(to: expandedRect)
                 .applyingFilter("CIBlendWithMask", parameters: [

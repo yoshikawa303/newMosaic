@@ -51,7 +51,55 @@ public final class ShapeSegmentEngine: Segmenting {
             return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
         case .ellipse:
             return ellipseMask(rect: rect, extent: extent, rotation: roi.rotation)
+        case .polygon:
+            return polygonMask(for: roi, rect: rect, extent: extent)
         }
+    }
+
+    /// 多角形マスク: 頂点（rectローカル正規化座標）をCI画素座標へ変換してグレースケール描画する。
+    static func polygonMask(for roi: MosaicROI, rect: CGRect, extent: CGRect) -> CIImage {
+        let points = roi.polygonPoints ?? MosaicROI.defaultPolygonPoints
+        guard points.count >= 3 else {
+            return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
+        }
+        let width = max(1, Int(extent.width))
+        let height = max(1, Int(extent.height))
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
+        }
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        if abs(roi.rotation) > 0.01 {
+            context.translateBy(x: rect.midX, y: rect.midY)
+            context.rotate(by: CGFloat(-roi.rotation * .pi / 180))
+            context.translateBy(x: -rect.midX, y: -rect.midY)
+        }
+        context.beginPath()
+        for (index, point) in points.enumerated() {
+            // ローカル座標（左上原点）→ CI画素座標（左下原点）
+            let x = rect.minX + point.x * rect.width
+            let y = rect.minY + (1 - point.y) * rect.height
+            if index == 0 {
+                context.move(to: CGPoint(x: x, y: y))
+            } else {
+                context.addLine(to: CGPoint(x: x, y: y))
+            }
+        }
+        context.closePath()
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fillPath()
+        guard let image = context.makeImage() else {
+            return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
+        }
+        return CIImage(cgImage: image).cropped(to: extent)
     }
 
     /// ビュー座標（上原点・時計回り）の回転角を、CI座標（下原点）の回転変換へ変換する。
