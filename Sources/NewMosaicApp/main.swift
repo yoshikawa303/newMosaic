@@ -1314,17 +1314,47 @@ final class MosaicWindowController: NSObject {
             source: "pattern-preview",
             shape: .rectangle
         )
-        let style = MosaicStyle(
+        var style = MosaicStyle(
             pattern: pattern,
             blockScale: 9,
             stripeWidth: 5,
             stripeSpacing: 4,
             cloudDensity: 0.75
         )
+        // 画像必須パターンのプレビューにはプレースホルダ（かぶせ画像=サングラス風の黒帯）を使う
+        if pattern.requiresPatternImage {
+            style.patternImage = Self.makeOverlayPlaceholderImage()
+        }
         guard let result = try? mosaicEngine.applyMosaic(to: source, rois: [roi], style: style) else { return nil }
         let image = NSImage(cgImage: result, size: NSSize(width: width, height: height))
         image.isTemplate = false
         return image
+    }
+
+    /// かぶせ画像プレビュー用のプレースホルダ（角丸の黒帯=サングラス風。中央は透明）。
+    private static func makeOverlayPlaceholderImage() -> CGImage? {
+        let width = 64
+        let height = 32
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        context.clear(CGRect(x: 0, y: 0, width: width, height: height))
+        context.setFillColor(NSColor.black.withAlphaComponent(0.9).cgColor)
+        let band = CGPath(
+            roundedRect: CGRect(x: 2, y: 8, width: width - 4, height: 16),
+            cornerWidth: 8,
+            cornerHeight: 8,
+            transform: nil
+        )
+        context.addPath(band)
+        context.fillPath()
+        return context.makeImage()
     }
 
     /// 現在のUI設定からモザイク描画スタイルを構築する。
@@ -1440,7 +1470,7 @@ final class MosaicWindowController: NSObject {
         styleStripeSpacingSlider.isEnabled = pattern.isStripes
         styleCloudDensitySlider.isEnabled = pattern == .clouds
         styleCloudToneCheckbox.isEnabled = pattern == .clouds
-        stylePatternImageButton.isEnabled = pattern == .customImage
+        stylePatternImageButton.isEnabled = pattern.requiresPatternImage
         styleCloudDensityValueLabel.stringValue = "\(Int(styleCloudDensitySlider.doubleValue * 100))%"
         styleOpacityValueLabel.stringValue = "\(Int(styleOpacitySlider.doubleValue * 100))%"
         styleBlockScaleValueLabel.stringValue = "\(Int(styleBlockScaleSlider.doubleValue))"

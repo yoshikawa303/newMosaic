@@ -29,6 +29,7 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
     case stripesRandom
     case clouds
     case customImage
+    case overlayImage
 
     public var displayName: String {
         switch self {
@@ -42,7 +43,13 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
         case .stripesRandom: return "ボーダーランダム"
         case .clouds: return "雲"
         case .customImage: return "任意パターン画像"
+        case .overlayImage: return "かぶせ画像（マスク・メガネ等）"
         }
+    }
+
+    /// 画像の指定が必要なパターンか（任意パターン/かぶせ画像）。
+    public var requiresPatternImage: Bool {
+        self == .customImage || self == .overlayImage
     }
 
     /// ボーダー系（帯太さ・間隔パラメータを使う）パターンか。
@@ -198,8 +205,22 @@ public final class MosaicEngine {
             } else if resolvedStyle.patternImage == nil {
                 resolvedStyle.patternImage = style.patternImage
             }
-            if resolvedStyle.pattern == .customImage, resolvedStyle.patternImage == nil {
+            if resolvedStyle.pattern.requiresPatternImage, resolvedStyle.patternImage == nil {
                 throw MosaicEngineError.customPatternImageMissing(resolvedStyle.patternImageIdentifier)
+            }
+
+            // かぶせ画像: マスク合成ではなく、画像をROI矩形へ引き伸ばして重ねる
+            //（PNGの透明部分はそのまま透過。マスク・メガネ・医療マスク等のアクセサリ重ね用途）
+            if resolvedStyle.pattern == .overlayImage, let overlay = resolvedStyle.patternImage {
+                output = Self.compositeOverlay(
+                    overlay,
+                    over: output,
+                    roi: roi,
+                    rect: rect,
+                    opacity: resolvedStyle.opacity,
+                    extent: extent
+                )
+                continue
             }
             let styleKey = resolvedStyle.persistentStyle()
             let layers: (fill: CIImage, stripeAlpha: CIImage?)
@@ -265,6 +286,40 @@ public final class MosaicEngine {
         return cgImage
     }
 
+    /// かぶせ画像をROI矩形（回転対応）へ引き伸ばして元画像の上へ重ねる。
+    /// 画像自身のアルファチャンネルで透過し、opacityで全体の不透明度を調整する。
+    static func compositeOverlay(
+        _ overlay: CGImage,
+        over background: CIImage,
+        roi: MosaicROI,
+        rect: CGRect,
+        opacity: Double,
+        extent: CGRect
+    ) -> CIImage {
+        var image = CIImage(cgImage: overlay)
+        let overlaySize = image.extent.size
+        guard overlaySize.width > 0, overlaySize.height > 0 else { return background }
+        image = image
+            .transformed(by: CGAffineTransform(
+                scaleX: rect.width / overlaySize.width,
+                y: rect.height / overlaySize.height
+            ))
+            .transformed(by: CGAffineTransform(translationX: rect.minX, y: rect.minY))
+        if abs(roi.rotation) > 0.01 {
+            image = image.transformed(by: ShapeSegmentEngine.ciRotation(
+                around: CGPoint(x: rect.midX, y: rect.midY),
+                degrees: roi.rotation
+            ))
+        }
+        if opacity < 0.999 {
+            let alpha = max(0.05, opacity)
+            image = image.applyingFilter("CIColorMatrix", parameters: [
+                "inputAVector": CIVector(x: 0, y: 0, z: 0, w: alpha)
+            ])
+        }
+        return image.composited(over: background).cropped(to: extent)
+    }
+
     // MARK: - 塗りつぶしレイヤ生成
 
     static func makeFillLayer(style: MosaicStyle, original: CIImage, extent: CGRect) -> CIImage {
@@ -325,7 +380,8 @@ public final class MosaicEngine {
             // 帯の色（既定は黒。tintColor指定時はその色）。間隔の透明はマスク側で表現する。
             let color = style.tintColor ?? (red: 0, green: 0, blue: 0)
             fill = CIImage(color: CIColor(red: color.red, green: color.green, blue: color.blue)).cropped(to: extent)
-        case .customImage:
+        case .customImage, .overlayImage:
+            // overlayImageはapplyMosaic側で特別処理される（ここへ来るのは全面フォールバック時のみ）
             if let pattern = style.patternImage {
                 let tile = CIImage(cgImage: pattern)
                 let scale = max(0.05, style.blockScale / 28)

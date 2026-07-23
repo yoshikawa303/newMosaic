@@ -428,6 +428,39 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func overlayImagePatternCoversROIWithAccessoryImage() throws {
+    // かぶせ画像: 赤い元画像の右半分ROIへ緑画像をかぶせると、右半分が緑・左半分は元のままになる
+    let image = try makeSolidImage(width: 100, height: 60, color: .systemRed)
+    let accessory = try makeSolidImage(width: 10, height: 10, color: .systemGreen)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.5, y: 0, width: 0.5, height: 1),
+        confidence: 1,
+        source: "manual",
+        shape: .rectangle
+    )
+    var style = MosaicStyle(pattern: .overlayImage)
+    style.patternImage = accessory
+
+    let output = try MosaicEngine().applyMosaic(to: image, rois: [roi], style: style)
+    let left = rgbaPixel(in: output, x: 25, y: 30)
+    let right = rgbaPixel(in: output, x: 75, y: 30)
+
+    #expect(left.red > 0.8)
+    #expect(right.green > 0.7)
+    #expect(right.green > right.red)
+    #expect(output.width == 100)
+}
+
+@Test func overlayImagePatternThrowsWithoutImage() throws {
+    // かぶせ画像は画像必須（未指定はエラーで通知）
+    let image = try makeSolidImage(width: 20, height: 20)
+    let roi = MosaicROI(rect: NormalizedRect(x: 0, y: 0, width: 1, height: 1), confidence: 1, source: "manual")
+
+    #expect(throws: MosaicEngineError.self) {
+        try MosaicEngine().applyMosaic(to: image, rois: [roi], style: MosaicStyle(pattern: .overlayImage))
+    }
+}
+
 @Test func faceRegionBuilderConstructsEyesAndLowerFaceRects() {
     // 合成ランドマーク: 目（y0.30-0.33）・眉（y0.26）・輪郭（あご先y0.55）から
     // 目元帯と眼窩下〜あご領域が構築されることを検証する
