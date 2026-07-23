@@ -109,6 +109,10 @@ public enum MosaicTargetCategory: String, Codable, Sendable, CaseIterable {
     case femaleGenital
     case maleGenital
     case other
+    /// 目元（両目+眼窩上部。パーティーマスク・メガネ・グラサン等で覆う想定）
+    case eyes
+    /// 眼窩下〜オトガイ（医療マスク・ガスマスク・犬の鼻口等で覆う想定）
+    case lowerFace
 
     public var displayName: String {
         switch self {
@@ -116,6 +120,8 @@ public enum MosaicTargetCategory: String, Codable, Sendable, CaseIterable {
         case .femaleGenital: return "性器（女性）"
         case .maleGenital: return "性器（男性）"
         case .other: return "その他"
+        case .eyes: return "目元"
+        case .lowerFace: return "眼窩下〜あご"
         }
     }
 }

@@ -166,6 +166,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
     private lazy var domainModelClassifier: DomainModelClassifier? = try? DomainModelClassifier()
     private lazy var animeSegmenter: AnimeSegmenter? = try? AnimeSegmenter()
     private lazy var animePoseEstimator: AnimePoseEstimator? = try? AnimePoseEstimator()
+    private lazy var faceRegionDetector = FaceRegionDetector()
 
     func run(_ input: CandidateGenerationInput) throws -> CandidateGenerationOutput {
         var detectorFailures: [String] = []
@@ -233,10 +234,16 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                 }
             }
             let generator = SensitiveROIGenerator(groinPositionRatio: input.groinPositionRatio)
-            let priorROIs = generator.generateROIs(
+            var priorROIs = generator.generateROIs(
                 from: hints,
                 imageSize: CGSize(width: input.image.width, height: input.image.height)
             )
+            // 顔領域（目元・眼窩下〜あご）: DWPoseの顔キーポイントから人物ごとに生成する
+            if let poseEstimator = animePoseEstimator {
+                priorROIs.append(
+                    contentsOf: (try? poseEstimator.faceRegionROIs(in: input.image, persons: personsWithMasks)) ?? []
+                )
+            }
             snapshot = DetectionSnapshot(persons: personsWithMasks, poseHints: hints, rois: priorROIs)
         } else {
             let generator = SensitiveROIGenerator(groinPositionRatio: input.groinPositionRatio)
@@ -245,6 +252,10 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
         }
 
         var rois = snapshot.rois
+        // 実写の顔領域（目元・眼窩下〜あご）: Visionランドマークから顔ごとに生成する
+        if domain == .photo {
+            rois.append(contentsOf: (try? faceRegionDetector.detectRegions(in: input.image)) ?? [])
+        }
         var animeDetectionCount = 0
         var photoDetectionCount = 0
         let detectorAvailable: Bool

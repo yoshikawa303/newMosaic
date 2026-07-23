@@ -108,6 +108,53 @@ public final class AnimePoseEstimator {
         return PoseHint(bodyBounds: person.bounds, lowerBodyBounds: lower, joints: joints)
     }
 
+    /// COCO-WholeBody顔キーポイント（添字23〜90が68点の顔ランドマーク）から
+    /// 「目元」「眼窩下〜あご」のカテゴリ付きROIを人物ごとに生成する。
+    /// 68点の内訳（顔68点内の添字）: 輪郭0〜16→全体23〜39、眉17〜26→40〜49、目36〜47→59〜70。
+    public func faceRegionROIs(in image: CGImage, persons: [PersonDetection]) throws -> [MosaicROI] {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        var rois: [MosaicROI] = []
+        for person in persons {
+            let region = person.bounds.expanded(scale: 1.25).clamped()
+            let cropRect = region.cgRect(imageSize: imageSize, origin: .topLeft)
+            guard cropRect.width >= 32, cropRect.height >= 32,
+                  region.width > 0, region.height > 0,
+                  let crop = image.cropping(to: cropRect),
+                  let decoded = try? runModel(on: crop) else { continue }
+
+            func fullPoints(_ range: ClosedRange<Int>) -> [(x: Double, y: Double)] {
+                decoded
+                    .filter { range.contains($0.index) && $0.score >= Self.scoreThreshold }
+                    .map { (x: region.x + $0.x * region.width, y: region.y + $0.y * region.height) }
+            }
+            let eyePoints = fullPoints(59...70)
+            let browPoints = fullPoints(40...49)
+            let contourPoints = fullPoints(23...39)
+            guard eyePoints.count >= 4 else { continue }
+
+            if let rect = FaceRegionBuilder.eyesRect(eyePoints: eyePoints, browPoints: browPoints) {
+                rois.append(MosaicROI(
+                    rect: rect,
+                    confidence: 0.8,
+                    source: "face-region",
+                    shape: .rectangle,
+                    category: .eyes
+                ))
+            }
+            if contourPoints.count >= 5,
+               let rect = FaceRegionBuilder.lowerFaceRect(eyePoints: eyePoints, contourPoints: contourPoints) {
+                rois.append(MosaicROI(
+                    rect: rect,
+                    confidence: 0.8,
+                    source: "face-region",
+                    shape: .rectangle,
+                    category: .lowerFace
+                ))
+            }
+        }
+        return rois
+    }
+
     /// クロップへDWPose推論を実行し、クロップ内正規化座標のキーポイントを返す。
     private func runModel(on crop: CGImage) throws -> [(index: Int, x: Double, y: Double, score: Double)] {
         var (tensor, letterbox) = Self.preprocess(crop)

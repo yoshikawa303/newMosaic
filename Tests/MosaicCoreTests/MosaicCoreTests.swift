@@ -428,6 +428,43 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func faceRegionBuilderConstructsEyesAndLowerFaceRects() {
+    // 合成ランドマーク: 目（y0.30-0.33）・眉（y0.26）・輪郭（あご先y0.55）から
+    // 目元帯と眼窩下〜あご領域が構築されることを検証する
+    let eyePoints = [(x: 0.40, y: 0.30), (x: 0.45, y: 0.33), (x: 0.55, y: 0.30), (x: 0.60, y: 0.33)]
+    let browPoints = [(x: 0.40, y: 0.26), (x: 0.60, y: 0.26)]
+    let contourPoints = [(x: 0.35, y: 0.32), (x: 0.37, y: 0.48), (x: 0.50, y: 0.55), (x: 0.63, y: 0.48), (x: 0.65, y: 0.32)]
+
+    let eyes = FaceRegionBuilder.eyesRect(eyePoints: eyePoints, browPoints: browPoints)
+    let lower = FaceRegionBuilder.lowerFaceRect(eyePoints: eyePoints, contourPoints: contourPoints)
+
+    #expect(eyes != nil)
+    #expect(lower != nil)
+    if let eyes {
+        // 目元帯は両目+眉を含む（上端は眉より上、下端は目の下端より下）
+        #expect(eyes.y < 0.26)
+        #expect(eyes.y + eyes.height > 0.33)
+        #expect(eyes.x < 0.40)
+        #expect(eyes.x + eyes.width > 0.60)
+    }
+    if let lower {
+        // 眼窩下領域は目の下端から始まりあご先まで届く
+        #expect(abs(lower.y - 0.33) < 0.001)
+        #expect(lower.y + lower.height >= 0.55)
+        #expect(abs(lower.x - 0.35) < 0.001)
+    }
+    // 目が無ければどちらもnil
+    #expect(FaceRegionBuilder.eyesRect(eyePoints: [], browPoints: browPoints) == nil)
+    #expect(FaceRegionBuilder.lowerFaceRect(eyePoints: [], contourPoints: contourPoints) == nil)
+}
+
+@Test func faceRegionDetectorReturnsEmptyOnPlainImage() throws {
+    // 顔の無い単色画像では顔領域ROIを生成しない（偽の枠を出さない方針）
+    let detector = FaceRegionDetector()
+    let rois = try detector.detectRegions(in: try makeSolidImage(width: 320, height: 240))
+    #expect(rois.isEmpty)
+}
+
 @Test func libraryEngineLinkedImportRelinkAndDelete() throws {
     // リンク登録→リンク切れ判定→再リンク→削除で外部ファイルが消えないことを検証する
     let temp = FileManager.default.temporaryDirectory
