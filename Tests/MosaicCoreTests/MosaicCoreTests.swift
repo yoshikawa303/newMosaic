@@ -428,6 +428,40 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func animeSegmenterLoadsModelAndReturnsFullSizeMask() throws {
+    // アニメセグメンテーションのロードと推論実行のスモークテスト（マスクが元画像サイズで返ること）
+    let segmenter = try AnimeSegmenter()
+    let image = try makeSolidImage(width: 320, height: 240)
+
+    let mask = try segmenter.characterMask(in: image)
+
+    #expect(mask != nil)
+    #expect(mask?.width == 320)
+    #expect(mask?.height == 240)
+}
+
+@Test func animeSegmenterPersonMaskRestrictsToBounds() throws {
+    // per-personマスクが人物矩形外を黒に制限することを検証する（全白マスク+左半分の矩形）
+    guard let grayContext = CGContext(
+        data: nil, width: 100, height: 100, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ) else { throw CocoaError(.coderInvalidValue) }
+    grayContext.setFillColor(CGColor(gray: 1, alpha: 1))
+    grayContext.fill(CGRect(x: 0, y: 0, width: 100, height: 100))
+    guard let fullMask = grayContext.makeImage() else { throw CocoaError(.coderInvalidValue) }
+
+    let personMask = AnimeSegmenter.personMask(
+        fullMask: fullMask,
+        bounds: NormalizedRect(x: 0, y: 0, width: 0.5, height: 1.0),
+        imageSize: CGSize(width: 100, height: 100)
+    )
+
+    #expect(personMask != nil)
+    let sampler = PersonMaskSampler(maskImage: personMask!)
+    #expect(sampler?.contains(x: 0.25, y: 0.5) == true)
+    #expect(sampler?.contains(x: 0.75, y: 0.5) == false)
+}
+
 @Test func domainModelClassifierLoadsModelAndClassifies() throws {
     // 画像種別判定モデルのロードと推論実行のスモークテスト（判定結果と確信度の妥当性のみ検証）
     let classifier = try DomainModelClassifier()

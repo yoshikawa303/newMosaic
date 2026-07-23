@@ -40,6 +40,24 @@ newMosaic が同梱・利用するサードパーティ成果物の一覧。追�
 - 取得日: 2026-07-22
 - 備考: 完全ローカル実行。画像・判定結果の外部送信は行わない。
 
+### anime-seg（isnetis）
+
+- 提供元: SkyTNT（https://huggingface.co/skytnt/anime-seg / https://github.com/SkyTNT/anime-segmentation）
+- ライセンス: **Apache License 2.0**（GitHubリポジトリ表記）
+- 用途: アニメ・イラスト画像のキャラクターセグメンテーション（人物シルエット表示）
+- 同梱ファイル: `Sources/MosaicCore/Resources/anime_seg.onnx`（ISNet系ONNX, 入力1024x1024, 約176MB）
+- 取得日: 2026-07-23
+- 備考: 完全ローカル実行。画像・マスクの外部送信は行わない。
+
+### DWPose（dw-ll_ucoco_384）
+
+- 提供元: yzd-v（DWPose作者。https://huggingface.co/yzd-v/DWPose / https://github.com/IDEA-Research/DWPose）
+- ライセンス: **Apache License 2.0**
+- 用途: アニメ・イラスト画像の骨格（姿勢）検出
+- 同梱ファイル: `Sources/MosaicCore/Resources/anime_pose.onnx`（RTMPose系SimCC ONNX, 入力288x384, 約134MB）
+- 取得日: 2026-07-23
+- 備考: 完全ローカル実行。画像・検出結果の外部送信は行わない。
+
 ## 依存ライブラリ
 
 ### ONNX Runtime（onnxruntime-swift-package-manager）

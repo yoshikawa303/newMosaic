@@ -29,7 +29,11 @@ let package = Package(
                 // deepghs/nudenet_onnx 320n (Apache-2.0 License, NudeNet v3)
                 .copy("Resources/photo_censor_detect.onnx"),
                 // deepghs/anime_real_cls mobilenetv3_v1.4_dist (OpenRAIL License)
-                .copy("Resources/domain_cls.onnx")
+                .copy("Resources/domain_cls.onnx"),
+                // skytnt/anime-seg isnetis (Apache-2.0 License)
+                .copy("Resources/anime_seg.onnx"),
+                // yzd-v/DWPose dw-ll_ucoco_384 (Apache-2.0 License)
+                .copy("Resources/anime_pose.onnx")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),

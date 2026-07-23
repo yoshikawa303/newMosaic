@@ -161,6 +161,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
     private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
     private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
     private lazy var domainModelClassifier: DomainModelClassifier? = try? DomainModelClassifier()
+    private lazy var animeSegmenter: AnimeSegmenter? = try? AnimeSegmenter()
 
     func run(_ input: CandidateGenerationInput) throws -> CandidateGenerationOutput {
         var detectorFailures: [String] = []
@@ -196,8 +197,29 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
             } else {
                 persons = []
             }
-            let hints = persons.map { PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: []) }
-            snapshot = DetectionSnapshot(persons: persons, poseHints: hints, rois: [])
+            // キャラクターセグメンテーションで人物シルエットを付与する（実写のVisionシルエット相当）
+            var personsWithMasks = persons
+            if !persons.isEmpty, let segmenter = animeSegmenter {
+                do {
+                    if let fullMask = try segmenter.characterMask(in: input.image) {
+                        let imageSize = CGSize(width: input.image.width, height: input.image.height)
+                        personsWithMasks = persons.map { person in
+                            PersonDetection(
+                                bounds: person.bounds,
+                                maskImage: AnimeSegmenter.personMask(
+                                    fullMask: fullMask,
+                                    bounds: person.bounds,
+                                    imageSize: imageSize
+                                )
+                            )
+                        }
+                    }
+                } catch {
+                    detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
+                }
+            }
+            let hints = personsWithMasks.map { PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: []) }
+            snapshot = DetectionSnapshot(persons: personsWithMasks, poseHints: hints, rois: [])
         } else {
             let generator = SensitiveROIGenerator(groinPositionRatio: input.groinPositionRatio)
             snapshot = try StaticImageMosaicPipeline(roiGenerator: generator)

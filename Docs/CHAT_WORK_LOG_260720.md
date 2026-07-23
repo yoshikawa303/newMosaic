@@ -1031,3 +1031,21 @@
   検証は `swift test` 57/57 PASS、`swift build -c release`、`agent_governance_guard.sh`、`local_quality_gate.sh`、`git diff --check`、codesign検証がすべてPASS。`dist/newMosaic.app`をv0.0.00001 Build 48で再生成し、起動を確認した。画面キャプチャはmacOS画面収録権限がないため未取得。実画像での骨格精度と操作感はユーザー確認事項。
 
 - 作業時間: 約50分
+
+### 2026-07-23 16:30 JST - Claude Code - 種別: 依頼内容 - 残件すべての実装指示
+
+- 内容:
+
+  ```text
+  ★残件すべて実装して
+  ```
+
+### 2026-07-23 16:55 JST - Claude Code - 種別: 作業結果 - アニメシルエット（キャラクターセグメンテーション）を実装（Build 49）
+
+- 内容:
+
+  残件「アニメセグメンテーション」の対応。skytnt/anime-seg isnetis.onnx（Apache-2.0、ISNet系、入力1024x1024、約176MB）を同梱し `AnimeSegmenter` を新設。前処理はSkyTNT公式実装と同条件（アスペクト維持+中央ゼロパディング+/255正規化）。全体キャラクターマスクを人物矩形ごとに分配し、イラスト/漫画でも実写と同様の青半透明シルエットが人物検出レイヤに表示されるようになった。非同期候補生成ワーカーへ統合し、失敗時は従来の矩形のみ表示へフォールバック。
+
+  検証は `swift build` / `swift test` 59/59 PASS（モデルロード+マスクサイズ検証、per-personマスクの矩形制限検証を追加）。
+
+- 作業時間: 約30分
