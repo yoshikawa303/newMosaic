@@ -1246,36 +1246,60 @@ final class MosaicWindowController: NSObject {
         return row
     }
 
+    /// パターン選択のプレビューアイコンを生成する。
+    /// 白地に太字の「画」を描いた横長画像の**右半分だけ**へ実際のパターン処理を適用し、
+    /// 元画像（左）と加工結果（右）の違いが一目で分かるようにする（ユーザー指定の仕様）。
     private func makePatternPreviewImage(_ pattern: MosaicFillPattern) -> NSImage? {
-        let width = 24
-        let height = 18
+        let width = 56
+        let height = 24
+        let scale = 2  // Retina解像度で描画し、小サイズでも文字とパターンをくっきり見せる
+        let pixelWidth = width * scale
+        let pixelHeight = height * scale
         guard let context = CGContext(
             data: nil,
-            width: width,
-            height: height,
+            width: pixelWidth,
+            height: pixelHeight,
             bitsPerComponent: 8,
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceRGB(),
             bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
         ) else { return nil }
-        for y in 0..<height {
-            let value = CGFloat(y) / CGFloat(max(1, height - 1))
-            context.setFillColor(NSColor(calibratedWhite: 0.2 + value * 0.65, alpha: 1).cgColor)
-            context.fill(CGRect(x: 0, y: y, width: width, height: 1))
-        }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: pixelWidth, height: pixelHeight))
+
+        // 太字の「画」をアイコン全幅に大きく描く（右半分が加工領域に掛かる）
+        let graphicsContext = NSGraphicsContext(cgContext: context, flipped: false)
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = graphicsContext
+        let text = "画" as NSString
+        let attributes: [NSAttributedString.Key: Any] = [
+            .font: NSFont.boldSystemFont(ofSize: CGFloat(pixelHeight) * 0.82),
+            .foregroundColor: NSColor.black
+        ]
+        let textSize = text.size(withAttributes: attributes)
+        text.draw(
+            at: NSPoint(
+                x: (CGFloat(pixelWidth) - textSize.width) / 2,
+                y: (CGFloat(pixelHeight) - textSize.height) / 2
+            ),
+            withAttributes: attributes
+        )
+        NSGraphicsContext.restoreGraphicsState()
         guard let source = context.makeImage() else { return nil }
+
+        // 右半分のみへ実際のエンジンでパターンを適用（プレビュー=実処理の見た目）
         let roi = MosaicROI(
-            rect: NormalizedRect(x: 0, y: 0, width: 1, height: 1),
+            rect: NormalizedRect(x: 0.5, y: 0, width: 0.5, height: 1),
             confidence: 1,
             source: "pattern-preview",
             shape: .rectangle
         )
         let style = MosaicStyle(
             pattern: pattern,
-            blockScale: 5,
-            stripeWidth: 3,
-            stripeSpacing: 2,
-            cloudDensity: 0.6
+            blockScale: 9,
+            stripeWidth: 5,
+            stripeSpacing: 4,
+            cloudDensity: 0.75
         )
         guard let result = try? mosaicEngine.applyMosaic(to: source, rois: [roi], style: style) else { return nil }
         let image = NSImage(cgImage: result, size: NSSize(width: width, height: height))
