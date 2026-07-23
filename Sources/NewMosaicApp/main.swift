@@ -26,9 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = Self.windowTitle()
-        window.contentMinSize = NSSize(width: 1100, height: 700)
-        window.center()
+        window.contentMinSize = NSSize(width: 900, height: 700)
+        if !window.setFrameUsingName("newMosaicMainWindow") {
+            window.center()
+        }
+        window.setFrameAutosaveName("newMosaicMainWindow")
         window.contentView = controller.view
+        window.delegate = controller
+        installMainMenu(target: controller)
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
@@ -41,11 +46,79 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        controller.confirmCurrentChangesBeforeLeaving() ? .terminateNow : .terminateCancel
+    }
+
     private static func windowTitle() -> String {
         let info = Bundle.main.infoDictionary
         let marketingVersion = info?["CFBundleShortVersionString"] as? String ?? "0.0.00000"
         let buildVersion = info?["CFBundleVersion"] as? String ?? "0"
         return "newMosaic v\(marketingVersion) (beta Build \(buildVersion))"
+    }
+
+    private func installMainMenu(target: MosaicWindowController) {
+        let mainMenu = NSMenu()
+
+        let appItem = NSMenuItem()
+        mainMenu.addItem(appItem)
+        let appMenu = NSMenu(title: "newMosaic")
+        appMenu.addItem(withTitle: "newMosaicについて", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
+        appMenu.addItem(.separator())
+        appMenu.addItem(withTitle: "newMosaicを終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
+        appItem.submenu = appMenu
+
+        let fileItem = NSMenuItem()
+        mainMenu.addItem(fileItem)
+        let fileMenu = NSMenu(title: "ファイル")
+        fileMenu.addItem(menuItem("画像を開く…", action: "openImage", key: "o", target: target))
+        fileMenu.addItem(menuItem("クリップボードから読み込む", action: "pasteImage", key: "v", target: target))
+        fileMenu.addItem(.separator())
+        fileMenu.addItem(menuItem("書き出す…", action: "saveImage", key: "s", target: target))
+        fileMenu.addItem(menuItem("ライブラリをFinderで表示", action: "revealLibrary", key: "", target: target))
+        fileItem.submenu = fileMenu
+
+        let editItem = NSMenuItem()
+        mainMenu.addItem(editItem)
+        let editMenu = NSMenu(title: "編集")
+        editMenu.addItem(menuItem("元に戻す", action: "performUndo", key: "z", target: target))
+        let redo = menuItem("やり直す", action: "performRedo", key: "z", target: target)
+        redo.keyEquivalentModifierMask = [.command, .shift]
+        editMenu.addItem(redo)
+        editMenu.addItem(.separator())
+        editMenu.addItem(menuItem("選択範囲をすべて消去", action: "clearROIs", key: "", target: target))
+        editItem.submenu = editMenu
+
+        let processItem = NSMenuItem()
+        mainMenu.addItem(processItem)
+        let processMenu = NSMenu(title: "処理")
+        processMenu.addItem(menuItem("候補を生成", action: "generateCandidates", key: "g", target: target))
+        processMenu.addItem(menuItem("モザイクを適用", action: "applyMosaic", key: "\r", target: target))
+        processItem.submenu = processMenu
+
+        let viewItem = NSMenuItem()
+        mainMenu.addItem(viewItem)
+        let viewMenu = NSMenu(title: "表示")
+        viewMenu.addItem(menuItem("拡大", action: "zoomIn", key: "+", target: target))
+        viewMenu.addItem(menuItem("縮小", action: "zoomOut", key: "-", target: target))
+        viewMenu.addItem(menuItem("ウィンドウに合わせる", action: "zoomToFit", key: "0", target: target))
+        viewItem.submenu = viewMenu
+
+        let windowItem = NSMenuItem()
+        mainMenu.addItem(windowItem)
+        let windowMenu = NSMenu(title: "ウィンドウ")
+        windowMenu.addItem(withTitle: "しまう", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
+        windowMenu.addItem(withTitle: "拡大／縮小", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
+        windowItem.submenu = windowMenu
+        NSApp.windowsMenu = windowMenu
+
+        NSApp.mainMenu = mainMenu
+    }
+
+    private func menuItem(_ title: String, action: String, key: String, target: AnyObject) -> NSMenuItem {
+        let item = NSMenuItem(title: title, action: Selector((action)), keyEquivalent: key)
+        item.target = target
+        return item
     }
 }
 
@@ -58,6 +131,129 @@ private enum LibraryViewMode: Int {
 private struct EditorState {
     var rois: [MosaicROI]
     var renderedImage: CGImage?
+}
+
+private struct CandidateGenerationInput: @unchecked Sendable {
+    var image: CGImage
+    var domainMode: Int
+    var groinPositionRatio: Double
+}
+
+private struct CandidateGenerationOutput: @unchecked Sendable {
+    var domain: ImageDomain
+    var domainSourceNote: String
+    var snapshot: DetectionSnapshot
+    var rois: [MosaicROI]
+    var animeDetectionCount: Int
+    var photoDetectionCount: Int
+    var domainDetectorAvailable: Bool
+    var detectorFailureMessage: String?
+}
+
+private enum CandidateGenerationTaskResult: @unchecked Sendable {
+    case success(CandidateGenerationOutput)
+    case failure(String)
+}
+
+/// ONNX/Vision推論をメインスレッド外で直列実行する。各モデルはワーカー内で再利用する。
+private final class CandidateGenerationWorker: @unchecked Sendable {
+    private lazy var animeCensorDetector: AnimeCensorDetector? = try? AnimeCensorDetector()
+    private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
+    private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
+    private lazy var domainModelClassifier: DomainModelClassifier? = try? DomainModelClassifier()
+
+    func run(_ input: CandidateGenerationInput) throws -> CandidateGenerationOutput {
+        var detectorFailures: [String] = []
+        let domain: ImageDomain
+        let domainSourceNote: String
+        switch input.domainMode {
+        case 1:
+            domain = .photo
+            domainSourceNote = "手動指定"
+        case 2:
+            domain = .illustration
+            domainSourceNote = "手動指定"
+        default:
+            if let result = try? domainModelClassifier?.classify(input.image) {
+                domain = result.domain
+                domainSourceNote = "自動判定 \(Int(result.confidence * 100))%"
+            } else {
+                domain = DomainClassifier.classify(input.image)
+                domainSourceNote = "自動判定"
+            }
+        }
+
+        let snapshot: DetectionSnapshot
+        if domain == .illustration {
+            let persons: [PersonDetection]
+            if let detector = animePersonDetector {
+                do {
+                    persons = try detector.detectPersons(in: input.image)
+                } catch {
+                    detectorFailures.append("アニメ人物検出: \(error.localizedDescription)")
+                    persons = []
+                }
+            } else {
+                persons = []
+            }
+            let hints = persons.map { PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: []) }
+            snapshot = DetectionSnapshot(persons: persons, poseHints: hints, rois: [])
+        } else {
+            let generator = SensitiveROIGenerator(groinPositionRatio: input.groinPositionRatio)
+            snapshot = try StaticImageMosaicPipeline(roiGenerator: generator)
+                .generateDetailedCandidates(for: input.image)
+        }
+
+        var rois = snapshot.rois
+        var animeDetectionCount = 0
+        var photoDetectionCount = 0
+        let detectorAvailable: Bool
+        if domain == .illustration {
+            detectorAvailable = animeCensorDetector != nil
+            if let detector = animeCensorDetector {
+                do {
+                    let detected = try detector.detect(in: input.image)
+                    animeDetectionCount = detected.count
+                    rois = Self.mergeCandidates(base: rois, adding: detected)
+                } catch {
+                    detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
+                }
+            }
+        } else {
+            detectorAvailable = photoCensorDetector != nil
+            if let detector = photoCensorDetector {
+                do {
+                    let detected = try detector.detect(in: input.image, personBounds: snapshot.personBounds)
+                    photoDetectionCount = detected.count
+                    rois = Self.mergeCandidates(base: rois, adding: detected)
+                } catch {
+                    detectorFailures.append("実写部位検出: \(error.localizedDescription)")
+                }
+            }
+        }
+
+        return CandidateGenerationOutput(
+            domain: domain,
+            domainSourceNote: domainSourceNote,
+            snapshot: snapshot,
+            rois: rois,
+            animeDetectionCount: animeDetectionCount,
+            photoDetectionCount: photoDetectionCount,
+            domainDetectorAvailable: detectorAvailable,
+            detectorFailureMessage: detectorFailures.isEmpty ? nil : detectorFailures.joined(separator: " / ")
+        )
+    }
+
+    private static func mergeCandidates(base: [MosaicROI], adding: [MosaicROI]) -> [MosaicROI] {
+        var result = base
+        for roi in adding {
+            result.removeAll { existing in
+                existing.source != "manual" && existing.rect.iou(with: roi.rect) > 0.5
+            }
+            result.append(roi)
+        }
+        return result
+    }
 }
 
 private enum LayerKind: Equatable {
@@ -272,21 +468,12 @@ final class MosaicWindowController: NSObject {
     private(set) var view = NSView()
 
     private let imageLoader = ImageLoader()
-    private let roiGenerator: SensitiveROIGenerator
-    private let pipeline: StaticImageMosaicPipeline
+    private let candidateGenerationWorker = CandidateGenerationWorker()
     private let mosaicEngine = MosaicEngine()
     private let historyEngine = HistoryEngine()
     private let libraryEngine: LibraryEngine = (try? LibraryEngine.defaultLibrary())
         ?? LibraryEngine(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("newMosaic/Library"))
     private let learningEngine: LearningEngine? = try? LearningEngine.defaultStore()
-    /// アニメ・イラスト用のNSFW部位検出器（初回アクセス時にモデルロード。失敗時はnil=従来動作）
-    private lazy var animeCensorDetector: AnimeCensorDetector? = try? AnimeCensorDetector()
-    /// アニメ・イラスト用の人物検出器（矩形。イラストでのVisionシルエット不安定問題への対応）
-    private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
-    /// 実写用のNSFW部位検出器（NudeNet。実写でも性器・乳首を内容ベースで検出する）
-    private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
-    /// 画像種別（実写/アニメ）のモデルベース分類器（読み込めない場合は統計判定へフォールバック）
-    private lazy var domainModelClassifier: DomainModelClassifier? = try? DomainModelClassifier()
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -301,6 +488,7 @@ final class MosaicWindowController: NSObject {
     private let thumbnailSizeSlider = NSSlider(value: 120, minValue: 64, maxValue: 220, target: nil, action: nil)
     private let undoButton = NSButton(title: "元に戻す", target: nil, action: nil)
     private let redoButton = NSButton(title: "やり直す", target: nil, action: nil)
+    private let zoomLabel = NSTextField(labelWithString: "100%")
     private let shapeControl = NSSegmentedControl(
         labels: ["矩形", "楕円", "多角形"],
         trackingMode: .selectOne,
@@ -329,9 +517,9 @@ final class MosaicWindowController: NSObject {
     private let groinPositionValueLabel = NSTextField(labelWithString: "45%")
     private static let groinPositionDefaultsKey = "GroinPositionRatio"
 
-    // モザイク描画スタイル設定（パターン+パラメータ。永続化しモザイク表示中は即時反映）
-    private let mosaicSettingsButton = NSButton(title: "モザイク設定...", target: nil, action: nil)
-    private let mosaicSettingsPopover = NSPopover()
+    // モザイク描画スタイル設定（右側インスペクタへ常設。選択ROIごとに個別保持）
+    private let selectedLayerStyleLabel = NSTextField(labelWithString: "既定設定（新規レイヤ）")
+    private let applyStyleToAllButton = NSButton(title: "全レイヤへ適用", target: nil, action: nil)
     private let stylePatternPopUp = NSPopUpButton(title: "", target: nil, action: nil)
     private let styleOpacitySlider = NSSlider(value: 1.0, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
     private let styleOpacityValueLabel = NSTextField(labelWithString: "100%")
@@ -351,6 +539,8 @@ final class MosaicWindowController: NSObject {
     private let stylePatternImageButton = NSButton(title: "パターン画像を選択...", target: nil, action: nil)
     private let stylePatternImageLabel = NSTextField(labelWithString: "未選択")
     private var customPatternImage: CGImage?
+    private var customPatternImageIdentifier: String?
+    private var patternImageCache: [String: CGImage] = [:]
     private var ungroupedLayers: [LayerLeaf] = [
         LayerLeaf(kind: .image, isVisible: true),
         LayerLeaf(kind: .roi, isVisible: true)
@@ -399,12 +589,16 @@ final class MosaicWindowController: NSObject {
     private var imageEditStateOrder: [UUID] = []
     private let imageEditStateLimit = 8
     private var rightPaneSplitView: NSSplitView?
+    private var mainSplitView: NSSplitView?
+    private var isLoadingMosaicStyleControls = false
+    private var defaultMosaicStyle = MosaicStyle()
+    private var discardedEditStateID: UUID?
+    private var isGeneratingCandidates = false
+    private var hasPendingCandidateGeneration = false
+    private var editorRevision = 0
 
     override init() {
         let savedRatio = UserDefaults.standard.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
-        let generator = SensitiveROIGenerator(groinPositionRatio: savedRatio)
-        self.roiGenerator = generator
-        self.pipeline = StaticImageMosaicPipeline(roiGenerator: generator)
         super.init()
         groinPositionSlider.doubleValue = savedRatio
         groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100))%"
@@ -412,141 +606,102 @@ final class MosaicWindowController: NSObject {
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let openButton = NSButton(title: "画像を開く", target: nil, action: nil)
-        let pasteButton = NSButton(title: "画像を貼り付け", target: nil, action: nil)
-        pasteButton.keyEquivalent = "v"
-        pasteButton.keyEquivalentModifierMask = [.command]
-        let detectButton = NSButton(title: "候補生成", target: nil, action: nil)
-        let applyButton = NSButton(title: "モザイク適用", target: nil, action: nil)
-        let clearButton = NSButton(title: "ROIクリア", target: nil, action: nil)
+        let openButton = makeToolbarButton(symbol: "folder", help: "画像を開く (⌘O)", action: #selector(openImage))
+        let pasteButton = makeToolbarButton(symbol: "doc.on.clipboard", help: "画像を貼り付け (⌘V)", action: #selector(pasteImage))
+        let detectButton = makeToolbarButton(symbol: "wand.and.stars", help: "候補を生成 (⌘G)", action: #selector(generateCandidates))
+        let applyButton = makeToolbarButton(symbol: "checkerboard.rectangle", help: "モザイクを適用", action: #selector(applyMosaic))
+        let clearButton = makeToolbarButton(symbol: "trash", help: "選択範囲をすべて消去", action: #selector(clearROIs))
+        configureToolbarButton(undoButton, symbol: "arrow.uturn.backward", help: "元に戻す (⌘Z)", action: #selector(performUndo))
+        configureToolbarButton(redoButton, symbol: "arrow.uturn.forward", help: "やり直す (⇧⌘Z)", action: #selector(performRedo))
         undoButton.keyEquivalent = "z"
         undoButton.keyEquivalentModifierMask = [.command]
         redoButton.keyEquivalent = "z"
         redoButton.keyEquivalentModifierMask = [.command, .shift]
-        let saveButton = NSButton(title: "保存", target: nil, action: nil)
-        let reloadLibraryButton = NSButton(title: "ライブラリ更新", target: nil, action: nil)
-        let revealButton = NSButton(title: "Finder表示", target: nil, action: nil)
+        let saveButton = makeToolbarButton(symbol: "square.and.arrow.down", help: "画像を書き出す (⌘S)", action: #selector(saveImage))
+        let reloadLibraryButton = makeToolbarButton(symbol: "arrow.clockwise", help: "ライブラリを更新", action: #selector(reloadLibraryFromButton))
+        let revealButton = makeToolbarButton(symbol: "finder", help: "ライブラリをFinderで表示", action: #selector(revealLibrary))
+        let zoomOutButton = makeToolbarButton(symbol: "minus.magnifyingglass", help: "縮小 (⌘-)", action: #selector(zoomOut))
+        let zoomFitButton = makeToolbarButton(symbol: "arrow.up.left.and.arrow.down.right", help: "ウィンドウに合わせる (⌘0)", action: #selector(zoomToFit))
+        let zoomInButton = makeToolbarButton(symbol: "plus.magnifyingglass", help: "拡大 (⌘+)", action: #selector(zoomIn))
 
         // ステータスは余白に収め、長文時は末尾省略（幅がウィンドウを超えて制約が破綻しないようにする）
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
+        zoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        zoomLabel.alignment = .center
+        zoomLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
+
         let toolbar = NSStackView(views: [
-            openButton, pasteButton, detectButton, applyButton, clearButton,
-            undoButton, redoButton, saveButton, reloadLibraryButton, revealButton, statusLabel
+            openButton, pasteButton, makeToolbarSeparator(),
+            detectButton, applyButton, clearButton, makeToolbarSeparator(),
+            undoButton, redoButton, makeToolbarSeparator(),
+            saveButton, reloadLibraryButton, revealButton,
+            statusLabel, makeToolbarSeparator(), zoomOutButton, zoomFitButton, zoomInButton, zoomLabel
         ])
         toolbar.orientation = .horizontal
         toolbar.alignment = .centerY
-        toolbar.spacing = 10
-        toolbar.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 4, right: 12)
+        toolbar.spacing = 6
+        toolbar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
-        let shapeLabel = NSTextField(labelWithString: "追加形状:")
         shapeControl.selectedSegment = 1
-        let segmentEngineLabel = NSTextField(labelWithString: "マスク生成:")
+        shapeControl.toolTip = "新規または選択中のモザイク範囲の形状"
         segmentEngineControl.removeAllItems()
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
         segmentEngineControl.selectItem(at: 0)
+        segmentEngineControl.toolTip = "選択範囲から実際の処理マスクを生成する方式"
 
         // 画像種別（自動判定の誤りを手動で上書きできるようにする）
-        let domainModeLabel = NSTextField(labelWithString: "画像種別:")
         domainModeControl.removeAllItems()
         domainModeControl.addItems(withTitles: ["自動判定", "実写", "イラスト・漫画"])
+        domainModeControl.toolTip = "人物・部位検出に使用する画像種別"
         let savedDomainMode = UserDefaults.standard.integer(forKey: Self.domainModeDefaultsKey)
         domainModeControl.selectItem(at: (0...2).contains(savedDomainMode) ? savedDomainMode : 0)
+        loadLibraryViewPreferences()
 
-        // 項目過多による幅超過（レイアウト破綻）を防ぐため、編集ツールバーは複数行に分ける
-        let editToolbar = NSStackView(views: [
-            shapeLabel, shapeControl,
-            segmentEngineLabel, segmentEngineControl,
-            domainModeLabel, domainModeControl
-        ])
-        editToolbar.orientation = .horizontal
-        editToolbar.alignment = .centerY
-        editToolbar.spacing = 10
-        editToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 2, right: 12)
-        editToolbar.translatesAutoresizingMaskIntoConstraints = false
-
-        // 対象カテゴリ行: 複数チェック可。候補生成時にチェックされたカテゴリ・レイヤだけを生成する
-        let categoryLabel = NSTextField(labelWithString: "対象カテゴリ:")
-        let categoryToolbar = NSStackView(
-            views: [categoryLabel] + categoryFilterChecks.map(\.button) + [generatePersonCheckbox, generatePoseCheckbox]
-        )
-        categoryToolbar.orientation = .horizontal
-        categoryToolbar.alignment = .centerY
-        categoryToolbar.spacing = 10
-        categoryToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 2, right: 12)
-        categoryToolbar.translatesAutoresizingMaskIntoConstraints = false
-
-        let groinPositionLabel = NSTextField(labelWithString: "鼠径部位置:")
-        groinPositionSlider.translatesAutoresizingMaskIntoConstraints = false
-        groinPositionSlider.widthAnchor.constraint(equalToConstant: 100).isActive = true
-
-        let optionToolbar = NSStackView(views: [
-            autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox,
-            mosaicSettingsButton,
-            groinPositionLabel, groinPositionSlider, groinPositionValueLabel
-        ])
-        optionToolbar.orientation = .horizontal
-        optionToolbar.alignment = .centerY
-        optionToolbar.spacing = 10
-        optionToolbar.edgeInsets = NSEdgeInsets(top: 0, left: 12, bottom: 8, right: 12)
-        optionToolbar.translatesAutoresizingMaskIntoConstraints = false
-
-        // 縦の余白はキャンバス側（splitView）に吸収させ、ツールバー3段は内容ぴったりの高さに固定する。
-        // NSStackViewは内在サイズを持たないため NSView汎用の setContentHuggingPriority は効かず、
-        // スタック境界を内容へフィットさせる専用API setHuggingPriority を使う必要がある
-        // （これが無いとAuto Layoutがツールバーを縦に引き伸ばし、コンテンツが下へ押し込まれる）。
         toolbar.setHuggingPriority(.required, for: .vertical)
-        editToolbar.setHuggingPriority(.required, for: .vertical)
-        categoryToolbar.setHuggingPriority(.required, for: .vertical)
-        optionToolbar.setHuggingPriority(.required, for: .vertical)
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
+        configureMosaicStyleControls()
         let libraryPanel = makeLibraryPanel()
         let layerPanel = makeLayerPanel()
+        let inspectorPanel = makeInspectorPanel()
 
-        // 右ペイン: 上=ライブラリ / 下=レイヤ。境界の上下ドラッグで比率変更できる。
+        // 右ペイン: 上=ライブラリ / 中=レイヤ / 下=インスペクタ。各境界はドラッグ調整できる。
         let rightPane = NSSplitView()
         rightPane.isVertical = false
         rightPane.dividerStyle = .thin
-        rightPane.autosaveName = "RightPaneSplit"
+        rightPane.autosaveName = "RightPaneSplit.v2"
         rightPaneSplitView = rightPane
         rightPane.translatesAutoresizingMaskIntoConstraints = false
         rightPane.addArrangedSubview(libraryPanel)
         rightPane.addArrangedSubview(layerPanel)
-        libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
-        layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 160).isActive = true
+        rightPane.addArrangedSubview(inspectorPanel)
+        libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
+        layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
+        inspectorPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
 
         // メイン分割: 左=キャンバス / 右=ライブラリ+レイヤ。左端境界の左右ドラッグで幅変更できる。
         let splitView = NSSplitView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
-        splitView.autosaveName = "MainSplit"
+        splitView.autosaveName = "MainSplit.v2"
+        mainSplitView = splitView
         splitView.translatesAutoresizingMaskIntoConstraints = false
         splitView.addArrangedSubview(canvas)
         splitView.addArrangedSubview(rightPane)
-        rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 280).isActive = true
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+        rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
         root.addSubview(toolbar)
-        root.addSubview(editToolbar)
-        root.addSubview(categoryToolbar)
-        root.addSubview(optionToolbar)
         root.addSubview(splitView)
 
         NSLayoutConstraint.activate([
             toolbar.topAnchor.constraint(equalTo: root.topAnchor),
             toolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             toolbar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            editToolbar.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
-            editToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            editToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
-            categoryToolbar.topAnchor.constraint(equalTo: editToolbar.bottomAnchor),
-            categoryToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            categoryToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
-            optionToolbar.topAnchor.constraint(equalTo: categoryToolbar.bottomAnchor),
-            optionToolbar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
-            optionToolbar.trailingAnchor.constraint(lessThanOrEqualTo: root.trailingAnchor),
-            splitView.topAnchor.constraint(equalTo: optionToolbar.bottomAnchor),
+            splitView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
             splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
@@ -554,26 +709,6 @@ final class MosaicWindowController: NSObject {
 
         self.view = root
 
-        openButton.target = self
-        openButton.action = #selector(openImage)
-        pasteButton.target = self
-        pasteButton.action = #selector(pasteImage)
-        detectButton.target = self
-        detectButton.action = #selector(generateCandidates)
-        applyButton.target = self
-        applyButton.action = #selector(applyMosaic)
-        clearButton.target = self
-        clearButton.action = #selector(clearROIs)
-        undoButton.target = self
-        undoButton.action = #selector(performUndo)
-        redoButton.target = self
-        redoButton.action = #selector(performRedo)
-        saveButton.target = self
-        saveButton.action = #selector(saveImage)
-        reloadLibraryButton.target = self
-        reloadLibraryButton.action = #selector(reloadLibraryFromButton)
-        revealButton.target = self
-        revealButton.action = #selector(revealLibrary)
         shapeControl.target = self
         shapeControl.action = #selector(shapeControlChanged)
         for (_, button) in categoryFilterChecks {
@@ -597,9 +732,8 @@ final class MosaicWindowController: NSObject {
         groinPositionSlider.action = #selector(groinPositionChanged)
         domainModeControl.target = self
         domainModeControl.action = #selector(domainModeChanged)
-        mosaicSettingsButton.target = self
-        mosaicSettingsButton.action = #selector(toggleMosaicSettingsPopover)
-        setUpMosaicSettingsPanel()
+        applyStyleToAllButton.target = self
+        applyStyleToAllButton.action = #selector(applyCurrentStyleToAllLayers)
         loadMosaicStyleSettings()
         reloadLayerList()
 
@@ -636,7 +770,11 @@ final class MosaicWindowController: NSObject {
                 case .polygon: self.shapeControl.selectedSegment = 2
                 }
             }
+            self.loadMosaicStyleForSelection(roi)
             self.syncROIListSelectionFromCanvas()
+        }
+        canvas.onZoomChanged = { [weak self] zoom in
+            self?.zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"
         }
         tableView.onNavigate = { [weak self] delta in
             self?.navigateLibrary(by: delta)
@@ -677,6 +815,18 @@ final class MosaicWindowController: NSObject {
         } else if shape == .polygon {
             updateStatus("追加形状: 多角形（ドラッグで追加後、頂点ドラッグで変形、Option+クリックで頂点の追加/削除）")
         }
+    }
+
+    @objc private func zoomIn() {
+        canvas.setZoom(canvas.zoomFactor * 1.2)
+    }
+
+    @objc private func zoomOut() {
+        canvas.setZoom(canvas.zoomFactor / 1.2)
+    }
+
+    @objc private func zoomToFit() {
+        canvas.resetZoom()
     }
 
     // MARK: - 候補生成の対象フィルタ（対象カテゴリ複数チェック）
@@ -721,25 +871,65 @@ final class MosaicWindowController: NSObject {
     /// レイヤパネルの初期縦幅を「人物4人分」（グループ4+子8+固定2=14行×約24pt+見出し・ボタン≈430pt）に設定する。
     /// 右ペインの高さが足りない場合はライブラリと半々。一度適用した後はユーザーのドラッグ調整（autosave）を尊重する。
     func applyInitialLayoutIfNeeded() {
-        let appliedKey = "RightPaneDefaultLayoutApplied.v1"
-        guard !UserDefaults.standard.bool(forKey: appliedKey), let rightPane = rightPaneSplitView else { return }
+        let appliedKey = "RightPaneDefaultLayoutApplied.v2"
+        guard !UserDefaults.standard.bool(forKey: appliedKey),
+              let rightPane = rightPaneSplitView,
+              let mainSplit = mainSplitView else { return }
         rightPane.layoutSubtreeIfNeeded()
         let total = rightPane.bounds.height
-        guard total > 100 else { return }
+        guard total > 520 else { return }
         let divider = rightPane.dividerThickness
-        var layerHeight = min(430, total / 2)
-        layerHeight = max(160, min(layerHeight, total - 200 - divider))
-        rightPane.setPosition(total - divider - layerHeight, ofDividerAt: 0)
+        let libraryHeight = max(160, min(230, total * 0.32))
+        let layerHeight = max(170, min(230, total * 0.30))
+        rightPane.setPosition(libraryHeight, ofDividerAt: 0)
+        rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
+        mainSplit.layoutSubtreeIfNeeded()
+        let rightWidth = max(320, min(390, mainSplit.bounds.width * 0.34))
+        mainSplit.setPosition(mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth, ofDividerAt: 0)
         UserDefaults.standard.set(true, forKey: appliedKey)
     }
 
     // MARK: - モザイク描画スタイル設定
 
-    private func setUpMosaicSettingsPanel() {
+    private func makeToolbarButton(symbol: String, help: String, action: Selector) -> NSButton {
+        let button = NSButton()
+        configureToolbarButton(button, symbol: symbol, help: help, action: action)
+        return button
+    }
+
+    private func configureToolbarButton(_ button: NSButton, symbol: String, help: String, action: Selector) {
+        button.title = ""
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)
+        button.imagePosition = .imageOnly
+        button.bezelStyle = .texturedRounded
+        button.controlSize = .large
+        button.toolTip = help
+        button.setAccessibilityLabel(help)
+        button.target = self
+        button.action = action
+        button.translatesAutoresizingMaskIntoConstraints = false
+        button.widthAnchor.constraint(equalToConstant: 32).isActive = true
+        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+    }
+
+    private func makeToolbarSeparator() -> NSView {
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+        separator.widthAnchor.constraint(equalToConstant: 1).isActive = true
+        separator.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        return separator
+    }
+
+    private func configureMosaicStyleControls() {
         stylePatternPopUp.removeAllItems()
         stylePatternPopUp.addItems(withTitles: MosaicFillPattern.allCases.map(\.displayName))
+        for (index, pattern) in MosaicFillPattern.allCases.enumerated() {
+            stylePatternPopUp.item(at: index)?.image = makePatternPreviewImage(pattern)
+        }
         stylePatternPopUp.target = self
         stylePatternPopUp.action = #selector(mosaicStyleChanged)
+        stylePatternPopUp.toolTip = "選択レイヤの塗りつぶしパターン"
         for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider] {
             slider.target = self
             slider.action = #selector(mosaicStyleChanged)
@@ -760,45 +950,149 @@ final class MosaicWindowController: NSObject {
         stylePatternImageButton.action = #selector(choosePatternImage)
         stylePatternImageLabel.textColor = .secondaryLabelColor
         stylePatternImageLabel.font = .systemFont(ofSize: 11)
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "塗りつぶしパターン:"), stylePatternPopUp, NSGridCell.emptyContentView],
-            [NSTextField(labelWithString: "透明度:"), styleOpacitySlider, styleOpacityValueLabel],
-            [styleTintCheckbox, styleTintColorWell, NSGridCell.emptyContentView],
-            [NSTextField(labelWithString: "パターン細かさ:"), styleBlockScaleSlider, styleBlockScaleValueLabel],
-            [NSTextField(labelWithString: "範囲輪郭ぼかし:"), styleFeatherSlider, styleFeatherValueLabel],
-            [NSTextField(labelWithString: "帯の太さ:"), styleStripeWidthSlider, styleStripeWidthValueLabel],
-            [NSTextField(labelWithString: "帯の間隔（透明）:"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
-            [NSTextField(labelWithString: "雲の密度:"), styleCloudDensitySlider, styleCloudDensityValueLabel],
-            [NSTextField(labelWithString: "雲:"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
-            [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
-        ])
-        grid.rowSpacing = 10
-        grid.columnSpacing = 10
-        grid.translatesAutoresizingMaskIntoConstraints = false
-
-        let panel = NSView()
-        panel.translatesAutoresizingMaskIntoConstraints = false
-        panel.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.topAnchor.constraint(equalTo: panel.topAnchor, constant: 14),
-            grid.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 14),
-            grid.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -14),
-            grid.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -14)
-        ])
-        let controller = NSViewController()
-        controller.view = panel
-        mosaicSettingsPopover.behavior = .transient
-        mosaicSettingsPopover.contentViewController = controller
+        selectedLayerStyleLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        selectedLayerStyleLabel.textColor = .secondaryLabelColor
+        selectedLayerStyleLabel.lineBreakMode = .byTruncatingMiddle
+        applyStyleToAllButton.toolTip = "現在の設定をすべてのモザイクレイヤへ複製"
     }
 
-    @objc private func toggleMosaicSettingsPopover() {
-        if mosaicSettingsPopover.isShown {
-            mosaicSettingsPopover.close()
-        } else {
-            updateMosaicStyleControlAvailability()
-            mosaicSettingsPopover.show(relativeTo: mosaicSettingsButton.bounds, of: mosaicSettingsButton, preferredEdge: .maxY)
+    private func makeInspectorPanel() -> NSView {
+        let panel = NSView()
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.wantsLayer = true
+        panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        let title = NSTextField(labelWithString: "インスペクタ")
+        title.font = .systemFont(ofSize: 15, weight: .semibold)
+
+        let shapeRow = inspectorRow("追加形状", control: shapeControl)
+        let maskRow = inspectorRow("マスク生成", control: segmentEngineControl)
+        let domainRow = inspectorRow("画像種別", control: domainModeControl)
+        let generateLayerRow = NSStackView(views: [generatePersonCheckbox, generatePoseCheckbox])
+        generateLayerRow.orientation = .horizontal
+        generateLayerRow.spacing = 10
+        let categories = NSStackView(views: categoryFilterChecks.map(\.button))
+        categories.orientation = .vertical
+        categories.spacing = 2
+        categories.alignment = .leading
+        let groinRow = inspectorRow("鼠径部位置", control: groinPositionSlider, trailing: groinPositionValueLabel)
+
+        let styleGrid = NSGridView(views: [
+            [NSTextField(labelWithString: "パターン"), stylePatternPopUp, NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "透明度"), styleOpacitySlider, styleOpacityValueLabel],
+            [styleTintCheckbox, styleTintColorWell, NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "細かさ"), styleBlockScaleSlider, styleBlockScaleValueLabel],
+            [NSTextField(labelWithString: "輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
+            [NSTextField(labelWithString: "帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
+            [NSTextField(labelWithString: "帯の間隔"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
+            [NSTextField(labelWithString: "雲の密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
+            [NSTextField(labelWithString: "雲"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
+            [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
+        ])
+        styleGrid.rowSpacing = 7
+        styleGrid.columnSpacing = 8
+
+        let options = NSStackView(views: [autoGenerateCheckbox, autoSaveCheckbox, mosaicPreviewCheckbox])
+        options.orientation = .vertical
+        options.alignment = .leading
+        options.spacing = 4
+
+        let content = NSStackView(views: [
+            title,
+            inspectorHeading("選択範囲"), shapeRow,
+            inspectorHeading("検出"), domainRow, maskRow,
+            NSTextField(labelWithString: "候補カテゴリ"), categories,
+            NSTextField(labelWithString: "表示レイヤ生成"), generateLayerRow, groinRow,
+            inspectorHeading("モザイク"), selectedLayerStyleLabel, styleGrid, applyStyleToAllButton,
+            inspectorHeading("ワークフロー"), options
+        ])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 7
+        content.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 12, right: 12)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let document = NSView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.drawsBackground = false
+        scroll.documentView = document
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(scroll)
+        NSLayoutConstraint.activate([
+            scroll.topAnchor.constraint(equalTo: panel.topAnchor),
+            scroll.leadingAnchor.constraint(equalTo: panel.leadingAnchor),
+            scroll.trailingAnchor.constraint(equalTo: panel.trailingAnchor),
+            scroll.bottomAnchor.constraint(equalTo: panel.bottomAnchor),
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            content.topAnchor.constraint(equalTo: document.topAnchor),
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor)
+        ])
+        return panel
+    }
+
+    private func inspectorHeading(_ text: String) -> NSTextField {
+        let label = NSTextField(labelWithString: text)
+        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.textColor = .labelColor
+        return label
+    }
+
+    private func inspectorRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSStackView {
+        let label = NSTextField(labelWithString: title)
+        label.textColor = .secondaryLabelColor
+        label.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        var views: [NSView] = [label, control]
+        if let trailing { views.append(trailing) }
+        let row = NSStackView(views: views)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        return row
+    }
+
+    private func makePatternPreviewImage(_ pattern: MosaicFillPattern) -> NSImage? {
+        let width = 24
+        let height = 18
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return nil }
+        for y in 0..<height {
+            let value = CGFloat(y) / CGFloat(max(1, height - 1))
+            context.setFillColor(NSColor(calibratedWhite: 0.2 + value * 0.65, alpha: 1).cgColor)
+            context.fill(CGRect(x: 0, y: y, width: width, height: 1))
         }
+        guard let source = context.makeImage() else { return nil }
+        let roi = MosaicROI(
+            rect: NormalizedRect(x: 0, y: 0, width: 1, height: 1),
+            confidence: 1,
+            source: "pattern-preview",
+            shape: .rectangle
+        )
+        let style = MosaicStyle(
+            pattern: pattern,
+            blockScale: 5,
+            stripeWidth: 3,
+            stripeSpacing: 2,
+            cloudDensity: 0.6
+        )
+        guard let result = try? mosaicEngine.applyMosaic(to: source, rois: [roi], style: style) else { return nil }
+        let image = NSImage(cgImage: result, size: NSSize(width: width, height: height))
+        image.isTemplate = false
+        return image
     }
 
     /// 現在のUI設定からモザイク描画スタイルを構築する。
@@ -821,14 +1115,89 @@ final class MosaicWindowController: NSObject {
         style.cloudDensity = styleCloudDensitySlider.doubleValue
         style.cloudTone = styleCloudToneCheckbox.state == .on
         style.patternImage = customPatternImage
+        style.patternImageIdentifier = customPatternImageIdentifier
         return style
+    }
+
+    private func defaultMosaicStyleForRendering() -> MosaicStyle {
+        defaultMosaicStyle
     }
 
     @objc private func mosaicStyleChanged() {
         updateMosaicStyleControlAvailability()
-        saveMosaicStyleSettings()
+        guard !isLoadingMosaicStyleControls else { return }
+        if let selectedID = canvas.selectedROIID,
+           let index = canvas.rois.firstIndex(where: { $0.id == selectedID }) {
+            let newStyle = currentMosaicStyle().persistentStyle()
+            guard canvas.rois[index].style != newStyle else { return }
+            pushUndoSnapshot(currentEditorState())
+            canvas.rois[index].style = newStyle
+            hasUnsavedChanges = true
+            selectedLayerStyleLabel.stringValue = "選択レイヤ: \(canvas.rois[index].category.displayName)（個別設定）"
+        } else {
+            defaultMosaicStyle = currentMosaicStyle()
+            saveMosaicStyleSettings()
+        }
         // モザイク表示中は変更を即時反映する
         resumeMosaicPreviewIfNeeded()
+    }
+
+    @objc private func applyCurrentStyleToAllLayers() {
+        guard !canvas.rois.isEmpty else {
+            updateStatus("適用先のモザイクレイヤがありません")
+            return
+        }
+        pushUndoSnapshot(currentEditorState())
+        let style = currentMosaicStyle().persistentStyle()
+        for index in canvas.rois.indices {
+            canvas.rois[index].style = style
+        }
+        hasUnsavedChanges = true
+        resumeMosaicPreviewIfNeeded()
+        updateStatus("現在のモザイク設定を全レイヤへ適用しました")
+    }
+
+    private func loadMosaicStyleForSelection(_ roi: MosaicROI?) {
+        isLoadingMosaicStyleControls = true
+        defer {
+            updateMosaicStyleControlAvailability()
+            isLoadingMosaicStyleControls = false
+        }
+        guard let roi else {
+            selectedLayerStyleLabel.stringValue = "既定設定（新規レイヤ）"
+            applyMosaicStyleToControls(defaultMosaicStyle)
+            return
+        }
+        if let individual = roi.style {
+            selectedLayerStyleLabel.stringValue = "選択レイヤ: \(roi.category.displayName)（個別設定）"
+            applyMosaicStyleToControls(MosaicStyle(roiStyle: individual, patternImage: customPatternImage))
+        } else {
+            selectedLayerStyleLabel.stringValue = "選択レイヤ: \(roi.category.displayName)（既定設定を継承）"
+            applyMosaicStyleToControls(defaultMosaicStyle)
+        }
+    }
+
+    private func applyMosaicStyleToControls(_ style: MosaicStyle) {
+        if let index = MosaicFillPattern.allCases.firstIndex(of: style.pattern) {
+            stylePatternPopUp.selectItem(at: index)
+        }
+        styleOpacitySlider.doubleValue = style.opacity
+        styleBlockScaleSlider.doubleValue = style.blockScale
+        styleFeatherSlider.doubleValue = style.edgeFeather
+        styleStripeWidthSlider.doubleValue = style.stripeWidth
+        styleStripeSpacingSlider.doubleValue = style.stripeSpacing
+        styleCloudDensitySlider.doubleValue = style.cloudDensity
+        styleCloudToneCheckbox.state = style.cloudTone ? .on : .off
+        customPatternImageIdentifier = style.patternImageIdentifier
+        customPatternImage = style.patternImageIdentifier.flatMap { patternImage(for: $0) } ?? style.patternImage
+        updateCustomPatternPreview(customPatternImage)
+        stylePatternImageLabel.stringValue = style.patternImageIdentifier == nil ? "未選択" : "保存済みパターン"
+        if let tint = style.tintColor {
+            styleTintCheckbox.state = .on
+            styleTintColorWell.color = NSColor(deviceRed: tint.red, green: tint.green, blue: tint.blue, alpha: 1)
+        } else {
+            styleTintCheckbox.state = .off
+        }
     }
 
     private func updateMosaicStyleControlAvailability() {
@@ -848,7 +1217,7 @@ final class MosaicWindowController: NSObject {
         styleStripeSpacingValueLabel.stringValue = "\(Int(styleStripeSpacingSlider.doubleValue))px"
     }
 
-    /// 任意パターン画像を選択し、Application Supportへコピーして永続化する。
+    /// 任意パターン画像を選択し、ライブラリ配下へコピーして永続化する。
     @objc private func choosePatternImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
@@ -857,30 +1226,41 @@ final class MosaicWindowController: NSObject {
         do {
             let loaded = try imageLoader.loadImage(from: url)
             customPatternImage = loaded.cgImage
-            let destination = try Self.patternImageStoreURL()
-            try FileManager.default.createDirectory(
-                at: destination.deletingLastPathComponent(),
-                withIntermediateDirectories: true
-            )
-            let bitmap = NSBitmapImageRep(cgImage: loaded.cgImage)
-            if let png = bitmap.representation(using: .png, properties: [:]) {
-                try png.write(to: destination, options: .atomic)
-            }
+            let identifier = UUID().uuidString
+            customPatternImageIdentifier = identifier
+            patternImageCache[identifier] = loaded.cgImage
+            try libraryEngine.savePatternImage(loaded.cgImage, identifier: identifier)
             stylePatternImageLabel.stringValue = url.lastPathComponent
+            updateCustomPatternPreview(loaded.cgImage)
             mosaicStyleChanged()
         } catch {
             showError(error)
         }
     }
 
-    private static func patternImageStoreURL() throws -> URL {
-        let support = try FileManager.default.url(
-            for: .applicationSupportDirectory,
-            in: .userDomainMask,
-            appropriateFor: nil,
-            create: true
-        )
-        return support.appendingPathComponent("newMosaic/Patterns/custom_pattern.png")
+    private func patternImage(for identifier: String) -> CGImage? {
+        if let cached = patternImageCache[identifier] { return cached }
+        let url: URL?
+        if identifier == "legacy" {
+            url = try? FileManager.default.url(
+                for: .applicationSupportDirectory,
+                in: .userDomainMask,
+                appropriateFor: nil,
+                create: true
+            ).appendingPathComponent("newMosaic/Patterns/custom_pattern.png")
+        } else {
+            url = libraryEngine.patternURL(identifier: identifier)
+        }
+        guard let url, let loaded = try? imageLoader.loadImage(from: url) else { return nil }
+        patternImageCache[identifier] = loaded.cgImage
+        return loaded.cgImage
+    }
+
+    private func updateCustomPatternPreview(_ image: CGImage?) {
+        guard let index = MosaicFillPattern.allCases.firstIndex(of: .customImage),
+              let item = stylePatternPopUp.item(at: index) else { return }
+        item.image = image.map { NSImage(cgImage: $0, size: NSSize(width: 24, height: 18)) }
+            ?? makePatternPreviewImage(.customImage)
     }
 
     private func saveMosaicStyleSettings() {
@@ -903,6 +1283,7 @@ final class MosaicWindowController: NSObject {
         defaults.set(styleStripeSpacingSlider.doubleValue, forKey: "MosaicStyle.stripeSpacing")
         defaults.set(styleCloudDensitySlider.doubleValue, forKey: "MosaicStyle.cloudDensity")
         defaults.set(styleCloudToneCheckbox.state == .on, forKey: "MosaicStyle.cloudTone")
+        defaults.set(customPatternImageIdentifier, forKey: "MosaicStyle.patternImageIdentifier")
     }
 
     private func loadMosaicStyleSettings() {
@@ -940,13 +1321,19 @@ final class MosaicWindowController: NSObject {
             styleCloudDensitySlider.doubleValue = defaults.double(forKey: "MosaicStyle.cloudDensity")
         }
         styleCloudToneCheckbox.state = defaults.bool(forKey: "MosaicStyle.cloudTone") ? .on : .off
-        if let storeURL = try? Self.patternImageStoreURL(),
-           FileManager.default.fileExists(atPath: storeURL.path),
-           let loaded = try? imageLoader.loadImage(from: storeURL) {
-            customPatternImage = loaded.cgImage
+        if let identifier = defaults.string(forKey: "MosaicStyle.patternImageIdentifier"),
+           let image = patternImage(for: identifier) {
+            customPatternImageIdentifier = identifier
+            customPatternImage = image
+            stylePatternImageLabel.stringValue = "保存済みパターン"
+        } else if let legacy = patternImage(for: "legacy") {
+            customPatternImageIdentifier = "legacy"
+            customPatternImage = legacy
             stylePatternImageLabel.stringValue = "保存済みパターン"
         }
+        updateCustomPatternPreview(customPatternImage)
         updateMosaicStyleControlAvailability()
+        defaultMosaicStyle = currentMosaicStyle()
     }
 
     /// 画像種別（自動判定/実写/イラスト・漫画）の手動指定。永続化され、次回の候補生成から適用される。
@@ -962,7 +1349,6 @@ final class MosaicWindowController: NSObject {
     /// 鼠径部ROIの位置基準（腰0%〜膝100%の比率）を事前補正する。設定は永続化され、次回の候補生成から適用される。
     @objc private func groinPositionChanged() {
         let ratio = groinPositionSlider.doubleValue
-        roiGenerator.groinPositionRatio = ratio
         UserDefaults.standard.set(ratio, forKey: Self.groinPositionDefaultsKey)
         groinPositionValueLabel.stringValue = "\(Int(ratio * 100))%"
         updateStatus("鼠径部位置の基準: 腰から膝方向へ\(Int(ratio * 100))%（次回の候補生成から適用）")
@@ -970,6 +1356,7 @@ final class MosaicWindowController: NSObject {
 
     /// レイヤパネル先頭の表示トグル（人物検出/骨格検出/ROI）を該当レイヤへ一括適用する。
     @objc private func toggleDetectionLayers() {
+        editorRevision += 1
         let personOn = personLayerCheckbox.state == .on
         let poseOn = poseLayerCheckbox.state == .on
         let roiOn = roiLayerCheckbox.state == .on
@@ -1043,6 +1430,7 @@ final class MosaicWindowController: NSObject {
         layerOutlineView.indentationPerLevel = 14
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("layer"))
         column.width = 220
+        column.resizingMask = .autoresizingMask
         layerOutlineView.addTableColumn(column)
         layerOutlineView.outlineTableColumn = column
 
@@ -1097,16 +1485,23 @@ final class MosaicWindowController: NSObject {
         var counters: [String: Int] = [:]
         roiListEntries = canvas.rois.map { roi in
             let name = roi.category.displayName
-            guard counts[name, default: 0] > 1 else { return ROIListEntry(roiID: roi.id, title: name) }
+            let pattern = (roi.style?.pattern ?? defaultMosaicStyle.pattern).displayName
+            guard counts[name, default: 0] > 1 else {
+                return ROIListEntry(roiID: roi.id, title: "\(name) · \(pattern)")
+            }
             counters[name, default: 0] += 1
-            return ROIListEntry(roiID: roi.id, title: "\(name) \(counters[name] ?? 0)")
+            return ROIListEntry(roiID: roi.id, title: "\(name) \(counters[name] ?? 0) · \(pattern)")
         }
-        roiListSignature = canvas.rois.map { "\($0.id.uuidString)#\($0.category.rawValue)" }
+        roiListSignature = canvas.rois.map {
+            "\($0.id.uuidString)#\($0.category.rawValue)#\(($0.style?.pattern ?? defaultMosaicStyle.pattern).rawValue)"
+        }
     }
 
     /// ROIの件数・カテゴリが変わったときだけリストを再読込する（ドラッグ移動中の毎フレーム再描画を避ける）。
     private func refreshROIListIfNeeded() {
-        let signature = canvas.rois.map { "\($0.id.uuidString)#\($0.category.rawValue)" }
+        let signature = canvas.rois.map {
+            "\($0.id.uuidString)#\($0.category.rawValue)#\(($0.style?.pattern ?? defaultMosaicStyle.pattern).rawValue)"
+        }
         guard signature != roiListSignature else { return }
         reloadLayerList()
     }
@@ -1146,6 +1541,7 @@ final class MosaicWindowController: NSObject {
         layerGroupCounter += 1
         let group = LayerGroup(name: "グループ\(layerGroupCounter)", children: leavesToGroup)
         layerGroups.append(group)
+        editorRevision += 1
         reloadLayerList()
         updateStatus("\(group.name) を作成しました")
     }
@@ -1160,6 +1556,7 @@ final class MosaicWindowController: NSObject {
             }
         }
         if didUngroup {
+            editorRevision += 1
             reloadLayerList()
             updateStatus("グループを解除しました")
         } else {
@@ -1168,6 +1565,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func toggleLeafVisibility(_ leaf: LayerLeaf) {
+        editorRevision += 1
         leaf.isVisible.toggle()
         applyLayerVisibility()
         syncLegacyLayerCheckboxes()
@@ -1175,6 +1573,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func toggleGroupVisibility(_ group: LayerGroup) {
+        editorRevision += 1
         let makeVisible = group.visibilityState != .on
         for child in group.children { child.isVisible = makeVisible }
         applyLayerVisibility()
@@ -1258,12 +1657,14 @@ final class MosaicWindowController: NSObject {
 
         do {
             let loaded = try imageLoader.loadImage(from: url)
+            guard confirmCurrentChangesBeforeLeaving() else { return }
             let item = try libraryEngine.importOriginal(loaded.cgImage, sourceName: url.lastPathComponent)
             setWorkingImage(loaded.cgImage, sourceURL: libraryEngine.originalURL(for: item), item: item)
             updateStatus("読み込み: \(url.lastPathComponent) \(Int(loaded.pixelSize.width))x\(Int(loaded.pixelSize.height))")
             reloadLibrary()
             autoGenerateIfEnabled()
         } catch {
+            discardedEditStateID = nil
             showError(error)
         }
     }
@@ -1276,12 +1677,14 @@ final class MosaicWindowController: NSObject {
         }
 
         do {
+            guard confirmCurrentChangesBeforeLeaving() else { return }
             let item = try libraryEngine.importOriginal(cgImage, sourceName: "clipboard_\(Self.timestamp()).png")
             setWorkingImage(cgImage, sourceURL: libraryEngine.originalURL(for: item), item: item)
             updateStatus("貼り付け画像をライブラリへ保存: \(item.sourceName)")
             reloadLibrary()
             autoGenerateIfEnabled()
         } catch {
+            discardedEditStateID = nil
             showError(error)
         }
     }
@@ -1291,145 +1694,142 @@ final class MosaicWindowController: NSObject {
             updateStatus("先に画像を開いてください")
             return
         }
+        guard !isGeneratingCandidates else {
+            hasPendingCandidateGeneration = true
+            updateStatus("解析中です。現在の解析完了後にもう一度実行します")
+            return
+        }
+
         let previousState = currentEditorState()
-        do {
-            // 実写/イラスト・漫画を先に判定する（「画像種別」の手動指定は自動判定より優先）
-            let domain: ImageDomain
-            let domainSourceNote: String
-            switch domainModeControl.indexOfSelectedItem {
-            case 1:
-                domain = .photo
-                domainSourceNote = "手動指定"
-            case 2:
-                domain = .illustration
-                domainSourceNote = "手動指定"
-            default:
-                // モデルベース分類器（deepghs/anime_real_cls）を優先し、読み込めない場合は統計判定
-                if let result = try? domainModelClassifier?.classify(loadedImage.cgImage) {
-                    domain = result.domain
-                    domainSourceNote = "自動判定 \(Int(result.confidence * 100))%"
-                } else {
-                    domain = DomainClassifier.classify(loadedImage.cgImage)
-                    domainSourceNote = "自動判定"
+        let requestedEditorRevision = editorRevision
+        let requestedItemID = currentLibraryItem?.id
+        let selectedShape = canvas.currentShape
+        let checkedCategories = checkedGenerationCategories()
+        let includePersonLayers = generatePersonCheckbox.state == .on
+        let includePoseLayers = generatePoseCheckbox.state == .on
+        let input = CandidateGenerationInput(
+            image: loadedImage.cgImage,
+            domainMode: domainModeControl.indexOfSelectedItem,
+            groinPositionRatio: groinPositionSlider.doubleValue
+        )
+        let worker = candidateGenerationWorker
+
+        isGeneratingCandidates = true
+        updateStatus("人物・骨格・対象部位を解析中…")
+        Task { [weak self] in
+            let taskResult = await Task.detached(priority: .userInitiated) {
+                do {
+                    return CandidateGenerationTaskResult.success(try worker.run(input))
+                } catch {
+                    return CandidateGenerationTaskResult.failure(error.localizedDescription)
                 }
-            }
+            }.value
 
-            // 検出経路をドメインで切替える:
-            // - 実写: Vision（インスタンスマスク+骨格）ベースの既存パイプライン
-            // - イラスト/漫画: アニメ人物検出（矩形）。実写学習のVisionシルエットが
-            //   イラストでは部分的にしか反応しないため使用しない。骨格モデルは未導入のため骨格なし。
-            let snapshot: DetectionSnapshot
-            if domain == .illustration {
-                let persons = (try? animePersonDetector?.detectPersons(in: loadedImage.cgImage)) ?? []
-                let hints = persons.map {
-                    PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: [])
+            guard let self else { return }
+            self.isGeneratingCandidates = false
+            guard self.currentLibraryItem?.id == requestedItemID else {
+                if self.hasPendingCandidateGeneration {
+                    self.hasPendingCandidateGeneration = false
+                    self.generateCandidates()
                 }
-                snapshot = DetectionSnapshot(persons: persons, poseHints: hints, rois: [])
-            } else {
-                snapshot = try pipeline.generateDetailedCandidates(for: loadedImage.cgImage)
-            }
-            pushUndoSnapshot(previousState)
-            suspendMosaicPreview()
-            var rois = snapshot.rois
-
-            // イラスト/漫画ではアニメ部位検出モデル（内容ベース検出）を実行して統合する
-            var animeDetectionCount = 0
-            if domain == .illustration, let detector = animeCensorDetector {
-                let animeROIs = (try? detector.detect(in: loadedImage.cgImage)) ?? []
-                animeDetectionCount = animeROIs.count
-                rois = Self.mergeCandidates(base: rois, adding: animeROIs)
+                return
             }
 
-            // 実写では実写用NSFW部位検出モデル（NudeNet）を実行して統合する
-            // （従来は骨格からの位置推定のみで、性器の内容ベース検出が無かった）。
-            // 全体画像に加えて人物クロップごとにも推論し、全身写真での解像度不足による検出漏れを防ぐ。
-            var photoDetectionCount = 0
-            if domain == .photo, let detector = photoCensorDetector {
-                let photoROIs = (try? detector.detect(
-                    in: loadedImage.cgImage,
-                    personBounds: snapshot.personBounds
-                )) ?? []
-                photoDetectionCount = photoROIs.count
-                rois = Self.mergeCandidates(base: rois, adding: photoROIs)
-            }
-
-            if let learningEngine {
-                rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: loadedImage.cgImage)
-            }
-            // 対象カテゴリでチェックされたものだけ生成する
-            let checkedCategories = checkedGenerationCategories()
-            let beforeFilterCount = rois.count
-            rois = rois.filter { checkedCategories.contains($0.category) }
-            let filteredOutCount = beforeFilterCount - rois.count
-            // 自動候補にも「追加形状」の選択（矩形/楕円）を適用する
-            let selectedShape = canvas.currentShape
-            rois = rois.map { roi in
-                var updated = roi
-                updated.shape = selectedShape
-                if selectedShape == .polygon && updated.polygonPoints == nil {
-                    updated.polygonPoints = MosaicROI.defaultPolygonPoints
+            switch taskResult {
+            case .failure(let message):
+                self.updateStatus("候補生成に失敗しました: \(message)")
+            case .success(let output):
+                guard self.editorRevision == requestedEditorRevision,
+                      self.canvas.rois == previousState.rois else {
+                    self.updateStatus("解析中に編集されたため、候補生成結果は適用しませんでした。必要に応じて再実行してください")
+                    break
                 }
-                return updated
+                self.applyCandidateGenerationOutput(
+                    output,
+                    sourceImage: input.image,
+                    previousState: previousState,
+                    selectedShape: selectedShape,
+                    checkedCategories: checkedCategories,
+                    includePersonLayers: includePersonLayers,
+                    includePoseLayers: includePoseLayers
+                )
             }
-            canvas.rois = rois
-            lastAutoROIs = rois
-            lastPersonBounds = snapshot.personBounds
-            // 人物・骨格レイヤも「対象カテゴリ」のチェックに従って生成する（内部検出はROI推定に必要なため常時実行）
-            let includePersonLayers = generatePersonCheckbox.state == .on
-            let includePoseLayers = generatePoseCheckbox.state == .on
-            canvas.personLayerRects = includePersonLayers ? snapshot.personBounds : []
-            canvas.personLayerMasks = includePersonLayers
-                ? snapshot.persons.map { $0.maskImage.flatMap { self.tintedMask(from: $0) } }
-                : []
-            canvas.poseLayerRects = includePoseLayers ? snapshot.poseHints.map { Self.poseDisplayRect(for: $0) } : []
-            canvas.poseLayerBones = includePoseLayers ? snapshot.poseHints.map { Self.boneSegments(for: $0) } : []
-            canvas.poseLayerJointPoints = includePoseLayers
-                ? snapshot.poseHints.map { $0.joints.map { CGPoint(x: $0.x, y: $0.y) } }
-                : []
-            rebuildDetectionLayers(
-                personCount: snapshot.personBounds.count,
-                poseAvailability: snapshot.poseHints.map { !$0.joints.isEmpty },
-                includePersonLayer: includePersonLayers,
-                includePoseLayer: includePoseLayers
-            )
-            // 候補生成後はレイヤパネル内のすべてのレイヤを表示状態にする
-            showAllLayers()
-            // 「モザイク表示」チェックがONなら新しい候補で自動的に再適用する
-            resumeMosaicPreviewIfNeeded()
 
-            let domainNote: String
-            if domain == .illustration {
-                domainNote = animeCensorDetector != nil
-                    ? "イラスト/漫画（\(domainSourceNote)・アニメ部位検出: \(animeDetectionCount)件）: "
-                    : "イラスト/漫画（\(domainSourceNote)・アニメ用検出モデルを読み込めませんでした）: "
-            } else {
-                domainNote = photoCensorDetector != nil
-                    ? "実写（\(domainSourceNote)・実写部位検出: \(photoDetectionCount)件）: "
-                    : "実写（\(domainSourceNote)・実写用検出モデルを読み込めませんでした）: "
+            if self.hasPendingCandidateGeneration {
+                self.hasPendingCandidateGeneration = false
+                self.generateCandidates()
             }
-            let filterNote = filteredOutCount > 0 ? "（対象カテゴリ外 \(filteredOutCount)件を除外）" : ""
-            if snapshot.persons.isEmpty && canvas.rois.isEmpty {
-                updateStatus(domainNote + "人物を検出できませんでした（候補0件）\(filterNote)。ドラッグで手動追加してください")
-            } else {
-                let poseDetectedCount = snapshot.poseHints.filter { !$0.joints.isEmpty }.count
-                updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名（骨格検出 \(poseDetectedCount)名） / ROI \(canvas.rois.count)件\(filterNote)。ドラッグで手動追加できます")
-            }
-        } catch {
-            showError(error)
         }
     }
 
-    /// 内容ベース検出（アニメ部位検出）の結果を既存候補へ統合する。
-    /// 大きく重なる既存の自動候補（骨格ベース推定）は内容ベース検出を優先して置き換える。
-    private static func mergeCandidates(base: [MosaicROI], adding: [MosaicROI]) -> [MosaicROI] {
-        var result = base
-        for roi in adding {
-            result.removeAll { existing in
-                existing.source != "manual" && existing.rect.iou(with: roi.rect) > 0.5
-            }
-            result.append(roi)
+    private func applyCandidateGenerationOutput(
+        _ output: CandidateGenerationOutput,
+        sourceImage: CGImage,
+        previousState: EditorState,
+        selectedShape: ROIShape,
+        checkedCategories: Set<MosaicTargetCategory>,
+        includePersonLayers: Bool,
+        includePoseLayers: Bool
+    ) {
+        let snapshot = output.snapshot
+        var rois = output.rois
+        if let learningEngine {
+            rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: sourceImage)
         }
-        return result
+        let beforeFilterCount = rois.count
+        rois = rois.filter { checkedCategories.contains($0.category) }
+        let filteredOutCount = beforeFilterCount - rois.count
+        rois = rois.map { roi in
+            var updated = roi
+            updated.shape = selectedShape
+            if selectedShape == .polygon && updated.polygonPoints == nil {
+                updated.polygonPoints = MosaicROI.defaultPolygonPoints
+            }
+            return updated
+        }
+
+        pushUndoSnapshot(previousState)
+        suspendMosaicPreview()
+        canvas.rois = rois
+        lastAutoROIs = rois
+        lastPersonBounds = snapshot.personBounds
+        canvas.personLayerRects = includePersonLayers ? snapshot.personBounds : []
+        canvas.personLayerMasks = includePersonLayers
+            ? snapshot.persons.map { $0.maskImage.flatMap { self.tintedMask(from: $0) } }
+            : []
+        canvas.poseLayerRects = includePoseLayers ? snapshot.poseHints.map { Self.poseDisplayRect(for: $0) } : []
+        canvas.poseLayerBones = includePoseLayers ? snapshot.poseHints.map { Self.boneSegments(for: $0) } : []
+        canvas.poseLayerJointPoints = includePoseLayers
+            ? snapshot.poseHints.map { $0.joints.map { CGPoint(x: $0.x, y: $0.y) } }
+            : []
+        rebuildDetectionLayers(
+            personCount: snapshot.personBounds.count,
+            poseAvailability: snapshot.poseHints.map { !$0.joints.isEmpty },
+            includePersonLayer: includePersonLayers,
+            includePoseLayer: includePoseLayers
+        )
+        showAllLayers()
+        resumeMosaicPreviewIfNeeded()
+
+        let domainNote: String
+        if let failure = output.detectorFailureMessage {
+            domainNote = "検出器エラー（\(failure)）: "
+        } else if output.domain == .illustration {
+            domainNote = output.domainDetectorAvailable
+                ? "イラスト/漫画（\(output.domainSourceNote)・アニメ部位検出: \(output.animeDetectionCount)件）: "
+                : "イラスト/漫画（\(output.domainSourceNote)・アニメ用検出モデルを読み込めませんでした）: "
+        } else {
+            domainNote = output.domainDetectorAvailable
+                ? "実写（\(output.domainSourceNote)・実写部位検出: \(output.photoDetectionCount)件）: "
+                : "実写（\(output.domainSourceNote)・実写用検出モデルを読み込めませんでした）: "
+        }
+        let filterNote = filteredOutCount > 0 ? "（対象カテゴリ外 \(filteredOutCount)件を除外）" : ""
+        if snapshot.persons.isEmpty && canvas.rois.isEmpty {
+            updateStatus(domainNote + "人物を検出できませんでした（候補0件）\(filterNote)。ドラッグで手動追加してください")
+        } else {
+            let poseDetectedCount = snapshot.poseHints.filter { !$0.joints.isEmpty }.count
+            updateStatus(domainNote + "候補生成: 人物\(snapshot.persons.count)名（骨格検出 \(poseDetectedCount)名） / ROI \(canvas.rois.count)件\(filterNote)。ドラッグで手動追加できます")
+        }
     }
 
     private let maskTintContext = CIContext(options: [.cacheIntermediates: false])
@@ -1447,19 +1847,9 @@ final class MosaicWindowController: NSObject {
     }
 
     private static func poseDisplayRect(for hint: PoseHint) -> NormalizedRect {
-        guard !hint.joints.isEmpty else { return hint.lowerBodyBounds }
-        let xs = hint.joints.map(\.x)
-        let ys = hint.joints.map(\.y)
-        guard let minX = xs.min(), let maxX = xs.max(), let minY = ys.min(), let maxY = ys.max() else {
-            return hint.lowerBodyBounds
-        }
-        let pad = 0.02
-        return NormalizedRect(
-            x: minX - pad,
-            y: minY - pad,
-            width: (maxX - minX) + pad * 2,
-            height: (maxY - minY) + pad * 2
-        ).clamped()
+        // 骨格レイヤは関節外接矩形ではなく、対応する人物検出領域を表示範囲とする。
+        // 欠損関節がある立位・横臥・遠景でも人物レイヤと同じ範囲に重なり、狭い誤認識枠に見えない。
+        hint.bodyBounds
     }
 
     private static func boneSegments(for hint: PoseHint) -> [(from: CGPoint, to: CGPoint)] {
@@ -1486,8 +1876,9 @@ final class MosaicWindowController: NSObject {
                 let output = try mosaicEngine.applyMosaic(
                     to: loadedImage.cgImage,
                     rois: canvas.rois,
-                    style: currentMosaicStyle(),
-                    segmentEngine: currentSegmentEngine()
+                    style: defaultMosaicStyleForRendering(),
+                    segmentEngine: currentSegmentEngine(),
+                    patternImageProvider: { [weak self] in self?.patternImage(for: $0) }
                 )
                 renderedImage = output
                 canvas.setImage(output)
@@ -1513,7 +1904,7 @@ final class MosaicWindowController: NSObject {
     }
 
     /// 「モザイク表示」チェックがONなら現在のROIでモザイクを再レンダリングして表示する。
-    /// ROIが空の場合や失敗時は元画像表示（チェック状態は維持）。
+    /// ROIが空の場合は元画像表示。失敗時はプレビューを解除し、エラーを通知する。
     private func resumeMosaicPreviewIfNeeded() {
         guard mosaicPreviewCheckbox.state == .on, let loadedImage else { return }
         guard !canvas.rois.isEmpty else {
@@ -1525,14 +1916,18 @@ final class MosaicWindowController: NSObject {
             let output = try mosaicEngine.applyMosaic(
                 to: loadedImage.cgImage,
                 rois: canvas.rois,
-                style: currentMosaicStyle(),
-                segmentEngine: currentSegmentEngine()
+                style: defaultMosaicStyleForRendering(),
+                segmentEngine: currentSegmentEngine(),
+                patternImageProvider: { [weak self] in self?.patternImage(for: $0) }
             )
             renderedImage = output
             canvas.setImage(output)
         } catch {
             renderedImage = nil
             canvas.setImage(loadedImage.cgImage)
+            mosaicPreviewCheckbox.state = .off
+            updateStatus("モザイクプレビューを解除しました: \(error.localizedDescription)")
+            showError(error)
         }
     }
 
@@ -1558,8 +1953,9 @@ final class MosaicWindowController: NSObject {
             let output = try mosaicEngine.applyMosaic(
                 to: loadedImage.cgImage,
                 rois: canvas.rois,
-                style: currentMosaicStyle(),
-                segmentEngine: currentSegmentEngine()
+                style: defaultMosaicStyleForRendering(),
+                segmentEngine: currentSegmentEngine(),
+                patternImageProvider: { [weak self] in self?.patternImage(for: $0) }
             )
             pushUndoSnapshot(previousState)
             renderedImage = output
@@ -1591,6 +1987,7 @@ final class MosaicWindowController: NSObject {
         redoStack.append(currentEditorState())
         applyEditorState(previous)
         hasUnsavedChanges = true
+        editorRevision += 1
         updateUndoRedoAvailability()
         updateStatus("元に戻しました: ROI \(canvas.rois.count)件")
     }
@@ -1600,6 +1997,7 @@ final class MosaicWindowController: NSObject {
         undoStack.append(currentEditorState())
         applyEditorState(next)
         hasUnsavedChanges = true
+        editorRevision += 1
         updateUndoRedoAvailability()
         updateStatus("やり直しました: ROI \(canvas.rois.count)件")
     }
@@ -1628,6 +2026,7 @@ final class MosaicWindowController: NSObject {
         undoStack.append(state)
         redoStack.removeAll()
         hasUnsavedChanges = true
+        editorRevision += 1
         updateUndoRedoAvailability()
     }
 
@@ -1746,30 +2145,25 @@ final class MosaicWindowController: NSObject {
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
         column.title = "Item"
         column.width = 260
+        column.resizingMask = .autoresizingMask
         tableView.addTableColumn(column)
 
         configureCollectionView()
         libraryScrollView.documentView = libraryViewMode == .thumbnailGrid ? collectionView : tableView
 
-        let openOriginalButton = NSButton(title: "元画像を開く", target: self, action: #selector(openSelectedLibraryOriginal))
-        let openProcessedButton = NSButton(title: "加工後を開く", target: self, action: #selector(openSelectedLibraryProcessed))
-        let deleteButton = NSButton(title: "選択画像を削除", target: self, action: #selector(deleteSelectedLibraryItems))
-        let buttons = NSStackView(views: [openOriginalButton, openProcessedButton, deleteButton])
+        let openOriginalButton = makeToolbarButton(symbol: "photo", help: "元画像を開く", action: #selector(openSelectedLibraryOriginal))
+        let openProcessedButton = makeToolbarButton(symbol: "photo.badge.checkmark", help: "加工後画像を開く", action: #selector(openSelectedLibraryProcessed))
+        let deleteButton = makeToolbarButton(symbol: "trash", help: "選択画像を削除", action: #selector(deleteSelectedLibraryItems))
+        let exportButton = makeToolbarButton(symbol: "shippingbox", help: "学習用データセットを書き出す", action: #selector(exportTrainingDataset))
+        let buttons = NSStackView(views: [openOriginalButton, openProcessedButton, deleteButton, exportButton])
         buttons.orientation = .horizontal
-        buttons.spacing = 8
+        buttons.spacing = 4
         buttons.translatesAutoresizingMaskIntoConstraints = false
-
-        let exportButton = NSButton(title: "学習用エクスポート（YOLO形式）", target: self, action: #selector(exportTrainingDataset))
-        let secondButtons = NSStackView(views: [exportButton])
-        secondButtons.orientation = .horizontal
-        secondButtons.spacing = 8
-        secondButtons.translatesAutoresizingMaskIntoConstraints = false
 
         panel.addSubview(title)
         panel.addSubview(modeRow)
         panel.addSubview(libraryScrollView)
         panel.addSubview(buttons)
-        panel.addSubview(secondButtons)
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
             title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
@@ -1783,10 +2177,7 @@ final class MosaicWindowController: NSObject {
             buttons.topAnchor.constraint(equalTo: libraryScrollView.bottomAnchor, constant: 8),
             buttons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             buttons.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
-            secondButtons.topAnchor.constraint(equalTo: buttons.bottomAnchor, constant: 6),
-            secondButtons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
-            secondButtons.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
-            secondButtons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
+            buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8)
         ])
         updateLibraryModeVisibility()
         return panel
@@ -1818,10 +2209,10 @@ final class MosaicWindowController: NSObject {
 
     private func configureCollectionView() {
         let layout = NSCollectionViewFlowLayout()
-        layout.itemSize = NSSize(width: thumbnailSizeSlider.doubleValue, height: thumbnailSizeSlider.doubleValue + 28)
-        layout.minimumInteritemSpacing = 8
-        layout.minimumLineSpacing = 8
-        layout.sectionInset = NSEdgeInsets(top: 8, left: 8, bottom: 8, right: 8)
+        layout.itemSize = libraryGridItemSize(CGFloat(thumbnailSizeSlider.doubleValue))
+        layout.minimumInteritemSpacing = 5
+        layout.minimumLineSpacing = 3
+        layout.sectionInset = NSEdgeInsets(top: 4, left: 5, bottom: 4, right: 5)
         collectionView.collectionViewLayout = layout
         collectionView.dataSource = self
         collectionView.delegate = self
@@ -1844,14 +2235,30 @@ final class MosaicWindowController: NSObject {
     @objc private func viewModeChanged() {
         guard let mode = LibraryViewMode(rawValue: viewModeControl.selectedSegment) else { return }
         libraryViewMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: "LibraryView.mode")
         updateLibraryModeVisibility()
     }
 
     @objc private func thumbnailSizeChanged() {
         guard let layout = collectionView.collectionViewLayout as? NSCollectionViewFlowLayout else { return }
         let size = CGFloat(thumbnailSizeSlider.doubleValue)
-        layout.itemSize = NSSize(width: size, height: size + 28)
+        layout.itemSize = libraryGridItemSize(size)
+        UserDefaults.standard.set(Double(size), forKey: "LibraryView.thumbnailSize")
         layout.invalidateLayout()
+    }
+
+    private func libraryGridItemSize(_ width: CGFloat) -> NSSize {
+        NSSize(width: width, height: max(54, (width - 8) * 0.75 + 24))
+    }
+
+    private func loadLibraryViewPreferences() {
+        let defaults = UserDefaults.standard
+        if let mode = LibraryViewMode(rawValue: defaults.integer(forKey: "LibraryView.mode")) {
+            libraryViewMode = mode
+        }
+        if defaults.object(forKey: "LibraryView.thumbnailSize") != nil {
+            thumbnailSizeSlider.doubleValue = min(220, max(64, defaults.double(forKey: "LibraryView.thumbnailSize")))
+        }
     }
 
     private func updateLibraryModeVisibility() {
@@ -1897,6 +2304,7 @@ final class MosaicWindowController: NSObject {
 
     @objc private func openSelectedLibraryOriginal() {
         guard let item = selectedLibraryItem() else { return }
+        guard item.id == currentLibraryItem?.id || confirmCurrentChangesBeforeLeaving() else { return }
         loadLibraryImage(at: libraryEngine.originalURL(for: item), item: item, useProcessed: false)
     }
 
@@ -1905,6 +2313,7 @@ final class MosaicWindowController: NSObject {
             updateStatus("選択項目に加工後画像がありません")
             return
         }
+        guard item.id == currentLibraryItem?.id || confirmCurrentChangesBeforeLeaving() else { return }
         loadLibraryImage(at: url, item: item, useProcessed: true)
     }
 
@@ -1947,6 +2356,11 @@ final class MosaicWindowController: NSObject {
         alert.addButton(withTitle: "削除")
         alert.addButton(withTitle: "キャンセル")
         guard alert.runModal() == .alertFirstButtonReturn else { return }
+        if let currentID = currentLibraryItem?.id,
+           items.contains(where: { $0.id == currentID }),
+           !confirmCurrentChangesBeforeLeaving() {
+            return
+        }
 
         do {
             try libraryEngine.deleteItems(ids: items.map(\.id))
@@ -1956,6 +2370,7 @@ final class MosaicWindowController: NSObject {
                 imageEditStateOrder.removeAll { $0 == id }
             }
             if let current = currentLibraryItem, deletedIDs.contains(current.id) {
+                discardedEditStateID = nil
                 currentLibraryItem = nil
                 loadedImage = nil
                 renderedImage = nil
@@ -1979,6 +2394,7 @@ final class MosaicWindowController: NSObject {
             reloadLibrary()
             updateStatus("\(items.count)件の画像を削除しました")
         } catch {
+            discardedEditStateID = nil
             showError(error)
         }
     }
@@ -2004,29 +2420,36 @@ final class MosaicWindowController: NSObject {
 
     private func requestLibrarySwitch(to item: MosaicLibraryItem) {
         guard item.id != currentLibraryItem?.id else { return }
+        guard confirmCurrentChangesBeforeLeaving() else { return }
+        loadLibraryItemAsWorking(item)
+    }
+
+    fileprivate func confirmCurrentChangesBeforeLeaving() -> Bool {
+        guard hasUnsavedChanges else { return true }
         if autoSaveCheckbox.state == .on {
             performLibraryAutoSave()
-            loadLibraryItemAsWorking(item)
-            return
-        }
-        guard hasUnsavedChanges else {
-            loadLibraryItemAsWorking(item)
-            return
+            return !hasUnsavedChanges
         }
         let alert = NSAlert()
         alert.messageText = "変更を保存しますか？"
         alert.informativeText = "現在の編集内容はまだ保存されていません。"
-        alert.addButton(withTitle: "保存して次へ")
-        alert.addButton(withTitle: "保存せず次へ")
+        alert.addButton(withTitle: "保存")
+        alert.addButton(withTitle: "保存しない")
         alert.addButton(withTitle: "キャンセル")
         switch alert.runModal() {
         case .alertFirstButtonReturn:
             performLibraryAutoSave()
-            loadLibraryItemAsWorking(item)
+            return !hasUnsavedChanges
         case .alertSecondButtonReturn:
-            loadLibraryItemAsWorking(item)
+            discardedEditStateID = currentLibraryItem?.id
+            if let id = discardedEditStateID {
+                imageEditStates[id] = nil
+                imageEditStateOrder.removeAll { $0 == id }
+            }
+            hasUnsavedChanges = false
+            return true
         default:
-            break
+            return false
         }
     }
 
@@ -2077,9 +2500,38 @@ final class MosaicWindowController: NSObject {
         do {
             let originalURL = libraryEngine.originalURL(for: item)
             let original = try imageLoader.loadImage(from: originalURL)
+            if item.id == currentLibraryItem?.id {
+                selectLibraryItemInUI(item)
+                if useProcessed {
+                    let processed = try imageLoader.loadImage(from: url)
+                    renderedImage = processed.cgImage
+                    mosaicPreviewCheckbox.state = .on
+                    canvas.setImage(processed.cgImage)
+                } else {
+                    renderedImage = nil
+                    mosaicPreviewCheckbox.state = .off
+                    canvas.setImage(original.cgImage)
+                }
+                editorRevision += 1
+                updateStatus("\(useProcessed ? "加工後" : "元画像")を開きました: \(item.sourceName)")
+                return
+            }
             let restored = setWorkingImage(original.cgImage, sourceURL: originalURL, item: item)
             selectLibraryItemInUI(item)
-            if restored { return }
+            if restored {
+                if useProcessed {
+                    let processed = try imageLoader.loadImage(from: url)
+                    renderedImage = processed.cgImage
+                    mosaicPreviewCheckbox.state = .on
+                    canvas.setImage(processed.cgImage)
+                } else {
+                    renderedImage = nil
+                    mosaicPreviewCheckbox.state = .off
+                    canvas.setImage(original.cgImage)
+                }
+                updateStatus("\(useProcessed ? "加工後" : "元画像")を開きました: \(item.sourceName)")
+                return
+            }
 
             canvas.rois = item.rois
             if useProcessed,
@@ -2094,6 +2546,7 @@ final class MosaicWindowController: NSObject {
                 autoGenerateIfEnabled()
             }
         } catch {
+            discardedEditStateID = nil
             showError(error)
         }
     }
@@ -2133,9 +2586,17 @@ final class MosaicWindowController: NSObject {
     /// 作業画像を切り替える。退避済みの編集状態があれば復元し true を返す。
     @discardableResult
     private func setWorkingImage(_ image: CGImage, sourceURL: URL, item: MosaicLibraryItem) -> Bool {
-        stashCurrentEditState()
+        editorRevision += 1
+        if let currentID = currentLibraryItem?.id, discardedEditStateID == currentID {
+            imageEditStates[currentID] = nil
+            imageEditStateOrder.removeAll { $0 == currentID }
+            discardedEditStateID = nil
+        } else {
+            stashCurrentEditState()
+        }
         loadedImage = LoadedImage(url: sourceURL, cgImage: image)
         currentLibraryItem = item
+        canvas.resetZoom()
 
         if let saved = imageEditStates[item.id] {
             renderedImage = saved.renderedImage
@@ -2217,6 +2678,12 @@ final class MosaicWindowController: NSObject {
     private func showError(_ error: Error) {
         let alert = NSAlert(error: error)
         alert.runModal()
+    }
+}
+
+extension MosaicWindowController: NSWindowDelegate {
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        confirmCurrentChangesBeforeLeaving()
     }
 }
 
@@ -2362,12 +2829,16 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
             )
             cell.onToggle = { [weak self] in self?.toggleLeafVisibility(leaf) }
             cell.onOutlineToggle = { [weak self] in
+                guard let self else { return }
+                self.editorRevision += 1
                 leaf.showsOutline.toggle()
-                self?.applyLayerVisibility()
+                self.applyLayerVisibility()
             }
             cell.onTagToggle = { [weak self] in
+                guard let self else { return }
+                self.editorRevision += 1
                 leaf.showsTag.toggle()
-                self?.applyLayerVisibility()
+                self.applyLayerVisibility()
             }
         } else if let entry = item as? ROIListEntry {
             // ROI選択リストの行（表示チェックなし。クリックでキャンバス上のROIを選択）
@@ -2412,7 +2883,7 @@ final class LibraryGridItem: NSCollectionViewItem {
         captionField.font = .systemFont(ofSize: 11)
         captionField.alignment = .center
         captionField.lineBreakMode = .byTruncatingMiddle
-        captionField.maximumNumberOfLines = 2
+        captionField.maximumNumberOfLines = 1
         captionField.translatesAutoresizingMaskIntoConstraints = false
 
         container.addSubview(thumbnailView)
@@ -2484,12 +2955,15 @@ final class ImageCanvasView: NSView {
     var onManualEditWillBegin: (() -> Void)?
     var onManualEditDidEnd: (() -> Void)?
     var onROISelectionChanged: ((MosaicROI?) -> Void)?
+    var onZoomChanged: ((CGFloat) -> Void)?
     /// ROI右クリックメニューからのカテゴリ変更要求（ツールバーのカテゴリポップアップ廃止に伴う置き換え）
     var onCategoryChangeRequest: ((UUID, MosaicTargetCategory) -> Void)?
 
     private var lastSize: [ROIShape: NSSize] = [:]
     private var image: NSImage?
     private var imagePixelSize: CGSize = .zero
+    private(set) var zoomFactor: CGFloat = 1
+    private var panOffset: CGPoint = .zero
     private var dragStart: CGPoint?
     private var dragCurrent: CGPoint?
     private var resizeState: ResizeState?
@@ -2534,6 +3008,32 @@ final class ImageCanvasView: NSView {
     func setImage(_ cgImage: CGImage) {
         image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         imagePixelSize = CGSize(width: cgImage.width, height: cgImage.height)
+        needsDisplay = true
+    }
+
+    func setZoom(_ value: CGFloat) {
+        zoomFactor = min(8, max(0.1, value))
+        if zoomFactor <= 1.001 { panOffset = .zero }
+        onZoomChanged?(zoomFactor)
+        needsDisplay = true
+    }
+
+    func resetZoom() {
+        panOffset = .zero
+        setZoom(1)
+    }
+
+    override func magnify(with event: NSEvent) {
+        setZoom(zoomFactor * (1 + event.magnification))
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        guard zoomFactor > 1.001 else {
+            super.scrollWheel(with: event)
+            return
+        }
+        panOffset.x -= event.scrollingDeltaX
+        panOffset.y -= event.scrollingDeltaY
         needsDisplay = true
     }
 
@@ -3273,15 +3773,24 @@ final class ImageCanvasView: NSView {
         let available = bounds.insetBy(dx: padding, dy: padding)
         let imageAspect = imagePixelSize.width / imagePixelSize.height
         let viewAspect = available.width / max(1, available.height)
+        let fitted: NSRect
         if imageAspect > viewAspect {
             let width = available.width
             let height = width / imageAspect
-            return NSRect(x: available.minX, y: available.midY - height / 2, width: width, height: height)
+            fitted = NSRect(x: available.minX, y: available.midY - height / 2, width: width, height: height)
         } else {
             let height = available.height
             let width = height * imageAspect
-            return NSRect(x: available.midX - width / 2, y: available.minY, width: width, height: height)
+            fitted = NSRect(x: available.midX - width / 2, y: available.minY, width: width, height: height)
         }
+        let scaledWidth = fitted.width * zoomFactor
+        let scaledHeight = fitted.height * zoomFactor
+        return NSRect(
+            x: bounds.midX - scaledWidth / 2 + panOffset.x,
+            y: bounds.midY - scaledHeight / 2 + panOffset.y,
+            width: scaledWidth,
+            height: scaledHeight
+        )
     }
 
     private func viewRect(from normalized: NormalizedRect, imageRect: NSRect) -> NSRect {
