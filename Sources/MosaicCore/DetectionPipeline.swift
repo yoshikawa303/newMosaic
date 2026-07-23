@@ -2,7 +2,10 @@ import CoreGraphics
 import CoreImage
 import CoreVideo
 import Foundation
+import OSLog
 import Vision
+
+private let detectionLogger = Logger(subsystem: "com.yoshikawa.newMosaic", category: "Detection")
 
 /// 人物1名分の検出結果。マスクは人物シルエット表示用（取得できない場合はnil）。
 public struct PersonDetection {
@@ -34,13 +37,33 @@ public protocol CandidateDetecting {
 /// Vision人物インスタンスマスク（最大4人）による実位置検出。
 /// 5人以上や失敗時は人物矩形検出へフォールバックする。
 public final class VisionPersonDetector: PersonDetecting {
+    private struct InstanceMaskResult {
+        var persons: [PersonDetection]
+        var reachedInstanceLimit: Bool
+    }
+
     private let context = CIContext(options: [.cacheIntermediates: false])
 
     public init() {}
 
     public func detectPersons(in image: CGImage) throws -> [PersonDetection] {
-        if let persons = try? detectWithInstanceMasks(in: image), !persons.isEmpty {
-            return persons
+        let instanceResult: InstanceMaskResult?
+        do {
+            instanceResult = try detectWithInstanceMasks(in: image)
+        } catch {
+            detectionLogger.error("Person instance-mask detection failed: \(error.localizedDescription, privacy: .public)")
+            instanceResult = nil
+        }
+        if let result = instanceResult, !result.persons.isEmpty {
+            guard result.reachedInstanceLimit else { return result.persons }
+            let rectangles: [PersonDetection]
+            do {
+                rectangles = try detectWithHumanRectangles(in: image)
+            } catch {
+                detectionLogger.error("Human rectangle supplement failed: \(error.localizedDescription, privacy: .public)")
+                rectangles = []
+            }
+            return Self.mergePersonDetections(instancePersons: result.persons, rectanglePersons: rectangles)
         }
         // 漫画・イラスト等では実写学習のVisionが人物を検出できないことがあるが、
         // 検出していないのに固定比率の偽矩形を返すことはしない（正確な検知内容の表示を優先。
@@ -48,23 +71,34 @@ public final class VisionPersonDetector: PersonDetecting {
         return try detectWithHumanRectangles(in: image)
     }
 
-    private func detectWithInstanceMasks(in image: CGImage) throws -> [PersonDetection] {
+    private func detectWithInstanceMasks(in image: CGImage) throws -> InstanceMaskResult {
         let request = VNGeneratePersonInstanceMaskRequest()
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
         try handler.perform([request])
-        guard let observation = request.results?.first else { return [] }
+        guard let observation = request.results?.first else {
+            return InstanceMaskResult(persons: [], reachedInstanceLimit: false)
+        }
 
         var persons: [PersonDetection] = []
         for instance in observation.allInstances.sorted() {
-            guard let bounds = Self.instanceBounds(in: observation.instanceMask, instance: instance) else { continue }
-            let maskBuffer = try? observation.generateScaledMaskForImage(
-                forInstances: IndexSet(integer: instance),
-                from: handler
-            )
-            let maskImage = maskBuffer.flatMap { cgImage(from: $0) }
+            let maskBuffer: CVPixelBuffer
+            do {
+                maskBuffer = try observation.generateScaledMaskForImage(
+                    forInstances: IndexSet(integer: instance),
+                    from: handler
+                )
+            } catch {
+                detectionLogger.error("Scaled person mask generation failed for instance \(instance): \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            guard let maskImage = cgImage(from: maskBuffer),
+                  let bounds = Self.maskBounds(in: maskImage) else { continue }
             persons.append(PersonDetection(bounds: bounds, maskImage: maskImage))
         }
-        return persons
+        return InstanceMaskResult(
+            persons: persons,
+            reachedInstanceLimit: observation.allInstances.count >= 4
+        )
     }
 
     private func detectWithHumanRectangles(in image: CGImage) throws -> [PersonDetection] {
@@ -111,6 +145,112 @@ public final class VisionPersonDetector: PersonDetecting {
 
     static func normalizedRect(fromVisionRect rect: CGRect) -> NormalizedRect {
         NormalizedRect(x: rect.minX, y: 1 - rect.minY - rect.height, width: rect.width, height: rect.height)
+    }
+
+    /// 原画像サイズへ復元済みの表示用マスクから人物外接矩形を算出する。
+    static func maskBounds(in maskImage: CGImage, threshold: UInt8 = 127) -> NormalizedRect? {
+        let width = maskImage.width
+        let height = maskImage.height
+        guard width > 0, height > 0 else { return nil }
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let rendered = pixels.withUnsafeMutableBytes { pointer -> Bool in
+            guard let context = CGContext(
+                data: pointer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .none
+            context.draw(maskImage, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard rendered else { return nil }
+        return normalizedBounds(in: pixels, width: width, height: height, threshold: threshold)
+    }
+
+    static func normalizedBounds(
+        in pixels: [UInt8],
+        width: Int,
+        height: Int,
+        threshold: UInt8 = 127
+    ) -> NormalizedRect? {
+        guard width > 0, height > 0, pixels.count >= width * height else { return nil }
+        var minX = width, minY = height, maxX = -1, maxY = -1
+        for y in 0..<height {
+            for x in 0..<width where pixels[y * width + x] > threshold {
+                minX = min(minX, x)
+                minY = min(minY, y)
+                maxX = max(maxX, x)
+                maxY = max(maxY, y)
+            }
+        }
+        guard maxX >= minX, maxY >= minY else { return nil }
+        return NormalizedRect(
+            x: Double(minX) / Double(width),
+            y: Double(minY) / Double(height),
+            width: Double(maxX - minX + 1) / Double(width),
+            height: Double(maxY - minY + 1) / Double(height)
+        )
+    }
+
+    static func mergePersonDetections(
+        instancePersons: [PersonDetection],
+        rectanglePersons: [PersonDetection],
+        duplicateIoU: Double = 0.35
+    ) -> [PersonDetection] {
+        struct Match {
+            var instanceIndex: Int
+            var rectangleIndex: Int
+            var iou: Double
+        }
+
+        let matches = instancePersons.indices.flatMap { instanceIndex in
+            rectanglePersons.indices.compactMap { rectangleIndex -> Match? in
+                let iou = instancePersons[instanceIndex].bounds.iou(
+                    with: rectanglePersons[rectangleIndex].bounds
+                )
+                let containedOverlap = Self.overlapOfSmaller(
+                    instancePersons[instanceIndex].bounds,
+                    rectanglePersons[rectangleIndex].bounds
+                )
+                return iou >= duplicateIoU || containedOverlap >= 0.65
+                    ? Match(instanceIndex: instanceIndex, rectangleIndex: rectangleIndex, iou: max(iou, containedOverlap))
+                    : nil
+            }
+        }
+        .sorted { $0.iou > $1.iou }
+
+        var matchedInstances = Set<Int>()
+        var matchedRectangles = Set<Int>()
+        for match in matches
+        where !matchedInstances.contains(match.instanceIndex)
+            && !matchedRectangles.contains(match.rectangleIndex) {
+            matchedInstances.insert(match.instanceIndex)
+            matchedRectangles.insert(match.rectangleIndex)
+        }
+
+        var merged = instancePersons
+        for index in rectanglePersons.indices where !matchedRectangles.contains(index) {
+            let rectangle = rectanglePersons[index]
+            let isDuplicate = merged.contains {
+                $0.bounds.iou(with: rectangle.bounds) >= duplicateIoU
+                    || Self.overlapOfSmaller($0.bounds, rectangle.bounds) >= 0.65
+            }
+            if !isDuplicate {
+                merged.append(rectangle)
+            }
+        }
+        return merged
+    }
+
+    static func overlapOfSmaller(_ lhs: NormalizedRect, _ rhs: NormalizedRect) -> Double {
+        guard let overlap = lhs.intersection(rhs) else { return 0 }
+        let smallerArea = min(lhs.area, rhs.area)
+        guard smallerArea > 0 else { return 0 }
+        return overlap.area / smallerArea
     }
 
     private func cgImage(from buffer: CVPixelBuffer) -> CGImage? {
@@ -168,12 +308,192 @@ struct PersonMaskSampler {
     }
 }
 
-/// Vision骨格検出。人物検知（シルエット）の方が骨格より安定しているため、
-/// 画像全体への一括検出ではなく**人物ごとの領域をクロップして骨格検出を実行**し、
-/// 検出関節をその人物のマスク内（+輪郭緩衝）に限定する（ユーザー方針 2026-07-22）。
-/// クロップにより人物が大きく写るため、関節検出の精度自体も向上する。
-/// 骨格が得られない人物には従来の固定比率フォールバックヒントを適用する。
+enum PoseCropRotation: CaseIterable {
+    case none
+    case clockwise
+    case counterClockwise
+}
+
+struct PoseCandidateEvaluation: Equatable {
+    var score: Double
+    var centerScore: Double
+    var rectangleInsideRatio: Double
+    var maskNearRatio: Double
+    var meanConfidence: Double
+    var jointCompleteness: Double
+}
+
+enum PoseDetectionMath {
+    static func actualRegion(for cropRect: CGRect, imageSize: CGSize) -> NormalizedRect {
+        NormalizedRect(cropRect, imageSize: imageSize).clamped()
+    }
+
+    static func cropRotations(for bounds: NormalizedRect) -> [PoseCropRotation] {
+        bounds.width > bounds.height * 1.15 ? PoseCropRotation.allCases : [.none]
+    }
+
+    static func restoreJoints(
+        _ joints: [PoseJoint],
+        from region: NormalizedRect,
+        rotation: PoseCropRotation
+    ) -> [PoseJoint] {
+        joints.map { joint in
+            let local: CGPoint
+            switch rotation {
+            case .none:
+                local = CGPoint(x: joint.x, y: joint.y)
+            case .clockwise:
+                local = CGPoint(x: joint.y, y: 1 - joint.x)
+            case .counterClockwise:
+                local = CGPoint(x: 1 - joint.y, y: joint.x)
+            }
+            return PoseJoint(
+                name: joint.name,
+                x: region.x + local.x * region.width,
+                y: region.y + local.y * region.height,
+                confidence: joint.confidence
+            )
+        }
+    }
+
+    static func evaluate(
+        joints: [PoseJoint],
+        personBounds: NormalizedRect,
+        maskNearMatches: [Bool]? = nil
+    ) -> PoseCandidateEvaluation {
+        guard !joints.isEmpty else {
+            return PoseCandidateEvaluation(
+                score: 0,
+                centerScore: 0,
+                rectangleInsideRatio: 0,
+                maskNearRatio: 0,
+                meanConfidence: 0,
+                jointCompleteness: 0
+            )
+        }
+        let expandedBounds = personBounds.expanded(scale: 1.10).clamped()
+        let insideCount = joints.filter { expandedBounds.contains(x: $0.x, y: $0.y) }.count
+        let rectangleInsideRatio = Double(insideCount) / Double(joints.count)
+        let maskNearRatio: Double
+        if let maskNearMatches, maskNearMatches.count == joints.count {
+            maskNearRatio = Double(maskNearMatches.filter { $0 }.count) / Double(joints.count)
+        } else {
+            maskNearRatio = rectangleInsideRatio
+        }
+
+        let centerX = joints.map(\.x).reduce(0, +) / Double(joints.count)
+        let centerY = joints.map(\.y).reduce(0, +) / Double(joints.count)
+        let personCenterX = personBounds.x + personBounds.width / 2
+        let personCenterY = personBounds.y + personBounds.height / 2
+        let diagonal = max(0.05, hypot(personBounds.width, personBounds.height))
+        let centerDistance = hypot(centerX - personCenterX, centerY - personCenterY) / diagonal
+        let centerScore = max(0, 1 - min(1, centerDistance))
+        let meanConfidence = joints.map(\.confidence).reduce(0, +) / Double(joints.count)
+        let jointCompleteness = min(1, Double(joints.count) / 15.0)
+        let score = centerScore * 0.25
+            + rectangleInsideRatio * 0.30
+            + maskNearRatio * 0.20
+            + meanConfidence * 0.15
+            + jointCompleteness * 0.10
+        return PoseCandidateEvaluation(
+            score: score,
+            centerScore: centerScore,
+            rectangleInsideRatio: rectangleInsideRatio,
+            maskNearRatio: maskNearRatio,
+            meanConfidence: meanConfidence,
+            jointCompleteness: jointCompleteness
+        )
+    }
+
+    static func isAssociatedWithPerson(
+        _ evaluation: PoseCandidateEvaluation,
+        hasMask: Bool
+    ) -> Bool {
+        evaluation.rectangleInsideRatio >= 0.60
+            && (!hasMask || evaluation.maskNearRatio >= 0.60)
+    }
+
+    static func areDuplicatePoses(
+        _ lhs: [PoseJoint],
+        lhsBounds: NormalizedRect,
+        _ rhs: [PoseJoint],
+        rhsBounds: NormalizedRect
+    ) -> Bool {
+        let rhsByName = Dictionary(uniqueKeysWithValues: rhs.map { ($0.name, $0) })
+        let distances = lhs.compactMap { left -> Double? in
+            guard let right = rhsByName[left.name] else { return nil }
+            return hypot(left.x - right.x, left.y - right.y)
+        }
+        guard distances.count >= 4 else { return false }
+        let scale = max(
+            0.05,
+            min(
+                hypot(lhsBounds.width, lhsBounds.height),
+                hypot(rhsBounds.width, rhsBounds.height)
+            )
+        )
+        let meanDistance = distances.reduce(0, +) / Double(distances.count)
+        return meanDistance / scale <= 0.12
+    }
+
+    static func faceGuidedRegions(
+        face: NormalizedRect,
+        personBounds: NormalizedRect
+    ) -> [NormalizedRect] {
+        guard personBounds.width > personBounds.height * 1.15 else {
+            return [NormalizedRect(
+                x: face.x + face.width / 2 - face.width * 2.25,
+                y: face.y - face.height * 0.5,
+                width: face.width * 4.5,
+                height: face.height * 8.5
+            ).clamped()]
+        }
+
+        let bodyWidth = max(personBounds.width * 1.20, face.height * 8.5)
+        let bodyHeight = max(personBounds.height * 1.20, face.width * 4.5)
+        let faceCenterX = face.x + face.width / 2
+        let faceCenterY = face.y + face.height / 2
+        return [
+            clampedPreservingSize(personBounds.expanded(scale: 1.20)),
+            clampedPreservingSize(NormalizedRect(
+                x: faceCenterX - face.width,
+                y: faceCenterY - bodyHeight / 2,
+                width: bodyWidth,
+                height: bodyHeight
+            )),
+            clampedPreservingSize(NormalizedRect(
+                x: faceCenterX - bodyWidth + face.width,
+                y: faceCenterY - bodyHeight / 2,
+                width: bodyWidth,
+                height: bodyHeight
+            ))
+        ]
+    }
+
+    static func clampedPreservingSize(_ rect: NormalizedRect) -> NormalizedRect {
+        let width = min(1, max(0, rect.width))
+        let height = min(1, max(0, rect.height))
+        let x = min(max(0, rect.x), 1 - width)
+        let y = min(max(0, rect.y), 1 - height)
+        return NormalizedRect(x: x, y: y, width: width, height: height)
+    }
+}
+
+/// Vision骨格検出。人物ごとのクロップで候補を生成し、人物矩形・マスク近傍・
+/// 中心距離・confidence・関節数を複合評価する。選択後の関節はシルエット外でも保持する。
 public final class VisionPoseEstimator: PoseEstimating {
+    private let imageContext = CIContext(options: [.cacheIntermediates: false])
+
+    private struct PoseCandidate {
+        var joints: [PoseJoint]
+        var evaluation: PoseCandidateEvaluation
+    }
+
+    private struct SelectedPose {
+        var joints: [PoseJoint]
+        var personBounds: NormalizedRect
+    }
+
     private static let jointMapping: [(VNHumanBodyPoseObservation.JointName, PoseJointName)] = [
         (.nose, .nose), (.neck, .neck),
         (.leftShoulder, .leftShoulder), (.rightShoulder, .rightShoulder),
@@ -189,119 +509,183 @@ public final class VisionPoseEstimator: PoseEstimating {
 
     public func estimatePose(in image: CGImage, persons: [PersonDetection]) throws -> [PoseHint] {
         let imageSize = CGSize(width: image.width, height: image.height)
+        var selectedPoses: [SelectedPose] = []
         return persons.map { person in
-            estimatePoseInPersonRegion(image: image, imageSize: imageSize, person: person)
-                ?? HeuristicPoseEstimator.fallbackHint(for: person.bounds)
+            guard let hint = estimatePoseInPersonRegion(
+                image: image,
+                imageSize: imageSize,
+                person: person,
+                selectedPoses: selectedPoses
+            ) else {
+                return HeuristicPoseEstimator.fallbackHint(for: person.bounds)
+            }
+            selectedPoses.append(SelectedPose(joints: hint.joints, personBounds: person.bounds))
+            return hint
         }
     }
 
-    /// 人物領域（矩形+15%マージン）をクロップして骨格検出を実行し、
-    /// シルエットマスク内の関節数が最多の骨格を採用する。
-    /// マスクがある場合、マスク外（緩衝含む）の関節は隣接人物の写り込みとみなし除外する。
-    /// 骨格が取れない場合は**顔検出を起点にした全身領域の再推定**でリトライする（Build 40〜。
-    /// 顔検出は骨格より頑健なため、骨格失敗時に顔位置から全身範囲を組み立てて再検出すると精度が上がる）。
     private func estimatePoseInPersonRegion(
         image: CGImage,
         imageSize: CGSize,
-        person: PersonDetection
+        person: PersonDetection,
+        selectedPoses: [SelectedPose]
     ) -> PoseHint? {
         let region = person.bounds.expanded(scale: 1.15).clamped()
         let cropRect = region.cgRect(imageSize: imageSize, origin: .topLeft)
-        guard cropRect.width >= 32, cropRect.height >= 32,
+        guard cropRect.width >= 8, cropRect.height >= 8,
               region.width > 0, region.height > 0,
               let crop = image.cropping(to: cropRect) else { return nil }
+        let actualRegion = PoseDetectionMath.actualRegion(for: cropRect, imageSize: imageSize)
+        let preparedCrop = Self.preparedForDetection(crop)
 
-        if let hint = detectPose(in: crop, region: region, person: person) {
-            return hint
+        let directCandidates = detectPoseCandidates(in: preparedCrop, region: actualRegion, person: person)
+        if let candidate = bestCandidate(
+            from: directCandidates,
+            person: person,
+            excluding: selectedPoses
+        ) {
+            return hint(from: candidate, person: person)
         }
-        return faceGuidedPose(image: image, imageSize: imageSize, person: person, personCrop: crop, cropRegion: region)
+        let fallbackCandidates = faceGuidedPoseCandidates(
+            image: image,
+            imageSize: imageSize,
+            person: person,
+            personCrop: preparedCrop,
+            cropRegion: actualRegion
+        )
+        guard let candidate = bestCandidate(
+            from: fallbackCandidates,
+            person: person,
+            excluding: selectedPoses
+        ) else { return nil }
+        return hint(from: candidate, person: person)
     }
 
-    /// クロップ画像へ骨格検出を実行し、マスク内関節数が最多の骨格をフィルタ済みPoseHintとして返す。
-    private func detectPose(in crop: CGImage, region: NormalizedRect, person: PersonDetection) -> PoseHint? {
-        let request = VNDetectHumanBodyPoseRequest()
-        try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
-        let observations = request.results ?? []
-        guard !observations.isEmpty else { return nil }
-
+    private func detectPoseCandidates(
+        in crop: CGImage,
+        region: NormalizedRect,
+        person: PersonDetection
+    ) -> [PoseCandidate] {
         let sampler = person.maskImage.flatMap { PersonMaskSampler(maskImage: $0) }
-
-        var best: (joints: [PoseJoint], insideCount: Int)?
-        for observation in observations {
-            let cropJoints = Self.joints(from: observation)
-            guard cropJoints.count >= 4 else { continue }
-            // クロップ内正規化座標 → 画像全体の正規化座標へ変換
-            let fullJoints = cropJoints.map { joint in
-                PoseJoint(
-                    name: joint.name,
-                    x: region.x + joint.x * region.width,
-                    y: region.y + joint.y * region.height,
-                    confidence: joint.confidence
+        var candidates: [PoseCandidate] = []
+        for rotation in PoseDetectionMath.cropRotations(for: person.bounds) {
+            guard let detectionImage = rotated(crop, rotation: rotation) else { continue }
+            let request = VNDetectHumanBodyPoseRequest()
+            do {
+                try VNImageRequestHandler(cgImage: detectionImage, options: [:]).perform([request])
+            } catch {
+                detectionLogger.error("Body pose detection failed: \(error.localizedDescription, privacy: .public)")
+                continue
+            }
+            for observation in request.results ?? [] {
+                let localJoints = Self.joints(from: observation)
+                guard localJoints.count >= 4 else { continue }
+                let fullJoints = PoseDetectionMath.restoreJoints(
+                    localJoints,
+                    from: region,
+                    rotation: rotation
                 )
-            }
-            let insideCount: Int
-            if let sampler {
-                insideCount = fullJoints.filter { sampler.contains(x: $0.x, y: $0.y) }.count
-            } else {
-                insideCount = fullJoints.filter { person.bounds.contains(x: $0.x, y: $0.y) }.count
-            }
-            if best == nil || insideCount > best!.insideCount {
-                best = (fullJoints, insideCount)
+                let maskMatches = sampler.map { sampler in
+                    fullJoints.map { sampler.containsNear(x: $0.x, y: $0.y) }
+                }
+                let evaluation = PoseDetectionMath.evaluate(
+                    joints: fullJoints,
+                    personBounds: person.bounds,
+                    maskNearMatches: maskMatches
+                )
+                guard PoseDetectionMath.isAssociatedWithPerson(
+                    evaluation,
+                    hasMask: sampler != nil
+                ) else { continue }
+                candidates.append(PoseCandidate(joints: fullJoints, evaluation: evaluation))
             }
         }
-        guard let best else { return nil }
-
-        let joints: [PoseJoint]
-        if let sampler {
-            guard best.insideCount > 0 else { return nil }
-            joints = best.joints.filter { sampler.containsNear(x: $0.x, y: $0.y) }
-        } else {
-            joints = best.joints
-        }
-        guard joints.count >= 4 else { return nil }
-
-        let lower = Self.lowerBodyBounds(joints: joints) ?? HeuristicPoseEstimator.lowerBody(for: person.bounds)
-        return PoseHint(bodyBounds: person.bounds, lowerBodyBounds: lower, joints: joints)
+        return candidates.sorted { $0.evaluation.score > $1.evaluation.score }
     }
 
-    /// 顔検出を起点にした骨格検出フォールバック。
-    /// 人物クロップ内で顔（`VNDetectFaceRectanglesRequest`。横顔にも対応）を検出し、
-    /// 顔位置から全身領域（幅≈顔幅4.5倍・高さ≈顔高さ8.5倍）を推定してクロップし直し、骨格検出を再実行する。
-    /// 人物矩形に背景が多い・シルエットが部分的で骨格が失敗するケースの救済。小さいクロップは2倍へ拡大してから検出する。
-    private func faceGuidedPose(
+    private func faceGuidedPoseCandidates(
         image: CGImage,
         imageSize: CGSize,
         person: PersonDetection,
         personCrop: CGImage,
         cropRegion: NormalizedRect
-    ) -> PoseHint? {
+    ) -> [PoseCandidate] {
         let faceRequest = VNDetectFaceRectanglesRequest()
-        try? VNImageRequestHandler(cgImage: personCrop, options: [:]).perform([faceRequest])
-        guard let face = (faceRequest.results ?? []).max(by: { $0.confidence < $1.confidence }) else { return nil }
-
-        // Visionの顔矩形（クロップ内・左下原点正規化）→ 画像全体の上原点正規化座標へ変換
-        let bb = face.boundingBox
-        let faceFull = NormalizedRect(
-            x: cropRegion.x + bb.origin.x * cropRegion.width,
-            y: cropRegion.y + (1 - bb.origin.y - bb.height) * cropRegion.height,
-            width: bb.width * cropRegion.width,
-            height: bb.height * cropRegion.height
-        )
-        // 顔を基準に全身領域を推定（身長≈顔高さ8倍の人体比率+マージン）
-        let bodyRegion = NormalizedRect(
-            x: faceFull.x + faceFull.width / 2 - faceFull.width * 2.25,
-            y: faceFull.y - faceFull.height * 0.5,
-            width: faceFull.width * 4.5,
-            height: faceFull.height * 8.5
-        ).clamped()
-        let bodyRect = bodyRegion.cgRect(imageSize: imageSize, origin: .topLeft)
-        guard bodyRect.width >= 32, bodyRect.height >= 32,
-              bodyRegion.width > 0, bodyRegion.height > 0,
-              var bodyCrop = image.cropping(to: bodyRect) else { return nil }
-        if max(bodyCrop.width, bodyCrop.height) < 480, let upscaled = Self.upscaled(bodyCrop, scale: 2) {
-            bodyCrop = upscaled
+        do {
+            try VNImageRequestHandler(cgImage: personCrop, options: [:]).perform([faceRequest])
+        } catch {
+            detectionLogger.error("Face-guided pose fallback failed: \(error.localizedDescription, privacy: .public)")
+            return []
         }
-        return detectPose(in: bodyCrop, region: bodyRegion, person: person)
+        let sampler = person.maskImage.flatMap { PersonMaskSampler(maskImage: $0) }
+        let faces = (faceRequest.results ?? []).compactMap { face -> (NormalizedRect, Float)? in
+            let bb = face.boundingBox
+            let full = NormalizedRect(
+                x: cropRegion.x + bb.origin.x * cropRegion.width,
+                y: cropRegion.y + (1 - bb.origin.y - bb.height) * cropRegion.height,
+                width: bb.width * cropRegion.width,
+                height: bb.height * cropRegion.height
+            )
+            let centerX = full.x + full.width / 2
+            let centerY = full.y + full.height / 2
+            let belongsToPerson = sampler?.containsNear(x: centerX, y: centerY)
+                ?? person.bounds.expanded(scale: 1.10).clamped().contains(x: centerX, y: centerY)
+            return belongsToPerson ? (full, face.confidence) : nil
+        }
+        .sorted { $0.1 > $1.1 }
+
+        var candidates: [PoseCandidate] = []
+        for (face, _) in faces.prefix(2) {
+            for bodyRegion in PoseDetectionMath.faceGuidedRegions(face: face, personBounds: person.bounds) {
+                let bodyRect = bodyRegion.cgRect(imageSize: imageSize, origin: .topLeft)
+                guard bodyRect.width >= 8, bodyRect.height >= 8,
+                      let bodyCrop = image.cropping(to: bodyRect) else { continue }
+                let actualBodyRegion = PoseDetectionMath.actualRegion(for: bodyRect, imageSize: imageSize)
+                candidates.append(contentsOf: detectPoseCandidates(
+                    in: Self.preparedForDetection(bodyCrop),
+                    region: actualBodyRegion,
+                    person: person
+                ))
+            }
+        }
+        return candidates.sorted { $0.evaluation.score > $1.evaluation.score }
+    }
+
+    private func bestCandidate(
+        from candidates: [PoseCandidate],
+        person: PersonDetection,
+        excluding selectedPoses: [SelectedPose]
+    ) -> PoseCandidate? {
+        candidates.first { candidate in
+            candidate.evaluation.score >= 0.35 && !selectedPoses.contains { selected in
+                PoseDetectionMath.areDuplicatePoses(
+                    candidate.joints,
+                    lhsBounds: person.bounds,
+                    selected.joints,
+                    rhsBounds: selected.personBounds
+                )
+            }
+        }
+    }
+
+    private func hint(from candidate: PoseCandidate, person: PersonDetection) -> PoseHint {
+        let lower = Self.lowerBodyBounds(joints: candidate.joints)
+            ?? HeuristicPoseEstimator.lowerBody(for: person.bounds)
+        return PoseHint(bodyBounds: person.bounds, lowerBodyBounds: lower, joints: candidate.joints)
+    }
+
+    private static func preparedForDetection(_ image: CGImage) -> CGImage {
+        let longestSide = max(image.width, image.height)
+        guard longestSide < 480 else { return image }
+        let scale = min(4, max(2, Int(ceil(480.0 / Double(longestSide)))))
+        return upscaled(image, scale: scale) ?? image
+    }
+
+    private func rotated(_ image: CGImage, rotation: PoseCropRotation) -> CGImage? {
+        guard rotation != .none else { return image }
+        let orientation: CGImagePropertyOrientation = rotation == .clockwise ? .right : .left
+        let rotated = CIImage(cgImage: image).oriented(orientation)
+        return imageContext.createCGImage(rotated, from: rotated.extent)
     }
 
     /// 骨格検出前の低解像度クロップ拡大（正規化座標のマッピングには影響しない）。
