@@ -55,6 +55,7 @@ public final class LibraryEngine {
     private let indexURL: URL
     private let originalsURL: URL
     private let processedURL: URL
+    private let patternsURL: URL
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
 
@@ -63,6 +64,7 @@ public final class LibraryEngine {
         self.indexURL = rootURL.appendingPathComponent("index.json")
         self.originalsURL = rootURL.appendingPathComponent("Originals")
         self.processedURL = rootURL.appendingPathComponent("Processed")
+        self.patternsURL = rootURL.appendingPathComponent("Patterns")
         self.encoder = JSONEncoder()
         self.encoder.dateEncodingStrategy = .iso8601
         self.encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
@@ -145,9 +147,24 @@ public final class LibraryEngine {
         item.processedRelativePath.map { rootURL.appendingPathComponent($0) }
     }
 
+    /// ROI別の任意パターン画像をライブラリと一緒に移行できる場所へ保存する。
+    @discardableResult
+    public func savePatternImage(_ image: CGImage, identifier: String) throws -> URL {
+        try ensureDirectories()
+        let url = patternURL(identifier: identifier)
+        try savePNG(image, to: url)
+        return url
+    }
+
+    public func patternURL(identifier: String) -> URL {
+        let safeIdentifier = identifier.replacingOccurrences(of: "/", with: "_")
+        return patternsURL.appendingPathComponent("\(safeIdentifier).png")
+    }
+
     private func ensureDirectories() throws {
         try FileManager.default.createDirectory(at: originalsURL, withIntermediateDirectories: true)
         try FileManager.default.createDirectory(at: processedURL, withIntermediateDirectories: true)
+        try FileManager.default.createDirectory(at: patternsURL, withIntermediateDirectories: true)
     }
 
     private func saveItems(_ items: [MosaicLibraryItem]) throws {

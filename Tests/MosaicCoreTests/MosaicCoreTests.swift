@@ -64,6 +64,143 @@ import Testing
 
     #expect(roi.shape == .ellipse)
     #expect(roi.category == .other)
+    #expect(roi.style == nil)
+}
+
+@Test func mosaicROIStyleRoundTripsAndConvertsToRenderStyle() throws {
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),
+        confidence: 1,
+        source: "manual",
+        style: MosaicROIStyle(
+            pattern: .clouds,
+            opacity: 0.65,
+            tint: .init(red: 0.2, green: 0.4, blue: 0.8),
+            blockScale: 19,
+            edgeFeather: 3,
+            stripeWidth: 7,
+            stripeSpacing: 5,
+            cloudDensity: 0.72,
+            cloudTone: true
+        )
+    )
+
+    let decoded = try JSONDecoder().decode(MosaicROI.self, from: JSONEncoder().encode(roi))
+    let storedStyle = try #require(decoded.style)
+    let renderStyle = MosaicStyle(roiStyle: storedStyle)
+
+    #expect(decoded.style == roi.style)
+    #expect(renderStyle.pattern == .clouds)
+    #expect(renderStyle.opacity == 0.65)
+    #expect(renderStyle.tintColor?.blue == 0.8)
+    #expect(renderStyle.cloudDensity == 0.72)
+    #expect(renderStyle.cloudTone)
+    #expect(renderStyle.patternImage == nil)
+    #expect(renderStyle.persistentStyle() == storedStyle)
+}
+
+@Test func mosaicEngineAppliesDifferentStylesPerROI() throws {
+    let image = try makeSolidImage(width: 100, height: 60)
+    let individualStyle = MosaicROIStyle(
+        pattern: .stripesVertical,
+        opacity: 1,
+        tint: .init(red: 0, green: 1, blue: 0),
+        blockScale: 16,
+        edgeFeather: 0,
+        stripeWidth: 100,
+        stripeSpacing: 0,
+        cloudDensity: 0.5,
+        cloudTone: false
+    )
+    let rois = [
+        MosaicROI(
+            rect: NormalizedRect(x: 0.05, y: 0.2, width: 0.4, height: 0.6),
+            confidence: 1,
+            source: "manual",
+            shape: .rectangle,
+            style: individualStyle
+        ),
+        MosaicROI(
+            rect: NormalizedRect(x: 0.55, y: 0.2, width: 0.4, height: 0.6),
+            confidence: 1,
+            source: "manual",
+            shape: .rectangle
+        )
+    ]
+    let globalStyle = MosaicStyle(
+        pattern: .stripesVertical,
+        opacity: 0.1,
+        tintColor: (red: 0, green: 0, blue: 1),
+        blockScale: 16,
+        edgeFeather: 0,
+        stripeWidth: 100,
+        stripeSpacing: 0
+    )
+
+    let output = try MosaicEngine().applyMosaic(to: image, rois: rois, style: globalStyle)
+    let left = rgbaPixel(in: output, x: 25, y: 30)
+    let right = rgbaPixel(in: output, x: 75, y: 30)
+
+    #expect(left.green > 0.9)
+    #expect(left.red < 0.1 && left.blue < 0.1)
+    #expect(right.red > 0.8)
+    #expect(left.green > right.green + 0.5)
+    #expect(right.red > left.red + 0.5)
+}
+
+@Test func mosaicEngineResolvesCustomPatternPerROI() throws {
+    let image = try makeSolidImage(width: 100, height: 60)
+    let greenPattern = try makeSolidImage(width: 4, height: 4, color: .systemGreen)
+    let bluePattern = try makeSolidImage(width: 4, height: 4, color: .systemBlue)
+    let rois = [
+        MosaicROI(
+            rect: NormalizedRect(x: 0.05, y: 0.2, width: 0.4, height: 0.6),
+            confidence: 1,
+            source: "manual",
+            shape: .rectangle,
+            style: MosaicROIStyle(pattern: .customImage, patternImageIdentifier: "green")
+        ),
+        MosaicROI(
+            rect: NormalizedRect(x: 0.55, y: 0.2, width: 0.4, height: 0.6),
+            confidence: 1,
+            source: "manual",
+            shape: .rectangle,
+            style: MosaicROIStyle(pattern: .customImage, patternImageIdentifier: "blue")
+        )
+    ]
+    let output = try MosaicEngine().applyMosaic(
+        to: image,
+        rois: rois,
+        style: MosaicStyle(),
+        patternImageProvider: { identifier in
+            identifier == "green" ? greenPattern : bluePattern
+        }
+    )
+    let left = rgbaPixel(in: output, x: 25, y: 30)
+    let right = rgbaPixel(in: output, x: 75, y: 30)
+
+    #expect(left.green > left.blue)
+    #expect(right.blue > right.green)
+}
+
+@Test func mosaicEngineReportsMissingCustomPattern() throws {
+    let image = try makeSolidImage(width: 20, height: 20)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0, y: 0, width: 1, height: 1),
+        confidence: 1,
+        source: "manual",
+        shape: .rectangle,
+        style: MosaicROIStyle(pattern: .customImage, patternImageIdentifier: "missing")
+    )
+
+    #expect(throws: MosaicEngineError.self) {
+        try MosaicEngine().applyMosaic(
+            to: image,
+            rois: [roi],
+            style: MosaicStyle(),
+            patternImageProvider: { _ in nil }
+        )
+    }
 }
 
 @Test func roiGeneratorUsesPoseJointsForChestAndGroin() {
@@ -527,6 +664,20 @@ import Testing
     #expect(items[0].rois == [roi])
 }
 
+@Test func libraryEngineStoresCustomPatternsInsideLibrary() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaic-pattern-library-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let library = LibraryEngine(rootURL: root)
+    let pattern = try makeSolidImage(width: 8, height: 8, color: .systemGreen)
+
+    let savedURL = try library.savePatternImage(pattern, identifier: "test/pattern")
+
+    #expect(savedURL.path.hasPrefix(root.path))
+    #expect(savedURL.lastPathComponent == "test_pattern.png")
+    #expect(FileManager.default.fileExists(atPath: savedURL.path))
+}
+
 @Test func libraryEngineDeletesItemsAndFiles() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent(UUID().uuidString)
@@ -850,7 +1001,7 @@ private func makePatternImage(width: Int, height: Int) throws -> CGImage {
     return image
 }
 
-private func makeSolidImage(width: Int, height: Int) throws -> CGImage {
+private func makeSolidImage(width: Int, height: Int, color: NSColor = .systemRed) throws -> CGImage {
     let colorSpace = CGColorSpaceCreateDeviceRGB()
     guard let context = CGContext(
         data: nil,
@@ -863,10 +1014,28 @@ private func makeSolidImage(width: Int, height: Int) throws -> CGImage {
     ) else {
         throw CocoaError(.coderInvalidValue)
     }
-    context.setFillColor(NSColor.systemRed.cgColor)
+    context.setFillColor(color.cgColor)
     context.fill(CGRect(x: 0, y: 0, width: width, height: height))
     guard let image = context.makeImage() else {
         throw CocoaError(.coderInvalidValue)
     }
     return image
+}
+
+private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green: Double, blue: Double, alpha: Double) {
+    var pixel = [UInt8](repeating: 0, count: 4)
+    CIContext(options: [.cacheIntermediates: false]).render(
+        CIImage(cgImage: image),
+        toBitmap: &pixel,
+        rowBytes: 4,
+        bounds: CGRect(x: x, y: y, width: 1, height: 1),
+        format: .RGBA8,
+        colorSpace: CGColorSpaceCreateDeviceRGB()
+    )
+    return (
+        red: Double(pixel[0]) / 255,
+        green: Double(pixel[1]) / 255,
+        blue: Double(pixel[2]) / 255,
+        alpha: Double(pixel[3]) / 255
+    )
 }

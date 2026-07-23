@@ -4,17 +4,21 @@ import Foundation
 
 public enum MosaicEngineError: Error, LocalizedError {
     case outputCreationFailed
+    case customPatternImageMissing(String?)
 
     public var errorDescription: String? {
         switch self {
         case .outputCreationFailed:
             return "モザイク画像を生成できませんでした"
+        case .customPatternImageMissing(let identifier):
+            let detail = identifier.map { "（ID: \($0)）" } ?? ""
+            return "任意パターン画像が見つかりません\(detail)。パターン画像を選択し直してください"
         }
     }
 }
 
 /// 塗りつぶしパターンの種類。
-public enum MosaicFillPattern: String, Codable, CaseIterable, Sendable {
+public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable {
     case pixelate
     case noise
     case blur
@@ -68,6 +72,8 @@ public struct MosaicStyle {
     public var cloudTone: Bool
     /// 任意パターン画像（customImage時。タイル状に敷き詰める）
     public var patternImage: CGImage?
+    /// 永続化された任意パターン画像を解決するための識別子。
+    public var patternImageIdentifier: String?
 
     public init(
         pattern: MosaicFillPattern = .pixelate,
@@ -79,7 +85,8 @@ public struct MosaicStyle {
         stripeSpacing: Double = 12,
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
-        patternImage: CGImage? = nil
+        patternImage: CGImage? = nil,
+        patternImageIdentifier: String? = nil
     ) {
         self.pattern = pattern
         self.opacity = opacity
@@ -91,6 +98,41 @@ public struct MosaicStyle {
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
         self.patternImage = patternImage
+        self.patternImageIdentifier = patternImageIdentifier
+    }
+
+    /// ROIへ保存するためのCGImageを除いた設定を返す。
+    public func persistentStyle() -> MosaicROIStyle {
+        MosaicROIStyle(
+            pattern: pattern,
+            opacity: opacity,
+            tint: tintColor.map { MosaicROIStyle.Tint(red: $0.red, green: $0.green, blue: $0.blue) },
+            blockScale: blockScale,
+            edgeFeather: edgeFeather,
+            stripeWidth: stripeWidth,
+            stripeSpacing: stripeSpacing,
+            cloudDensity: cloudDensity,
+            cloudTone: cloudTone,
+            patternImageIdentifier: patternImageIdentifier
+        )
+    }
+
+    /// ROIの永続化設定から描画用スタイルを復元する。
+    /// 任意パターン画像だけは保存せず、UIが実行時に渡す。
+    public init(roiStyle: MosaicROIStyle, patternImage: CGImage? = nil) {
+        self.init(
+            pattern: roiStyle.pattern,
+            opacity: roiStyle.opacity,
+            tintColor: roiStyle.tint.map { (red: $0.red, green: $0.green, blue: $0.blue) },
+            blockScale: roiStyle.blockScale,
+            edgeFeather: roiStyle.edgeFeather,
+            stripeWidth: roiStyle.stripeWidth,
+            stripeSpacing: roiStyle.stripeSpacing,
+            cloudDensity: roiStyle.cloudDensity,
+            cloudTone: roiStyle.cloudTone,
+            patternImage: patternImage,
+            patternImageIdentifier: roiStyle.patternImageIdentifier
+        )
     }
 }
 
@@ -135,37 +177,59 @@ public final class MosaicEngine {
         to image: CGImage,
         rois: [MosaicROI],
         style: MosaicStyle,
-        segmentEngine: Segmenting = ShapeSegmentEngine()
+        segmentEngine: Segmenting = ShapeSegmentEngine(),
+        patternImageProvider: ((String) -> CGImage?)? = nil
     ) throws -> CGImage {
         let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         var output = CIImage(cgImage: image)
         let original = output
-
-        let fill = Self.makeFillLayer(style: style, original: original, extent: extent)
-        let stripeAlpha = Self.stripePatternMask(style: style, extent: extent)
+        var layerCache: [MosaicROIStyle: (fill: CIImage, stripeAlpha: CIImage?)] = [:]
 
         let masks = try segmentEngine.createMasks(for: rois, in: image, extent: extent)
         for (roi, baseMask) in zip(rois, masks) {
             let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
             guard rect.width > 1, rect.height > 1 else { continue }
 
+            // ROI設定があれば、そのROIだけグローバル設定を完全に置き換える。
+            // 任意パターン画像は永続化しないため、呼び出し側の実行時画像を引き継ぐ。
+            var resolvedStyle = roi.style.map { MosaicStyle(roiStyle: $0) } ?? style
+            if let identifier = resolvedStyle.patternImageIdentifier {
+                resolvedStyle.patternImage = patternImageProvider?(identifier)
+            } else if resolvedStyle.patternImage == nil {
+                resolvedStyle.patternImage = style.patternImage
+            }
+            if resolvedStyle.pattern == .customImage, resolvedStyle.patternImage == nil {
+                throw MosaicEngineError.customPatternImageMissing(resolvedStyle.patternImageIdentifier)
+            }
+            let styleKey = resolvedStyle.persistentStyle()
+            let layers: (fill: CIImage, stripeAlpha: CIImage?)
+            if let cached = layerCache[styleKey] {
+                layers = cached
+            } else {
+                layers = (
+                    Self.makeFillLayer(style: resolvedStyle, original: original, extent: extent),
+                    Self.stripePatternMask(style: resolvedStyle, extent: extent)
+                )
+                layerCache[styleKey] = layers
+            }
+
             var mask = baseMask
             // ボーダー: 縞のアルファ（帯=不透過、間隔=透明）をROIマスクへ乗算
-            if let stripeAlpha {
+            if let stripeAlpha = layers.stripeAlpha {
                 mask = mask.applyingFilter("CIMultiplyCompositing", parameters: [
                     kCIInputBackgroundImageKey: stripeAlpha
                 ])
             }
             // 範囲輪郭のぼかし
-            if style.edgeFeather > 0.5 {
+            if resolvedStyle.edgeFeather > 0.5 {
                 mask = mask
                     .clampedToExtent()
-                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: style.edgeFeather])
+                    .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: resolvedStyle.edgeFeather])
                     .cropped(to: extent)
             }
             // 透明度（マスク輝度へ乗算）
-            if style.opacity < 0.999 {
-                let alpha = max(0.05, style.opacity)
+            if resolvedStyle.opacity < 0.999 {
+                let alpha = max(0.05, resolvedStyle.opacity)
                 mask = mask.applyingFilter("CIColorMatrix", parameters: [
                     "inputRVector": CIVector(x: alpha, y: 0, z: 0, w: 0),
                     "inputGVector": CIVector(x: 0, y: alpha, z: 0, w: 0),
@@ -175,9 +239,9 @@ public final class MosaicEngine {
 
             // フェザー分だけ塗りパッチを広げる（輪郭ぼかしがROI境界で途切れないように）。
             // 回転ROIは軸平行矩形からはみ出すため、外接円を覆う正方形まで拡張する
-            var expandedRect = rect.insetBy(dx: -style.edgeFeather * 2, dy: -style.edgeFeather * 2)
+            var expandedRect = rect.insetBy(dx: -resolvedStyle.edgeFeather * 2, dy: -resolvedStyle.edgeFeather * 2)
             if abs(roi.rotation) > 0.01 {
-                let radius = sqrt(rect.width * rect.width + rect.height * rect.height) / 2 + style.edgeFeather * 2
+                let radius = sqrt(rect.width * rect.width + rect.height * rect.height) / 2 + resolvedStyle.edgeFeather * 2
                 expandedRect = CGRect(
                     x: rect.midX - radius,
                     y: rect.midY - radius,
@@ -186,7 +250,7 @@ public final class MosaicEngine {
                 )
             }
             expandedRect = expandedRect.intersection(extent)
-            let patch = fill
+            let patch = layers.fill
                 .cropped(to: expandedRect)
                 .applyingFilter("CIBlendWithMask", parameters: [
                     kCIInputBackgroundImageKey: output,

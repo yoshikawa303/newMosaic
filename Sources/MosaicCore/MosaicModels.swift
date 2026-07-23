@@ -120,6 +120,59 @@ public enum MosaicTargetCategory: String, Codable, Sendable, CaseIterable {
     }
 }
 
+/// 永続化可能なROI個別のモザイク設定。
+///
+/// `CGImage` は永続化対象にせず、任意パターン画像はUIが実行時に `MosaicStyle` へ渡す。
+public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
+    public struct Tint: Codable, Equatable, Hashable, Sendable {
+        public var red: Double
+        public var green: Double
+        public var blue: Double
+
+        public init(red: Double, green: Double, blue: Double) {
+            self.red = red
+            self.green = green
+            self.blue = blue
+        }
+    }
+
+    public var pattern: MosaicFillPattern
+    public var opacity: Double
+    public var tint: Tint?
+    public var blockScale: Double
+    public var edgeFeather: Double
+    public var stripeWidth: Double
+    public var stripeSpacing: Double
+    public var cloudDensity: Double
+    public var cloudTone: Bool
+    /// Application Support内に保存した任意パターン画像の識別子。
+    public var patternImageIdentifier: String?
+
+    public init(
+        pattern: MosaicFillPattern = .pixelate,
+        opacity: Double = 1.0,
+        tint: Tint? = nil,
+        blockScale: Double = 28,
+        edgeFeather: Double = 0,
+        stripeWidth: Double = 12,
+        stripeSpacing: Double = 12,
+        cloudDensity: Double = 0.5,
+        cloudTone: Bool = false,
+        patternImageIdentifier: String? = nil
+    ) {
+        self.pattern = pattern
+        self.opacity = opacity
+        self.tint = tint
+        self.blockScale = blockScale
+        self.edgeFeather = edgeFeather
+        self.stripeWidth = stripeWidth
+        self.stripeSpacing = stripeSpacing
+        self.cloudDensity = cloudDensity
+        self.cloudTone = cloudTone
+        self.patternImageIdentifier = patternImageIdentifier
+    }
+}
+
 public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var rect: NormalizedRect
@@ -131,6 +184,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var rotation: Double
     /// 多角形ROIの頂点（shape == .polygon のとき使用。nilなら既定の六角形）
     public var polygonPoints: [NormalizedPoint]?
+    /// nilの場合は画面全体のモザイク設定を使用する。
+    public var style: MosaicROIStyle?
 
     /// 多角形の既定形状（矩形に内接する六角形。上頂点から時計回り）
     public static let defaultPolygonPoints: [NormalizedPoint] = (0..<6).map { index in
@@ -146,7 +201,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         shape: ROIShape = .ellipse,
         category: MosaicTargetCategory = .other,
         rotation: Double = 0,
-        polygonPoints: [NormalizedPoint]? = nil
+        polygonPoints: [NormalizedPoint]? = nil,
+        style: MosaicROIStyle? = nil
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -156,10 +212,11 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.category = category
         self.rotation = rotation
         self.polygonPoints = polygonPoints
+        self.style = style
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, rect, confidence, source, shape, category, rotation, polygonPoints
+        case id, rect, confidence, source, shape, category, rotation, polygonPoints, style
     }
 
     public init(from decoder: Decoder) throws {
@@ -172,6 +229,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         category = try container.decodeIfPresent(MosaicTargetCategory.self, forKey: .category) ?? .other
         rotation = try container.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
         polygonPoints = try container.decodeIfPresent([NormalizedPoint].self, forKey: .polygonPoints)
+        style = try container.decodeIfPresent(MosaicROIStyle.self, forKey: .style)
     }
 }
 
