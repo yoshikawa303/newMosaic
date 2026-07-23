@@ -428,6 +428,43 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func libraryEngineLinkedImportRelinkAndDelete() throws {
+    // リンク登録→リンク切れ判定→再リンク→削除で外部ファイルが消えないことを検証する
+    let temp = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicLinkTest_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: temp, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: temp) }
+
+    let image = try makeSolidImage(width: 40, height: 30)
+    let externalURL = temp.appendingPathComponent("source.png")
+    let bitmap = NSBitmapImageRep(cgImage: image)
+    try bitmap.representation(using: .png, properties: [:])!.write(to: externalURL)
+
+    let engine = LibraryEngine(rootURL: temp.appendingPathComponent("Library"))
+    let item = try engine.importLinked(url: externalURL)
+
+    #expect(item.isLinked)
+    #expect(item.imagePixelWidth == 40)
+    #expect(engine.originalURL(for: item).path == externalURL.path)
+    #expect(!engine.isLinkBroken(item))
+    // 同一パスの重複登録はスキップされる
+    #expect(try engine.importLinked(url: externalURL).id == item.id)
+
+    // リンク切れ→フォルダ一括修正（ファイル名一致）
+    let movedFolder = temp.appendingPathComponent("moved")
+    try FileManager.default.createDirectory(at: movedFolder, withIntermediateDirectories: true)
+    try FileManager.default.moveItem(at: externalURL, to: movedFolder.appendingPathComponent("source.png"))
+    #expect(try engine.brokenLinkedItems().count == 1)
+    let repaired = try engine.repairBrokenLinks(searchFolder: movedFolder)
+    #expect(repaired == 1)
+    #expect(try engine.brokenLinkedItems().isEmpty)
+
+    // 削除してもリンク先の外部ファイルは残る
+    try engine.deleteItems(ids: [item.id])
+    #expect(FileManager.default.fileExists(atPath: movedFolder.appendingPathComponent("source.png").path))
+    #expect(try engine.loadItems().isEmpty)
+}
+
 @Test func animePoseEstimatorDecodesSimCCPeaks() {
     // SimCC復号: ワンホットのピーク位置がビン/2の座標として復号されることを検証する
     let keypointCount = 2

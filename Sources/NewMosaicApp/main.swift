@@ -666,6 +666,8 @@ final class MosaicWindowController: NSObject {
         redoButton.keyEquivalent = "z"
         redoButton.keyEquivalentModifierMask = [.command, .shift]
         let saveButton = makeToolbarButton(symbol: "square.and.arrow.down", help: "画像を書き出す (⌘S)", action: #selector(saveImage))
+        let linkFolderButton = makeToolbarButton(symbol: "folder.badge.plus", help: "フォルダを一括登録（リンク）", action: #selector(registerFolderAsLinks))
+        let repairLinksButton = makeToolbarButton(symbol: "link.badge.plus", help: "リンク切れを修正", action: #selector(repairBrokenLinksAction))
         let reloadLibraryButton = makeToolbarButton(symbol: "arrow.clockwise", help: "ライブラリを更新", action: #selector(reloadLibraryFromButton))
         let revealButton = makeToolbarButton(symbol: "finder", help: "ライブラリをFinderで表示", action: #selector(revealLibrary))
         let zoomOutButton = makeToolbarButton(symbol: "minus.magnifyingglass", help: "縮小 (⌘-)", action: #selector(zoomOut))
@@ -681,7 +683,7 @@ final class MosaicWindowController: NSObject {
         zoomLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
         let toolbar = NSStackView(views: [
-            openButton, pasteButton, makeToolbarSeparator(),
+            openButton, pasteButton, linkFolderButton, repairLinksButton, makeToolbarSeparator(),
             detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
             saveButton, reloadLibraryButton, revealButton,
@@ -1860,6 +1862,94 @@ final class MosaicWindowController: NSObject {
         return .mixed
     }
 
+    // MARK: - フォルダ一括登録（リンク）とリンク切れ修正
+
+    /// フォルダ内の画像をライブラリへ**リンク**として一括登録する（コピーしない。
+    /// ROI・レイヤ情報は従来どおりアプリ側で管理する）。
+    @objc private func registerFolderAsLinks() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "一括登録"
+        panel.message = "画像フォルダを選択してください（画像はコピーせずリンクとして登録されます）"
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+
+        let imageExtensions = Set(["png", "jpg", "jpeg", "tiff", "tif", "heic"])
+        let manager = FileManager.default
+        let files = ((try? manager.contentsOfDirectory(
+            at: folder,
+            includingPropertiesForKeys: nil,
+            options: [.skipsHiddenFiles]
+        )) ?? [])
+            .filter { imageExtensions.contains($0.pathExtension.lowercased()) }
+            .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
+        guard !files.isEmpty else {
+            updateStatus("選択フォルダに登録できる画像がありません")
+            return
+        }
+        var registered = 0
+        var failed = 0
+        for file in files {
+            do {
+                _ = try libraryEngine.importLinked(url: file)
+                registered += 1
+            } catch {
+                failed += 1
+            }
+        }
+        reloadLibrary(preserveOrder: false)
+        let failNote = failed > 0 ? "（読み込み不可 \(failed)件）" : ""
+        updateStatus("フォルダ一括登録: \(registered)件をリンク登録しました\(failNote)")
+    }
+
+    /// リンク切れの修正。ライブラリでリンク切れアイテムを選択中ならそのアイテムをファイル指定で修正（画像単位）、
+    /// 未選択ならフォルダ指定でファイル名一致の一括修正を行う。
+    @objc private func repairBrokenLinksAction() {
+        // 画像単位: 選択中のリンク切れアイテム
+        if let selectedID = selectedLibraryItemID,
+           let item = libraryItems.first(where: { $0.id == selectedID }),
+           libraryEngine.isLinkBroken(item) {
+            let panel = NSOpenPanel()
+            panel.canChooseFiles = true
+            panel.canChooseDirectories = false
+            panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
+            panel.prompt = "この画像へ再リンク"
+            panel.message = "「\(item.sourceName)」の新しい参照先を選択してください"
+            guard panel.runModal() == .OK, let url = panel.url else { return }
+            do {
+                _ = try libraryEngine.relink(id: item.id, to: url)
+                thumbnailCache.removeValue(forKey: item.id)
+                reloadLibrary()
+                updateStatus("リンクを修正しました: \(url.lastPathComponent)")
+            } catch {
+                showError(error)
+            }
+            return
+        }
+
+        // 一括: フォルダ指定でファイル名一致の再リンク
+        let brokenCount = (try? libraryEngine.brokenLinkedItems().count) ?? 0
+        guard brokenCount > 0 else {
+            updateStatus("リンク切れのアイテムはありません（画像単位で修正する場合はリンク切れアイテムを選択してから実行）")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.prompt = "一括修正"
+        panel.message = "リンク切れ\(brokenCount)件の参照先を探すフォルダを選択してください（ファイル名一致で一括修正）"
+        guard panel.runModal() == .OK, let folder = panel.url else { return }
+        do {
+            let repaired = try libraryEngine.repairBrokenLinks(searchFolder: folder)
+            thumbnailCache.removeAll()
+            reloadLibrary()
+            updateStatus("リンク切れ一括修正: \(repaired)/\(brokenCount)件を修正しました")
+        } catch {
+            showError(error)
+        }
+    }
+
     @objc private func openImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
@@ -2930,7 +3020,9 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
             let label = cell.textField ?? NSTextField(labelWithString: "")
             label.lineBreakMode = .byTruncatingMiddle
             label.font = .systemFont(ofSize: 12)
-            label.stringValue = "\(item.processedRelativePath == nil ? "元" : "済") \(item.sourceName)\n\(item.imagePixelWidth)x\(item.imagePixelHeight) ROI \(item.rois.count)"
+            let linkMark = libraryEngine.isLinkBroken(item) ? "⚠️リンク切れ " : (item.isLinked ? "🔗" : "")
+            label.stringValue = "\(item.processedRelativePath == nil ? "元" : "済") \(linkMark)\(item.sourceName)\n\(item.imagePixelWidth)x\(item.imagePixelHeight) ROI \(item.rois.count)"
+            label.textColor = libraryEngine.isLinkBroken(item) ? .systemRed : .labelColor
             label.maximumNumberOfLines = 2
 
             if showThumbnail {
@@ -2994,7 +3086,8 @@ extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDe
             ) as? LibraryGridItem else {
                 return NSCollectionViewItem()
             }
-            let caption = "\(item.processedRelativePath == nil ? "元" : "済") \(item.sourceName)"
+            let linkMark = libraryEngine.isLinkBroken(item) ? "⚠️" : (item.isLinked ? "🔗" : "")
+            let caption = "\(item.processedRelativePath == nil ? "元" : "済") \(linkMark)\(item.sourceName)"
             gridItem.configure(image: thumbnail(for: item), caption: caption)
             return gridItem
         }

@@ -1,6 +1,7 @@
 import AppKit
 import CoreGraphics
 import Foundation
+import ImageIO
 
 public enum MosaicLibraryError: Error, LocalizedError {
     case pngEncodingFailed
@@ -23,9 +24,16 @@ public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
     public var sourceName: String
     public var originalRelativePath: String
     public var processedRelativePath: String?
+    /// フォルダ一括登録された参照リンク元の絶対パス（nil=従来のコピー取り込み）。
+    /// リンク登録では元画像をライブラリへコピーせず、参照先をそのまま読み込む。
+    /// ROI・レイヤ情報は従来どおりアプリ側（索引）で管理する。
+    public var linkedOriginalPath: String?
     public var imagePixelWidth: Int
     public var imagePixelHeight: Int
     public var rois: [MosaicROI]
+
+    /// リンク登録されたアイテムか。
+    public var isLinked: Bool { linkedOriginalPath != nil }
 
     public init(
         id: UUID = UUID(),
@@ -34,6 +42,7 @@ public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
         sourceName: String,
         originalRelativePath: String,
         processedRelativePath: String? = nil,
+        linkedOriginalPath: String? = nil,
         imagePixelWidth: Int,
         imagePixelHeight: Int,
         rois: [MosaicROI] = []
@@ -44,6 +53,7 @@ public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
         self.sourceName = sourceName
         self.originalRelativePath = originalRelativePath
         self.processedRelativePath = processedRelativePath
+        self.linkedOriginalPath = linkedOriginalPath
         self.imagePixelWidth = imagePixelWidth
         self.imagePixelHeight = imagePixelHeight
         self.rois = rois
@@ -130,7 +140,10 @@ public final class LibraryEngine {
         let targets = items.filter { idSet.contains($0.id) }
         guard !targets.isEmpty else { return }
         for item in targets {
-            try? FileManager.default.removeItem(at: originalURL(for: item))
+            // リンク登録アイテムの参照先（ユーザーの元ファイル）は削除しない
+            if !item.isLinked {
+                try? FileManager.default.removeItem(at: originalURL(for: item))
+            }
             if let processedURL = processedURL(for: item) {
                 try? FileManager.default.removeItem(at: processedURL)
             }
@@ -140,7 +153,90 @@ public final class LibraryEngine {
     }
 
     public func originalURL(for item: MosaicLibraryItem) -> URL {
-        rootURL.appendingPathComponent(item.originalRelativePath)
+        if let linked = item.linkedOriginalPath {
+            return URL(fileURLWithPath: linked)
+        }
+        return rootURL.appendingPathComponent(item.originalRelativePath)
+    }
+
+    // MARK: - リンク登録（フォルダ一括登録）
+
+    /// 外部画像ファイルをコピーせずリンクとしてライブラリへ登録する。
+    /// 同一パスが登録済みの場合は既存アイテムを返す（重複登録しない）。
+    public func importLinked(url: URL) throws -> MosaicLibraryItem {
+        try ensureDirectories()
+        var items = try loadItems()
+        if let existing = items.first(where: { $0.linkedOriginalPath == url.path }) {
+            return existing
+        }
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
+              let width = properties[kCGImagePropertyPixelWidth] as? Int,
+              let height = properties[kCGImagePropertyPixelHeight] as? Int else {
+            throw CocoaError(.fileReadCorruptFile, userInfo: [
+                NSLocalizedDescriptionKey: "画像を読み込めません: \(url.lastPathComponent)"
+            ])
+        }
+        let item = MosaicLibraryItem(
+            sourceName: url.lastPathComponent,
+            originalRelativePath: "",
+            linkedOriginalPath: url.path,
+            imagePixelWidth: width,
+            imagePixelHeight: height
+        )
+        items.insert(item, at: 0)
+        try saveItems(items)
+        return item
+    }
+
+    /// リンク切れ（参照先ファイルが存在しない）か。コピー取り込みアイテムは常にfalse。
+    public func isLinkBroken(_ item: MosaicLibraryItem) -> Bool {
+        guard let linked = item.linkedOriginalPath else { return false }
+        return !FileManager.default.fileExists(atPath: linked)
+    }
+
+    /// リンク切れのアイテム一覧。
+    public func brokenLinkedItems() throws -> [MosaicLibraryItem] {
+        try loadItems().filter { isLinkBroken($0) }
+    }
+
+    /// リンク先を新しいファイルへ張り替える（画像単位のリンク切れ修正）。
+    @discardableResult
+    public func relink(id: UUID, to url: URL) throws -> MosaicLibraryItem {
+        var items = try loadItems()
+        guard let index = items.firstIndex(where: { $0.id == id }) else {
+            throw MosaicLibraryError.itemNotFound(id)
+        }
+        items[index].linkedOriginalPath = url.path
+        items[index].sourceName = url.lastPathComponent
+        items[index].updatedAt = Date()
+        try saveItems(items)
+        return items[index]
+    }
+
+    /// フォルダ内からファイル名一致で参照先を探し、リンク切れを一括修正する。修正できた件数を返す。
+    public func repairBrokenLinks(searchFolder: URL) throws -> Int {
+        var items = try loadItems()
+        let manager = FileManager.default
+        var candidates: [String: URL] = [:]
+        if let enumerator = manager.enumerator(at: searchFolder, includingPropertiesForKeys: nil) {
+            for case let fileURL as URL in enumerator {
+                candidates[fileURL.lastPathComponent] = fileURL
+            }
+        }
+        var repaired = 0
+        for index in items.indices {
+            guard let linked = items[index].linkedOriginalPath,
+                  !manager.fileExists(atPath: linked),
+                  let replacement = candidates[items[index].sourceName] else { continue }
+            items[index].linkedOriginalPath = replacement.path
+            items[index].updatedAt = Date()
+            repaired += 1
+        }
+        if repaired > 0 {
+            try saveItems(items)
+        }
+        return repaired
     }
 
     public func processedURL(for item: MosaicLibraryItem) -> URL? {
