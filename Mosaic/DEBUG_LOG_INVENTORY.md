@@ -2,13 +2,21 @@
 
 ## 現在のログ方針
 
-- 初期MVPではアプリ内の永続デバッグログは未導入。
+- アプリ独自の永続デバッグログは未導入。Vision検出失敗はUnified Loggingへ出力する。
 - ユーザー修正履歴は `HistoryEngine` が JSON として保存する。
 - 検証ライブラリは `~/Library/Application Support/newMosaic/Library/` に保存する。
   - `Originals/`: インポートした元画像PNG。
   - `Processed/`: モザイク適用後の検証画像PNG。
   - `index.json`: ライブラリ索引。元画像/加工後画像の相対パス、ROI、画像サイズ、日時を保持する。
 - ログ経路を追加した場合は、保存先、個人情報の有無、削除方法を本ファイルへ追記する。
+
+## Vision検出診断（Build 48〜）
+
+- 経路: macOS Unified Logging（subsystem `com.yoshikawa.newMosaic`、category `Detection`）。
+- 対象: 人物インスタンスマスク、補完人物矩形、人物別スケール済みマスク、骨格、顔起点フォールバックのVisionエラー。
+- 内容: エラー種別とローカライズ済み説明。入力画像、画像パス、ROI座標、人物情報は記録しない。
+- 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Detection"' --last 10m`
+- 削除: アプリ独自ファイルは作成しない。OSのUnified Logging保持方針に従う。
 
 ## 検出モデルキャッシュ（Build 34〜）
 
