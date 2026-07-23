@@ -629,8 +629,15 @@ final class MosaicWindowController: NSObject {
     private var imageEditStateOrder: [UUID] = []
     private let imageEditStateLimit = 8
     private var rightPaneSplitView: NSSplitView?
+    private var leftPaneSplitView: NSSplitView?
     private var mainSplitView: NSSplitView?
     private var isRestoringSplitPositions = false
+    /// サイドパネル内の移動可能ウィンドウ（ライブラリ/レイヤ/モザイク設定）
+    private enum SidePanelKind: String, CaseIterable {
+        case library, layers, inspector
+    }
+    private var sidePanels: [SidePanelKind: NSView] = [:]
+    private var paneMinWidthConstraints: [NSLayoutConstraint] = []
     private var isLoadingMosaicStyleControls = false
     private var defaultMosaicStyle = MosaicStyle()
     private var discardedEditStateID: UUID?
@@ -709,38 +716,54 @@ final class MosaicWindowController: NSObject {
         let layerPanel = makeLayerPanel()
         let inspectorPanel = makeInspectorPanel()
 
-        // 右ペイン: 上=ライブラリ / 中=レイヤ / 下=インスペクタ。各境界はドラッグ調整できる。
+        // サイドパネル（左右）: 各ウィンドウ（ライブラリ/レイヤ/モザイク設定）は◀▶ボタンで左右へ移動できる。
+        // 分割位置はポータブル設定（AppSettings）へ手動保存する（UserDefaults依存のautosaveNameは廃止）
+        let leftPane = NSSplitView()
+        leftPane.isVertical = false
+        leftPane.dividerStyle = .thin
+        leftPane.identifier = NSUserInterfaceItemIdentifier("LeftPaneSplit")
+        leftPane.translatesAutoresizingMaskIntoConstraints = false
+        leftPaneSplitView = leftPane
+
         let rightPane = NSSplitView()
         rightPane.isVertical = false
         rightPane.dividerStyle = .thin
-        // 分割位置はポータブル設定（AppSettings）へ手動保存する（UserDefaults依存のautosaveNameは廃止）
         rightPane.identifier = NSUserInterfaceItemIdentifier("RightPaneSplit")
         rightPaneSplitView = rightPane
         rightPane.translatesAutoresizingMaskIntoConstraints = false
-        rightPane.addArrangedSubview(libraryPanel)
-        rightPane.addArrangedSubview(layerPanel)
-        rightPane.addArrangedSubview(inspectorPanel)
+
+        sidePanels = [.library: libraryPanel, .layers: layerPanel, .inspector: inspectorPanel]
         // 最小高さは低めに抑え、境界ドラッグで自由に配分できるようにする
         libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         inspectorPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
+        attachPanelMoveButtons(to: libraryPanel, kind: .library)
+        attachPanelMoveButtons(to: layerPanel, kind: .layers)
+        attachPanelMoveButtons(to: inspectorPanel, kind: .inspector)
 
-        // メイン分割: 左=キャンバス / 右=ライブラリ+レイヤ。左端境界の左右ドラッグで幅変更できる。
+        // メイン分割: 左ペイン / キャンバス / 右ペイン。各境界の左右ドラッグで幅変更できる。
         let splitView = NSSplitView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
         splitView.identifier = NSUserInterfaceItemIdentifier("MainSplit")
         mainSplitView = splitView
         splitView.translatesAutoresizingMaskIntoConstraints = false
+        splitView.addArrangedSubview(leftPane)
         splitView.addArrangedSubview(canvas)
         splitView.addArrangedSubview(rightPane)
-        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
-        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
+        splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
+        splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 2)
         // サイドパネル幅を自由に変更できるよう最小幅は控えめにする（内容はツールチップ・省略表示で対応）
-        rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        let leftMin = leftPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220)
+        let rightMin = rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220)
+        paneMinWidthConstraints = [leftMin, rightMin]
+        rightMin.isActive = true
         canvas.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
         splitView.delegate = self
+        leftPane.delegate = self
         rightPane.delegate = self
+        applyPanelAssignments()
         root.addSubview(toolbar)
         root.addSubview(splitView)
 
@@ -915,6 +938,83 @@ final class MosaicWindowController: NSObject {
         generatePoseCheckbox.state = (defaults.object(forKey: "GenerateFilter.pose") as? Bool ?? true) ? .on : .off
     }
 
+    // MARK: - サイドパネルのウィンドウ移動（◀▶）
+
+    /// 各パネル右上へ「◀」「▶」ボタンを重ねて配置する。押した方向のサイドパネルへウィンドウを移動する。
+    private func attachPanelMoveButtons(to panel: NSView, kind: SidePanelKind) {
+        let leftButton = NSButton(title: "◀", target: self, action: #selector(movePanelToLeft(_:)))
+        let rightButton = NSButton(title: "▶", target: self, action: #selector(movePanelToRight(_:)))
+        for button in [leftButton, rightButton] {
+            button.isBordered = false
+            button.font = .systemFont(ofSize: 9)
+            button.contentTintColor = .secondaryLabelColor
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
+            button.setContentHuggingPriority(.required, for: .horizontal)
+        }
+        leftButton.toolTip = "このウィンドウを左サイドパネルへ移動"
+        rightButton.toolTip = "このウィンドウを右サイドパネルへ移動"
+        let stack = NSStackView(views: [leftButton, rightButton])
+        stack.orientation = .horizontal
+        stack.spacing = 2
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        panel.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 8),
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8)
+        ])
+    }
+
+    @objc private func movePanelToLeft(_ sender: NSButton) {
+        movePanel(from: sender, to: "left")
+    }
+
+    @objc private func movePanelToRight(_ sender: NSButton) {
+        movePanel(from: sender, to: "right")
+    }
+
+    private func movePanel(from sender: NSButton, to side: String) {
+        guard let raw = sender.identifier?.rawValue,
+              let kind = SidePanelKind(rawValue: raw) else { return }
+        AppSettings.shared.set(side, forKey: "Layout.panelSide.\(kind.rawValue)")
+        applyPanelAssignments()
+        updateStatus("\(panelDisplayName(kind))を\(side == "left" ? "左" : "右")サイドパネルへ移動しました")
+    }
+
+    private func panelDisplayName(_ kind: SidePanelKind) -> String {
+        switch kind {
+        case .library: return "ライブラリ"
+        case .layers: return "レイヤ"
+        case .inspector: return "モザイク設定"
+        }
+    }
+
+    /// 保存された配置（Layout.panelSide.*）に従って各ウィンドウを左右のサイドパネルへ配置する。
+    /// 空になったサイドパネルは非表示にする（最小幅制約も無効化して幅0で畳む）。
+    private func applyPanelAssignments() {
+        guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView else { return }
+        for pane in [leftPane, rightPane] {
+            for view in pane.arrangedSubviews {
+                pane.removeArrangedSubview(view)
+                view.removeFromSuperview()
+            }
+        }
+        for kind in SidePanelKind.allCases {
+            guard let panel = sidePanels[kind] else { continue }
+            let side = AppSettings.shared.string(forKey: "Layout.panelSide.\(kind.rawValue)") ?? "right"
+            (side == "left" ? leftPane : rightPane).addArrangedSubview(panel)
+        }
+        let leftEmpty = leftPane.arrangedSubviews.isEmpty
+        let rightEmpty = rightPane.arrangedSubviews.isEmpty
+        leftPane.isHidden = leftEmpty
+        rightPane.isHidden = rightEmpty
+        if paneMinWidthConstraints.count == 2 {
+            paneMinWidthConstraints[0].isActive = !leftEmpty
+            paneMinWidthConstraints[1].isActive = !rightEmpty
+        }
+        mainSplitView?.adjustSubviews()
+    }
+
     /// 分割位置の適用。保存済みの位置（ポータブル設定）があれば復元し、なければ初回既定レイアウト
     /// （レイヤパネル=人物4人分相当）を適用する。以後のドラッグ調整は `splitViewDidResizeSubviews` で保存される。
     func applyInitialLayoutIfNeeded() {
@@ -933,24 +1033,48 @@ final class MosaicWindowController: NSObject {
         mainSplit.setPosition(mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth, ofDividerAt: 0)
     }
 
-    /// 保存済みの分割位置（サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
+    /// 保存済みの分割位置（左右サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
     private func restoreSplitPositions() -> Bool {
         let settings = AppSettings.shared
-        guard let rightWidth = settings.object(forKey: "Layout.rightPaneWidth") as? Double,
-              let libraryHeight = settings.object(forKey: "Layout.libraryHeight") as? Double,
-              let layerHeight = settings.object(forKey: "Layout.layerHeight") as? Double,
-              let rightPane = rightPaneSplitView,
-              let mainSplit = mainSplitView,
-              rightWidth > 50, libraryHeight > 20, layerHeight > 20 else { return false }
+        guard let rightPane = rightPaneSplitView,
+              let leftPane = leftPaneSplitView,
+              let mainSplit = mainSplitView else { return false }
+        var restored = false
         isRestoringSplitPositions = true
-        mainSplit.setPosition(
-            max(200, mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth),
-            ofDividerAt: 0
-        )
-        rightPane.setPosition(libraryHeight, ofDividerAt: 0)
-        rightPane.setPosition(libraryHeight + rightPane.dividerThickness + layerHeight, ofDividerAt: 1)
-        isRestoringSplitPositions = false
-        return true
+        defer { isRestoringSplitPositions = false }
+
+        // メイン分割: 左ペイン幅（divider 0）と右ペイン幅（最終divider）
+        let dividerCount = mainSplit.arrangedSubviews.count - 1
+        if !leftPane.isHidden,
+           let leftWidth = settings.object(forKey: "Layout.leftPaneWidth") as? Double, leftWidth > 50 {
+            mainSplit.setPosition(leftWidth, ofDividerAt: 0)
+            restored = true
+        }
+        if !rightPane.isHidden, dividerCount >= 1,
+           let rightWidth = settings.object(forKey: "Layout.rightPaneWidth") as? Double, rightWidth > 50 {
+            mainSplit.setPosition(
+                max(200, mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth),
+                ofDividerAt: dividerCount - 1
+            )
+            restored = true
+        }
+
+        // 各サイドパネル内: 保存された高さ配列から分割位置を復元する
+        for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
+            guard !pane.isHidden,
+                  let heights = settings.object(forKey: key) as? [Double],
+                  heights.count == pane.arrangedSubviews.count,
+                  heights.allSatisfy({ $0 > 20 }) else { continue }
+            pane.layoutSubtreeIfNeeded()
+            var position = 0.0
+            for (index, height) in heights.dropLast().enumerated() {
+                position += height
+                pane.setPosition(position, ofDividerAt: index)
+                position += pane.dividerThickness
+            }
+            restored = true
+        }
+        return restored
     }
 
     // MARK: - モザイク描画スタイル設定
@@ -2865,16 +2989,20 @@ extension MosaicWindowController: NSSplitViewDelegate {
     /// AppSettings側で0.3秒デバウンスされるためドラッグ中の多発書き込みは抑制される。
     func splitViewDidResizeSubviews(_ notification: Notification) {
         guard !isRestoringSplitPositions,
+              let leftPane = leftPaneSplitView,
               let rightPane = rightPaneSplitView,
               let mainSplit = mainSplitView,
-              rightPane.bounds.height > 0, mainSplit.bounds.width > 0 else { return }
+              mainSplit.bounds.width > 0 else { return }
         let settings = AppSettings.shared
-        if rightPane.arrangedSubviews.count >= 3 {
-            settings.set(Double(rightPane.arrangedSubviews[0].frame.height), forKey: "Layout.libraryHeight")
-            settings.set(Double(rightPane.arrangedSubviews[1].frame.height), forKey: "Layout.layerHeight")
+        if !leftPane.isHidden, leftPane.frame.width > 50 {
+            settings.set(Double(leftPane.frame.width), forKey: "Layout.leftPaneWidth")
         }
-        if mainSplit.arrangedSubviews.count >= 2 {
-            settings.set(Double(mainSplit.arrangedSubviews[1].frame.width), forKey: "Layout.rightPaneWidth")
+        if !rightPane.isHidden, rightPane.frame.width > 50 {
+            settings.set(Double(rightPane.frame.width), forKey: "Layout.rightPaneWidth")
+        }
+        for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
+            guard !pane.isHidden, pane.bounds.height > 0, !pane.arrangedSubviews.isEmpty else { continue }
+            settings.set(pane.arrangedSubviews.map { Double($0.frame.height) }, forKey: key)
         }
     }
 }
