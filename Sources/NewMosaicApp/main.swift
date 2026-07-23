@@ -632,6 +632,12 @@ final class MosaicWindowController: NSObject {
     private var leftPaneSplitView: NSSplitView?
     private var mainSplitView: NSSplitView?
     private var isRestoringSplitPositions = false
+    // 一括処理の進捗UI
+    private var isBatchProcessing = false
+    private var batchCancelRequested = false
+    private var batchPanel: NSPanel?
+    private let batchProgressBar = NSProgressIndicator()
+    private let batchProgressLabel = NSTextField(labelWithString: "")
     /// サイドパネル内の移動可能ウィンドウ（ライブラリ/レイヤ/モザイク設定）
     private enum SidePanelKind: String, CaseIterable {
         case library, layers, inspector
@@ -668,6 +674,7 @@ final class MosaicWindowController: NSObject {
         let saveButton = makeToolbarButton(symbol: "square.and.arrow.down", help: "画像を書き出す (⌘S)", action: #selector(saveImage))
         let linkFolderButton = makeToolbarButton(symbol: "folder.badge.plus", help: "フォルダを一括登録（リンク）", action: #selector(registerFolderAsLinks))
         let repairLinksButton = makeToolbarButton(symbol: "link.badge.plus", help: "リンク切れを修正", action: #selector(repairBrokenLinksAction))
+        let batchButton = makeToolbarButton(symbol: "bolt.circle", help: "一括処理（未加工の画像を候補生成→適用→保存）", action: #selector(batchProcessAll))
         let reloadLibraryButton = makeToolbarButton(symbol: "arrow.clockwise", help: "ライブラリを更新", action: #selector(reloadLibraryFromButton))
         let revealButton = makeToolbarButton(symbol: "finder", help: "ライブラリをFinderで表示", action: #selector(revealLibrary))
         let zoomOutButton = makeToolbarButton(symbol: "minus.magnifyingglass", help: "縮小 (⌘-)", action: #selector(zoomOut))
@@ -683,7 +690,7 @@ final class MosaicWindowController: NSObject {
         zoomLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
         let toolbar = NSStackView(views: [
-            openButton, pasteButton, linkFolderButton, repairLinksButton, makeToolbarSeparator(),
+            openButton, pasteButton, linkFolderButton, repairLinksButton, batchButton, makeToolbarSeparator(),
             detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
             saveButton, reloadLibraryButton, revealButton,
@@ -1947,6 +1954,183 @@ final class MosaicWindowController: NSObject {
             updateStatus("リンク切れ一括修正: \(repaired)/\(brokenCount)件を修正しました")
         } catch {
             showError(error)
+        }
+    }
+
+    // MARK: - 一括処理
+
+    /// 一括処理の実行パラメータ（非Sendableな型をまとめてバックグラウンドタスクへ渡すための箱）。
+    private struct BatchConfig: @unchecked Sendable {
+        let library: LibraryEngine
+        let style: MosaicStyle
+        let domainMode: Int
+        let groinRatio: Double
+        let checkedCategories: Set<MosaicTargetCategory>
+        let shape: ROIShape
+        let engineKindIndex: Int
+    }
+
+    /// 未加工（加工後画像なし）かつリンク有効な全画像を、候補生成→モザイク適用→保存で一括処理する。
+    /// 処理中は進捗パネル（件数・進捗バー・キャンセル）をリアルタイム更新する。
+    @objc private func batchProcessAll() {
+        guard !isBatchProcessing else { return }
+        let targets = libraryItems.filter { $0.processedRelativePath == nil && !libraryEngine.isLinkBroken($0) }
+        guard !targets.isEmpty else {
+            updateStatus("一括処理の対象がありません（未加工かつリンク有効な画像が対象です）")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "一括処理"
+        alert.informativeText = "未加工の\(targets.count)件を一括処理します（候補生成 → モザイク適用 → ライブラリ保存）。よろしいですか？"
+        alert.addButton(withTitle: "開始")
+        alert.addButton(withTitle: "キャンセル")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        // 実行パラメータはメインスレッドで確定してから開始する
+        let config = BatchConfig(
+            library: libraryEngine,
+            style: defaultMosaicStyleForRendering(),
+            domainMode: domainModeControl.indexOfSelectedItem,
+            groinRatio: groinPositionSlider.doubleValue,
+            checkedCategories: checkedGenerationCategories(),
+            shape: canvas.currentShape,
+            engineKindIndex: segmentEngineControl.indexOfSelectedItem
+        )
+        isBatchProcessing = true
+        batchCancelRequested = false
+        presentBatchPanel(total: targets.count)
+
+        Task.detached(priority: .userInitiated) { [weak self] in
+            let worker = CandidateGenerationWorker()
+            let loader = ImageLoader()
+            let engine = MosaicEngine()
+            func makeSegmentEngine() -> Segmenting {
+                let kinds = SegmentEngineKind.allCases
+                guard config.engineKindIndex >= 0, config.engineKindIndex < kinds.count else {
+                    return ShapeSegmentEngine()
+                }
+                switch kinds[config.engineKindIndex] {
+                case .shape: return ShapeSegmentEngine()
+                case .visionPersonSegmentation: return VisionPersonSegmentEngine()
+                case .foregroundObjects: return ForegroundSegmentEngine()
+                case .regionForeground: return RegionForegroundSegmentEngine()
+                }
+            }
+
+            var processed = 0
+            var failed = 0
+            var cancelled = false
+            for (index, item) in targets.enumerated() {
+                let shouldStop = await MainActor.run { [weak self] in self?.batchCancelRequested ?? true }
+                if shouldStop {
+                    cancelled = true
+                    break
+                }
+                await MainActor.run { [weak self] in
+                    self?.updateBatchProgress(current: index + 1, total: targets.count, name: item.sourceName)
+                }
+                do {
+                    let loaded = try loader.loadImage(from: config.library.originalURL(for: item))
+                    let output = try worker.run(CandidateGenerationInput(
+                        image: loaded.cgImage,
+                        domainMode: config.domainMode,
+                        groinPositionRatio: config.groinRatio
+                    ))
+                    var rois = output.rois.filter { config.checkedCategories.contains($0.category) }
+                    rois = rois.map { roi in
+                        var updated = roi
+                        updated.shape = config.shape
+                        if config.shape == .polygon && updated.polygonPoints == nil {
+                            updated.polygonPoints = MosaicROI.defaultPolygonPoints
+                        }
+                        return updated
+                    }
+                    let result = try engine.applyMosaic(
+                        to: loaded.cgImage,
+                        rois: rois,
+                        style: config.style,
+                        segmentEngine: makeSegmentEngine(),
+                        patternImageProvider: { _ in nil }
+                    )
+                    _ = try config.library.saveProcessedImage(result, rois: rois, for: item.id)
+                    processed += 1
+                } catch {
+                    failed += 1
+                }
+            }
+            let processedCount = processed
+            let failedCount = failed
+            let wasCancelled = cancelled
+            await MainActor.run { [weak self] in
+                self?.finishBatchProcessing(processed: processedCount, failed: failedCount, cancelled: wasCancelled)
+            }
+        }
+    }
+
+    private func presentBatchPanel(total: Int) {
+        let panel = NSPanel(
+            contentRect: NSRect(x: 0, y: 0, width: 440, height: 110),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        panel.title = "一括処理"
+        batchProgressLabel.stringValue = "0/\(total) 準備中..."
+        batchProgressLabel.lineBreakMode = .byTruncatingMiddle
+        batchProgressBar.style = .bar
+        batchProgressBar.isIndeterminate = false
+        batchProgressBar.minValue = 0
+        batchProgressBar.maxValue = Double(total)
+        batchProgressBar.doubleValue = 0
+        let cancelButton = NSButton(title: "キャンセル", target: self, action: #selector(cancelBatchProcessing))
+        let stack = NSStackView(views: [batchProgressLabel, batchProgressBar, cancelButton])
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 10
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let content = NSView()
+        content.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 14),
+            stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 16),
+            stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -16),
+            batchProgressBar.widthAnchor.constraint(equalTo: stack.widthAnchor),
+            batchProgressLabel.widthAnchor.constraint(equalTo: stack.widthAnchor)
+        ])
+        panel.contentView = content
+        batchPanel = panel
+        if let window = view.window {
+            window.beginSheet(panel)
+        } else {
+            panel.center()
+            panel.makeKeyAndOrderFront(nil)
+        }
+    }
+
+    @objc private func cancelBatchProcessing() {
+        batchCancelRequested = true
+        batchProgressLabel.stringValue = "キャンセルしています..."
+    }
+
+    private func updateBatchProgress(current: Int, total: Int, name: String) {
+        batchProgressLabel.stringValue = "\(current)/\(total) 処理中: \(name)"
+        batchProgressBar.doubleValue = Double(current - 1)
+        updateStatus("一括処理 \(current)/\(total): \(name)")
+    }
+
+    private func finishBatchProcessing(processed: Int, failed: Int, cancelled: Bool) {
+        if let panel = batchPanel {
+            view.window?.endSheet(panel)
+            panel.orderOut(nil)
+        }
+        batchPanel = nil
+        isBatchProcessing = false
+        reloadLibrary()
+        let failNote = failed > 0 ? "・失敗\(failed)件" : ""
+        if cancelled {
+            updateStatus("一括処理をキャンセルしました（処理済み\(processed)件\(failNote)）")
+        } else {
+            updateStatus("一括処理が完了しました（\(processed)件\(failNote)）")
         }
     }
 
