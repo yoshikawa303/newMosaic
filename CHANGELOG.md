@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.0.00001 - Build 51 - 2026-07-23
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: サイドパネルの幅・各ウィンドウ（ライブラリ/レイヤ/モザイク設定）の分割位置が自由に変更できず、再起動後も記憶されない問題を修正した。最小サイズ制約を緩和し、分割位置・サイドパネル幅・ウィンドウ枠を設定へ保存して次回起動時に復元する。
+- 新機能: アプリ設定のポータブル保存に対応した。全設定（Windowsの*.ini相当）をアプリ本体と同じフォルダの `newMosaic_Settings/settings.json` へ保存し、アプリと設定フォルダをまとめて移動・コピーすれば他のPC環境でも同じ設定で動作する。保存先が書き込めない場合はApplication Supportへ自動フォールバック。既存のUserDefaults設定は初回起動時に自動移行される。
+
+■更新履歴
+
+- `AppSettings` を新設（UserDefaults互換API・JSON保存・0.3秒デバウンス書き込み・書き込み可否のプローブ判定・既知キーの自動移行）。main.swift内の設定用途のUserDefaults参照13箇所を置換（モデルキャッシュのマーカーは機種ローカル情報のためUserDefaultsのまま）。
+- 分割ビューのautosaveName（UserDefaults依存）を廃止し、`NSSplitViewDelegate.splitViewDidResizeSubviews` で分割位置を `Layout.*` キーへ手動保存・起動時復元。ウィンドウ枠も `windowDidEndLiveResize`/`windowDidMove` で保存。
+- 最小サイズ制約を緩和（サイドパネル最小幅300→220、各ウィンドウ最小高さ140/150/220→80/80/120、ウィンドウ最小760x560）し、キャンバス最小幅200を追加。
+
+
 ## v0.0.00001 - Build 50 - 2026-07-23
 
 ■更新履歴（Readme / ChangeLog 用）

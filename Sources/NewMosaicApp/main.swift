@@ -26,11 +26,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = Self.windowTitle()
-        window.contentMinSize = NSSize(width: 900, height: 700)
-        if !window.setFrameUsingName("newMosaicMainWindow") {
+        window.contentMinSize = NSSize(width: 760, height: 560)
+        // ウィンドウ枠はポータブル設定（AppSettings）を優先して復元する
+        if let savedFrame = AppSettings.shared.string(forKey: "Layout.windowFrame"),
+           !savedFrame.isEmpty {
+            window.setFrame(NSRectFromString(savedFrame), display: true)
+        } else if !window.setFrameUsingName("newMosaicMainWindow") {
             window.center()
         }
-        window.setFrameAutosaveName("newMosaicMainWindow")
         window.contentView = controller.view
         window.delegate = controller
         installMainMenu(target: controller)
@@ -627,6 +630,7 @@ final class MosaicWindowController: NSObject {
     private let imageEditStateLimit = 8
     private var rightPaneSplitView: NSSplitView?
     private var mainSplitView: NSSplitView?
+    private var isRestoringSplitPositions = false
     private var isLoadingMosaicStyleControls = false
     private var defaultMosaicStyle = MosaicStyle()
     private var discardedEditStateID: UUID?
@@ -635,7 +639,7 @@ final class MosaicWindowController: NSObject {
     private var editorRevision = 0
 
     override init() {
-        let savedRatio = UserDefaults.standard.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
+        let savedRatio = AppSettings.shared.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
         super.init()
         groinPositionSlider.doubleValue = savedRatio
         groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100))%"
@@ -693,7 +697,7 @@ final class MosaicWindowController: NSObject {
         domainModeControl.removeAllItems()
         domainModeControl.addItems(withTitles: ["自動判定", "実写", "イラスト・漫画"])
         domainModeControl.toolTip = "人物・部位検出に使用する画像種別"
-        let savedDomainMode = UserDefaults.standard.integer(forKey: Self.domainModeDefaultsKey)
+        let savedDomainMode = AppSettings.shared.integer(forKey: Self.domainModeDefaultsKey)
         domainModeControl.selectItem(at: (0...2).contains(savedDomainMode) ? savedDomainMode : 0)
         loadLibraryViewPreferences()
 
@@ -709,28 +713,34 @@ final class MosaicWindowController: NSObject {
         let rightPane = NSSplitView()
         rightPane.isVertical = false
         rightPane.dividerStyle = .thin
-        rightPane.autosaveName = "RightPaneSplit.v2"
+        // 分割位置はポータブル設定（AppSettings）へ手動保存する（UserDefaults依存のautosaveNameは廃止）
+        rightPane.identifier = NSUserInterfaceItemIdentifier("RightPaneSplit")
         rightPaneSplitView = rightPane
         rightPane.translatesAutoresizingMaskIntoConstraints = false
         rightPane.addArrangedSubview(libraryPanel)
         rightPane.addArrangedSubview(layerPanel)
         rightPane.addArrangedSubview(inspectorPanel)
-        libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 140).isActive = true
-        layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 150).isActive = true
-        inspectorPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        // 最小高さは低めに抑え、境界ドラッグで自由に配分できるようにする
+        libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+        layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+        inspectorPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
 
         // メイン分割: 左=キャンバス / 右=ライブラリ+レイヤ。左端境界の左右ドラッグで幅変更できる。
         let splitView = NSSplitView()
         splitView.isVertical = true
         splitView.dividerStyle = .thin
-        splitView.autosaveName = "MainSplit.v2"
+        splitView.identifier = NSUserInterfaceItemIdentifier("MainSplit")
         mainSplitView = splitView
         splitView.translatesAutoresizingMaskIntoConstraints = false
         splitView.addArrangedSubview(canvas)
         splitView.addArrangedSubview(rightPane)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 1)
-        rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 300).isActive = true
+        // サイドパネル幅を自由に変更できるよう最小幅は控えめにする（内容はツールチップ・省略表示で対応）
+        rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220).isActive = true
+        canvas.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        splitView.delegate = self
+        rightPane.delegate = self
         root.addSubview(toolbar)
         root.addSubview(splitView)
 
@@ -886,7 +896,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func saveGenerationFilter() {
-        let defaults = UserDefaults.standard
+        let defaults = AppSettings.shared
         for (category, button) in categoryFilterChecks {
             defaults.set(button.state == .on, forKey: "GenerateFilter.category.\(category.rawValue)")
         }
@@ -896,7 +906,7 @@ final class MosaicWindowController: NSObject {
 
     /// 保存済みの生成対象フィルタを復元する（未保存キーは既定ON）。
     private func loadGenerationFilter() {
-        let defaults = UserDefaults.standard
+        let defaults = AppSettings.shared
         for (category, button) in categoryFilterChecks {
             let key = "GenerateFilter.category.\(category.rawValue)"
             button.state = (defaults.object(forKey: key) as? Bool ?? true) ? .on : .off
@@ -905,14 +915,13 @@ final class MosaicWindowController: NSObject {
         generatePoseCheckbox.state = (defaults.object(forKey: "GenerateFilter.pose") as? Bool ?? true) ? .on : .off
     }
 
-    /// レイヤパネルの初期縦幅を「人物4人分」（グループ4+子8+固定2=14行×約24pt+見出し・ボタン≈430pt）に設定する。
-    /// 右ペインの高さが足りない場合はライブラリと半々。一度適用した後はユーザーのドラッグ調整（autosave）を尊重する。
+    /// 分割位置の適用。保存済みの位置（ポータブル設定）があれば復元し、なければ初回既定レイアウト
+    /// （レイヤパネル=人物4人分相当）を適用する。以後のドラッグ調整は `splitViewDidResizeSubviews` で保存される。
     func applyInitialLayoutIfNeeded() {
-        let appliedKey = "RightPaneDefaultLayoutApplied.v2"
-        guard !UserDefaults.standard.bool(forKey: appliedKey),
-              let rightPane = rightPaneSplitView,
-              let mainSplit = mainSplitView else { return }
+        guard let rightPane = rightPaneSplitView, let mainSplit = mainSplitView else { return }
         rightPane.layoutSubtreeIfNeeded()
+        mainSplit.layoutSubtreeIfNeeded()
+        if restoreSplitPositions() { return }
         let total = rightPane.bounds.height
         guard total > 520 else { return }
         let divider = rightPane.dividerThickness
@@ -920,10 +929,28 @@ final class MosaicWindowController: NSObject {
         let layerHeight = max(170, min(230, total * 0.30))
         rightPane.setPosition(libraryHeight, ofDividerAt: 0)
         rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
-        mainSplit.layoutSubtreeIfNeeded()
         let rightWidth = max(320, min(390, mainSplit.bounds.width * 0.34))
         mainSplit.setPosition(mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth, ofDividerAt: 0)
-        UserDefaults.standard.set(true, forKey: appliedKey)
+    }
+
+    /// 保存済みの分割位置（サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
+    private func restoreSplitPositions() -> Bool {
+        let settings = AppSettings.shared
+        guard let rightWidth = settings.object(forKey: "Layout.rightPaneWidth") as? Double,
+              let libraryHeight = settings.object(forKey: "Layout.libraryHeight") as? Double,
+              let layerHeight = settings.object(forKey: "Layout.layerHeight") as? Double,
+              let rightPane = rightPaneSplitView,
+              let mainSplit = mainSplitView,
+              rightWidth > 50, libraryHeight > 20, layerHeight > 20 else { return false }
+        isRestoringSplitPositions = true
+        mainSplit.setPosition(
+            max(200, mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth),
+            ofDividerAt: 0
+        )
+        rightPane.setPosition(libraryHeight, ofDividerAt: 0)
+        rightPane.setPosition(libraryHeight + rightPane.dividerThickness + layerHeight, ofDividerAt: 1)
+        isRestoringSplitPositions = false
+        return true
     }
 
     // MARK: - モザイク描画スタイル設定
@@ -1301,7 +1328,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func saveMosaicStyleSettings() {
-        let defaults = UserDefaults.standard
+        let defaults = AppSettings.shared
         let patterns = MosaicFillPattern.allCases
         let index = stylePatternPopUp.indexOfSelectedItem
         if (0..<patterns.count).contains(index) {
@@ -1324,7 +1351,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func loadMosaicStyleSettings() {
-        let defaults = UserDefaults.standard
+        let defaults = AppSettings.shared
         if let raw = defaults.string(forKey: "MosaicStyle.pattern"),
            let pattern = MosaicFillPattern(rawValue: raw),
            let index = MosaicFillPattern.allCases.firstIndex(of: pattern) {
@@ -1376,7 +1403,7 @@ final class MosaicWindowController: NSObject {
     /// 画像種別（自動判定/実写/イラスト・漫画）の手動指定。永続化され、次回の候補生成から適用される。
     @objc private func domainModeChanged() {
         let index = domainModeControl.indexOfSelectedItem
-        UserDefaults.standard.set(index, forKey: Self.domainModeDefaultsKey)
+        AppSettings.shared.set(index, forKey: Self.domainModeDefaultsKey)
         let labels = ["自動判定", "実写（固定）", "イラスト・漫画（固定）"]
         if (0..<labels.count).contains(index) {
             updateStatus("画像種別: \(labels[index])（次回の候補生成から適用）")
@@ -1386,7 +1413,7 @@ final class MosaicWindowController: NSObject {
     /// 鼠径部ROIの位置基準（腰0%〜膝100%の比率）を事前補正する。設定は永続化され、次回の候補生成から適用される。
     @objc private func groinPositionChanged() {
         let ratio = groinPositionSlider.doubleValue
-        UserDefaults.standard.set(ratio, forKey: Self.groinPositionDefaultsKey)
+        AppSettings.shared.set(ratio, forKey: Self.groinPositionDefaultsKey)
         groinPositionValueLabel.stringValue = "\(Int(ratio * 100))%"
         updateStatus("鼠径部位置の基準: 腰から膝方向へ\(Int(ratio * 100))%（次回の候補生成から適用）")
     }
@@ -2272,7 +2299,7 @@ final class MosaicWindowController: NSObject {
     @objc private func viewModeChanged() {
         guard let mode = LibraryViewMode(rawValue: viewModeControl.selectedSegment) else { return }
         libraryViewMode = mode
-        UserDefaults.standard.set(mode.rawValue, forKey: "LibraryView.mode")
+        AppSettings.shared.set(mode.rawValue, forKey: "LibraryView.mode")
         updateLibraryModeVisibility()
     }
 
@@ -2280,7 +2307,7 @@ final class MosaicWindowController: NSObject {
         guard let layout = collectionView.collectionViewLayout as? NSCollectionViewFlowLayout else { return }
         let size = CGFloat(thumbnailSizeSlider.doubleValue)
         layout.itemSize = libraryGridItemSize(size)
-        UserDefaults.standard.set(Double(size), forKey: "LibraryView.thumbnailSize")
+        AppSettings.shared.set(Double(size), forKey: "LibraryView.thumbnailSize")
         layout.invalidateLayout()
     }
 
@@ -2289,7 +2316,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func loadLibraryViewPreferences() {
-        let defaults = UserDefaults.standard
+        let defaults = AppSettings.shared
         if let mode = LibraryViewMode(rawValue: defaults.integer(forKey: "LibraryView.mode")) {
             libraryViewMode = mode
         }
@@ -2722,6 +2749,20 @@ extension MosaicWindowController: NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
         confirmCurrentChangesBeforeLeaving()
     }
+
+    /// ウィンドウ枠（位置・サイズ）をポータブル設定へ保存する。
+    func windowDidEndLiveResize(_ notification: Notification) {
+        saveWindowFrame(notification)
+    }
+
+    func windowDidMove(_ notification: Notification) {
+        saveWindowFrame(notification)
+    }
+
+    private func saveWindowFrame(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        AppSettings.shared.set(NSStringFromRect(window.frame), forKey: "Layout.windowFrame")
+    }
 }
 
 extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
@@ -2815,6 +2856,25 @@ extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDe
         MainActor.assumeIsolated {
             guard let indexPath = indexPaths.first, indexPath.item < libraryItems.count else { return }
             selectedLibraryItemID = libraryItems[indexPath.item].id
+        }
+    }
+}
+
+extension MosaicWindowController: NSSplitViewDelegate {
+    /// 分割位置の変更（境界ドラッグ・ウィンドウリサイズ）をポータブル設定へ保存する。
+    /// AppSettings側で0.3秒デバウンスされるためドラッグ中の多発書き込みは抑制される。
+    func splitViewDidResizeSubviews(_ notification: Notification) {
+        guard !isRestoringSplitPositions,
+              let rightPane = rightPaneSplitView,
+              let mainSplit = mainSplitView,
+              rightPane.bounds.height > 0, mainSplit.bounds.width > 0 else { return }
+        let settings = AppSettings.shared
+        if rightPane.arrangedSubviews.count >= 3 {
+            settings.set(Double(rightPane.arrangedSubviews[0].frame.height), forKey: "Layout.libraryHeight")
+            settings.set(Double(rightPane.arrangedSubviews[1].frame.height), forKey: "Layout.layerHeight")
+        }
+        if mainSplit.arrangedSubviews.count >= 2 {
+            settings.set(Double(mainSplit.arrangedSubviews[1].frame.width), forKey: "Layout.rightPaneWidth")
         }
     }
 }
@@ -3851,4 +3911,187 @@ final class ImageCanvasView: NSView {
             height: clipped.height / imageRect.height
         )
     }
+}
+
+/// アプリ設定のポータブル保存ストア。
+///
+/// Windowsアプリの `*.ini` に相当する設定ファイルとして、**アプリ（.app）と同じフォルダ**の
+/// `newMosaic_Settings/settings.json` へ全設定を保存する。アプリと設定フォルダをまとめて
+/// 移動・コピーすれば、他のPC環境でも同じ設定で動作する（ポータブル運用）。
+///
+/// - 保存先が書き込めない場合（/Applications 直下へ管理者権限なしで配置した場合等）は
+///   `~/Library/Application Support/newMosaic/Settings/settings.json` へフォールバックする。
+/// - 初回起動時（設定ファイル未作成）は、従来の UserDefaults に保存済みの既知キーを移行する。
+/// - APIは UserDefaults 互換（object/bool/integer/double/string/set）。
+@MainActor
+final class AppSettings {
+    static let shared = AppSettings()
+
+    private var values: [String: Any] = [:]
+    private let fileURL: URL
+    private var saveWorkItem: DispatchWorkItem?
+
+    /// 旧UserDefaultsから移行する既知キー（前方一致のプレフィックスも可）。
+    private static let migratedKeyPrefixes = [
+        "GroinPositionRatio", "DetectionDomainMode", "MosaicStyle.", "GenerateFilter.",
+        "LibraryView.", "RightPaneDefaultLayoutApplied"
+    ]
+
+    private init() {
+        let resolved = Self.resolveSettingsFileURL()
+        fileURL = resolved
+        if let data = try? Data(contentsOf: resolved),
+           let loaded = try? JSONSerialization.jsonObject(with: data) as? [String: Any] {
+            values = loaded
+        } else {
+            migrateFromUserDefaults()
+            persistNow()
+        }
+    }
+
+    /// 設定ファイルの場所を決める。第一候補はアプリ本体と同じフォルダ（ポータブル）。
+    static func resolveSettingsFileURL() -> URL {
+        let portableDirectory = portableSettingsDirectory()
+        if isWritableDirectory(portableDirectory) {
+            return portableDirectory.appendingPathComponent("settings.json")
+        }
+        // フォールバック: Application Support（従来のアプリデータ領域）
+        let support = (try? FileManager.default.url(
+            for: .applicationSupportDirectory,
+            in: .userDomainMask,
+            appropriateFor: nil,
+            create: true
+        )) ?? FileManager.default.temporaryDirectory
+        let directory = support.appendingPathComponent("newMosaic/Settings")
+        try? FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+        return directory.appendingPathComponent("settings.json")
+    }
+
+    /// アプリ本体（.app）と同じフォルダの `newMosaic_Settings`。swift run 等の非バンドル実行では
+    /// 実行ファイルのあるフォルダを基準にする。
+    static func portableSettingsDirectory() -> URL {
+        let bundleURL = Bundle.main.bundleURL
+        let baseDirectory: URL
+        if bundleURL.pathExtension == "app" {
+            baseDirectory = bundleURL.deletingLastPathComponent()
+        } else {
+            let executable = Bundle.main.executableURL
+                ?? URL(fileURLWithPath: CommandLine.arguments[0])
+            baseDirectory = executable.deletingLastPathComponent()
+        }
+        return baseDirectory.appendingPathComponent("newMosaic_Settings")
+    }
+
+    private static func isWritableDirectory(_ directory: URL) -> Bool {
+        let manager = FileManager.default
+        var isDirectory: ObjCBool = false
+        if !manager.fileExists(atPath: directory.path, isDirectory: &isDirectory) {
+            do {
+                try manager.createDirectory(at: directory, withIntermediateDirectories: true)
+            } catch {
+                return false
+            }
+        } else if !isDirectory.boolValue {
+            return false
+        }
+        // 実際に書けるかをプローブファイルで確認する（リムーバブル・読み取り専用ボリューム対策）
+        let probe = directory.appendingPathComponent(".write_probe")
+        guard manager.createFile(atPath: probe.path, contents: Data()) else { return false }
+        try? manager.removeItem(at: probe)
+        return true
+    }
+
+    private func migrateFromUserDefaults() {
+        let defaults = UserDefaults.standard.dictionaryRepresentation()
+        for (key, value) in defaults {
+            guard Self.migratedKeyPrefixes.contains(where: { key.hasPrefix($0) }) else { continue }
+            guard JSONSerialization.isValidJSONObject([key: value]) else { continue }
+            values[key] = value
+        }
+    }
+
+    // MARK: - UserDefaults互換API
+
+    func object(forKey key: String) -> Any? {
+        values[key]
+    }
+
+    func bool(forKey key: String) -> Bool {
+        values[key] as? Bool ?? (values[key] as? NSNumber)?.boolValue ?? false
+    }
+
+    func integer(forKey key: String) -> Int {
+        values[key] as? Int ?? (values[key] as? NSNumber)?.intValue ?? 0
+    }
+
+    func double(forKey key: String) -> Double {
+        values[key] as? Double ?? (values[key] as? NSNumber)?.doubleValue ?? 0
+    }
+
+    func string(forKey key: String) -> String? {
+        values[key] as? String
+    }
+
+    func set(_ value: Bool, forKey key: String) {
+        values[key] = value
+        scheduleSave()
+    }
+
+    func set(_ value: Int, forKey key: String) {
+        values[key] = value
+        scheduleSave()
+    }
+
+    func set(_ value: Double, forKey key: String) {
+        values[key] = value
+        scheduleSave()
+    }
+
+    func set(_ value: Any?, forKey key: String) {
+        if let value, JSONSerialization.isValidJSONObject([key: value]) {
+            values[key] = value
+        } else if let string = value as? String {
+            values[key] = string
+        } else if value == nil {
+            values.removeValue(forKey: key)
+        }
+        scheduleSave()
+    }
+
+    func removeObject(forKey key: String) {
+        values.removeValue(forKey: key)
+        scheduleSave()
+    }
+
+    // MARK: - 保存
+
+    /// 連続変更（スライダードラッグ・分割ドラッグ等）で書き込みが多発しないよう0.3秒デバウンスする。
+    private func scheduleSave() {
+        saveWorkItem?.cancel()
+        let workItem = DispatchWorkItem { [weak self] in
+            Task { @MainActor in
+                self?.persistNow()
+            }
+        }
+        saveWorkItem = workItem
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3, execute: workItem)
+    }
+
+    func persistNow() {
+        saveWorkItem?.cancel()
+        saveWorkItem = nil
+        guard JSONSerialization.isValidJSONObject(values),
+              let data = try? JSONSerialization.data(
+                  withJSONObject: values,
+                  options: [.prettyPrinted, .sortedKeys]
+              ) else { return }
+        try? FileManager.default.createDirectory(
+            at: fileURL.deletingLastPathComponent(),
+            withIntermediateDirectories: true
+        )
+        try? data.write(to: fileURL, options: .atomic)
+    }
+
+    /// 現在の設定ファイルの場所（ステータス表示・診断用）。
+    var settingsFileLocation: URL { fileURL }
 }
