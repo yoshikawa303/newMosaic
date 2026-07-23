@@ -428,6 +428,42 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func animePoseEstimatorDecodesSimCCPeaks() {
+    // SimCC復号: ワンホットのピーク位置がビン/2の座標として復号されることを検証する
+    let keypointCount = 2
+    let xBins = 8
+    let yBins = 10
+    var simccX = [Float](repeating: 0, count: keypointCount * xBins)
+    var simccY = [Float](repeating: 0, count: keypointCount * yBins)
+    simccX[0 * xBins + 6] = 0.9
+    simccY[0 * yBins + 4] = 0.8
+    simccX[1 * xBins + 2] = 0.1
+    simccY[1 * yBins + 1] = 0.1
+
+    let decoded = AnimePoseEstimator.decodeSimCC(
+        simccX: simccX,
+        simccY: simccY,
+        keypointCount: keypointCount
+    )
+
+    #expect(decoded.count == 2)
+    #expect(decoded[0].x == 3.0)
+    #expect(decoded[0].y == 2.0)
+    #expect(abs(decoded[0].score - 0.85) < 0.001)
+    #expect(abs(decoded[1].score - 0.1) < 0.001)
+}
+
+@Test func animePoseEstimatorLoadsModelAndRunsOnPlainImage() throws {
+    // DWPoseモデルのロードと推論実行のスモークテスト（単色画像では低スコアで関節なしのはず）
+    let estimator = try AnimePoseEstimator()
+    let image = try makeSolidImage(width: 320, height: 400)
+    let persons = [PersonDetection(bounds: NormalizedRect(x: 0.1, y: 0.1, width: 0.6, height: 0.8))]
+
+    let hints = try estimator.estimatePose(in: image, persons: persons)
+
+    #expect(hints.count == 1)
+}
+
 @Test func animeSegmenterLoadsModelAndReturnsFullSizeMask() throws {
     // アニメセグメンテーションのロードと推論実行のスモークテスト（マスクが元画像サイズで返ること）
     let segmenter = try AnimeSegmenter()

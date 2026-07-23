@@ -162,6 +162,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
     private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
     private lazy var domainModelClassifier: DomainModelClassifier? = try? DomainModelClassifier()
     private lazy var animeSegmenter: AnimeSegmenter? = try? AnimeSegmenter()
+    private lazy var animePoseEstimator: AnimePoseEstimator? = try? AnimePoseEstimator()
 
     func run(_ input: CandidateGenerationInput) throws -> CandidateGenerationOutput {
         var detectorFailures: [String] = []
@@ -218,8 +219,22 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
                 }
             }
-            let hints = personsWithMasks.map { PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: []) }
-            snapshot = DetectionSnapshot(persons: personsWithMasks, poseHints: hints, rois: [])
+            // アニメ骨格検出（DWPose）。関節が取れた人物は骨格レイヤ+骨格ベースの候補ROIも生成する
+            let hints: [PoseHint]
+            if let poseEstimator = animePoseEstimator,
+               let estimated = try? poseEstimator.estimatePose(in: input.image, persons: personsWithMasks) {
+                hints = estimated
+            } else {
+                hints = personsWithMasks.map {
+                    PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: [])
+                }
+            }
+            let generator = SensitiveROIGenerator(groinPositionRatio: input.groinPositionRatio)
+            let priorROIs = generator.generateROIs(
+                from: hints,
+                imageSize: CGSize(width: input.image.width, height: input.image.height)
+            )
+            snapshot = DetectionSnapshot(persons: personsWithMasks, poseHints: hints, rois: priorROIs)
         } else {
             let generator = SensitiveROIGenerator(groinPositionRatio: input.groinPositionRatio)
             snapshot = try StaticImageMosaicPipeline(roiGenerator: generator)
