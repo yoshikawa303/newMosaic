@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00001 - Build 71 - 2026-07-24
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: 「初期化」を実行しても右サイドパネルの幅（ライブラリ2列表示相当への既定化）が実際には反映されない不具合を修正した。
+- バグ修正: アプリを終了すると、直前の設定変更（ウィンドウ枠・分割位置など）が保存されないまま失われることがある不具合を修正した。
+
+■更新履歴
+
+- `applyInitialLayoutIfNeeded()` の「保存値が無い場合の既定レイアウト」処理で、右ペイン幅の反映に使う `NSSplitView.setPosition(_:ofDividerAt:)` のdivider indexが常に`0`固定になっていた。左ペインが既定で非表示の状態では、divider 0は「（非表示の）左ペイン/キャンバス」の境界であり、右ペイン幅には一切影響しない（無効な操作）ため、実質的に右ペイン幅の既定化が機能していなかった。`mainSplit.arrangedSubviews.count - 2`（＝最後のdivider、キャンバス/右ペインの境界）へ修正。他のsetPosition呼び出し箇所（`restoreSplitPositions()`・`applyPaneWidth()`・`applyPanelAssignments()`のBuild 65対策）は元々この規約で実装済みだったため、影響はこの1箇所のみ。
+- `AppDelegate.applicationShouldTerminate` で `AppSettings.shared.persistNow()` を明示的に呼び出すよう変更。`AppSettings` は連続書き込み対策として0.3秒デバウンスして保存するため、変更直後にアプリを終了すると、保存タイマーが発火する前にプロセスが終了し、直前の変更（ウィンドウ枠・分割位置等）がディスクへ書き込まれないまま失われることがあった。
+
 ## v0.0.00001 - Build 70 - 2026-07-24
 
 ■更新履歴（Readme / ChangeLog 用）

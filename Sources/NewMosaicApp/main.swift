@@ -52,7 +52,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        controller.confirmCurrentChangesBeforeLeaving() ? .terminateNow : .terminateCancel
+        guard controller.confirmCurrentChangesBeforeLeaving() else { return .terminateCancel }
+        // AppSettingsは連続書き込み対策で0.3秒デバウンスしているため、その待機中に終了すると
+        // 直前の変更（ウィンドウ枠・分割位置等）が保存されないまま失われることがあった。
+        // 終了直前に必ず同期保存する。
+        AppSettings.shared.persistNow()
+        return .terminateNow
     }
 
     private static func windowTitle() -> String {
@@ -1459,7 +1464,14 @@ final class MosaicWindowController: NSObject {
         rightPane.setPosition(libraryHeight, ofDividerAt: 0)
         rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
         let rightWidth = libraryTwoColumnPaneWidth()
-        mainSplit.setPosition(mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth, ofDividerAt: 0)
+        // 右ペインの境界は「左ペイン/キャンバス/右ペイン」3ビュー中の最後のdivider
+        // （arrangedSubviews.count - 2）。固定の0を使うと、既定で非表示の左ペインと
+        // キャンバスの境界（無効化される）を動かすだけで右ペイン幅に反映されず、
+        // 「初期化してもレイアウトが変わらない」不具合の原因になっていた。
+        mainSplit.setPosition(
+            mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth,
+            ofDividerAt: mainSplit.arrangedSubviews.count - 2
+        )
     }
 
     /// 保存済みの分割位置（左右サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
