@@ -428,6 +428,18 @@ import Testing
     #expect(output.height == 60)
 }
 
+@Test func overlayAssetCatalogLoadsAllBuiltinAssets() {
+    // 同梱素材6種がすべて読み込めること・識別子解決が機能することを検証する
+    #expect(OverlayAssetCatalog.assets.count == 6)
+    for asset in OverlayAssetCatalog.assets {
+        let image = OverlayAssetCatalog.image(for: asset.identifier)
+        #expect(image != nil, "素材が読み込めない: \(asset.resourceName)")
+        #expect((image?.width ?? 0) > 0)
+    }
+    #expect(OverlayAssetCatalog.image(for: "builtin:unknown") == nil)
+    #expect(OverlayAssetCatalog.image(for: "not-builtin") == nil)
+}
+
 @Test func overlayImagePatternCoversROIWithAccessoryImage() throws {
     // かぶせ画像: 赤い元画像の右半分ROIへ緑画像をかぶせると、右半分が緑・左半分は元のままになる
     let image = try makeSolidImage(width: 100, height: 60, color: .systemRed)

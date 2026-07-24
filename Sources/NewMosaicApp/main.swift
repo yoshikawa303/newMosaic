@@ -1,4 +1,5 @@
 import AppKit
+import ImageIO
 import MosaicCore
 import UniformTypeIdentifiers
 
@@ -1480,7 +1481,51 @@ final class MosaicWindowController: NSObject {
     }
 
     /// 任意パターン画像を選択し、ライブラリ配下へコピーして永続化する。
+    /// パターン画像ボタン: 同梱素材（SNS向け）のメニューを表示する。
     @objc private func choosePatternImage() {
+        let menu = NSMenu()
+        let header = NSMenuItem(title: "同梱素材（SNS向け）", action: nil, keyEquivalent: "")
+        header.isEnabled = false
+        menu.addItem(header)
+        for asset in OverlayAssetCatalog.assets {
+            let item = NSMenuItem(
+                title: "\(asset.displayName)（\(asset.suggestedCategory.displayName)向け）",
+                action: #selector(selectBuiltinOverlay(_:)),
+                keyEquivalent: ""
+            )
+            item.target = self
+            item.representedObject = asset.identifier
+            if let image = OverlayAssetCatalog.image(for: asset.identifier) {
+                let preview = NSImage(cgImage: image, size: NSSize(width: 40, height: 40 * CGFloat(image.height) / CGFloat(image.width)))
+                item.image = preview
+            }
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let fileItem = NSMenuItem(title: "ファイルから選択...", action: #selector(choosePatternImageFromFile), keyEquivalent: "")
+        fileItem.target = self
+        menu.addItem(fileItem)
+        menu.popUp(
+            positioning: nil,
+            at: NSPoint(x: 0, y: stylePatternImageButton.bounds.height + 4),
+            in: stylePatternImageButton
+        )
+    }
+
+    /// 同梱素材をパターン画像として選択する。
+    @objc private func selectBuiltinOverlay(_ sender: NSMenuItem) {
+        guard let identifier = sender.representedObject as? String,
+              let image = OverlayAssetCatalog.image(for: identifier),
+              let asset = OverlayAssetCatalog.assets.first(where: { $0.identifier == identifier }) else { return }
+        customPatternImage = image
+        customPatternImageIdentifier = identifier
+        patternImageCache[identifier] = image
+        stylePatternImageLabel.stringValue = asset.displayName
+        updateCustomPatternPreview(image)
+        mosaicStyleChanged()
+    }
+
+    @objc private func choosePatternImageFromFile() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
         panel.allowsMultipleSelection = false
@@ -1502,6 +1547,11 @@ final class MosaicWindowController: NSObject {
 
     private func patternImage(for identifier: String) -> CGImage? {
         if let cached = patternImageCache[identifier] { return cached }
+        if identifier.hasPrefix(OverlayAssetCatalog.identifierPrefix) {
+            guard let image = OverlayAssetCatalog.image(for: identifier) else { return nil }
+            patternImageCache[identifier] = image
+            return image
+        }
         let url: URL?
         if identifier == "legacy" {
             url = try? FileManager.default.url(
@@ -2091,7 +2141,12 @@ final class MosaicWindowController: NSObject {
                         rois: rois,
                         style: config.style,
                         segmentEngine: makeSegmentEngine(),
-                        patternImageProvider: { _ in nil }
+                        patternImageProvider: { identifier in
+                            if let builtin = OverlayAssetCatalog.image(for: identifier) { return builtin }
+                            let url = config.library.patternURL(identifier: identifier)
+                            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+                            return CGImageSourceCreateImageAtIndex(source, 0, nil)
+                        }
                     )
                     _ = try config.library.saveProcessedImage(result, rois: rois, for: item.id)
                     processed += 1

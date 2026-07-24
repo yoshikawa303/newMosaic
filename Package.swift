@@ -33,7 +33,9 @@ let package = Package(
                 // skytnt/anime-seg isnetis (Apache-2.0 License)
                 .copy("Resources/anime_seg.onnx"),
                 // yzd-v/DWPose dw-ll_ucoco_384 (Apache-2.0 License)
-                .copy("Resources/anime_pose.onnx")
+                .copy("Resources/anime_pose.onnx"),
+                // 同梱かぶせ画像素材（自前ベクター生成: scripts/generate_overlay_assets.swift）
+                .copy("Resources/Overlays")
             ],
             linkerSettings: [
                 .linkedFramework("AppKit"),
