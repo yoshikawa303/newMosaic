@@ -3791,6 +3791,38 @@ final class ImageCanvasView: NSView {
 
     override var isFlipped: Bool { true }
 
+    // MARK: - カーソル表示（操作に応じて分かりやすいカーソルへ変更）
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        for area in trackingAreas {
+            removeTrackingArea(area)
+        }
+        addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseMoved, .mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        ))
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        guard image != nil, rightPanState == nil, moveState == nil, resizeState == nil else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        let imageRect = imageDrawRect()
+        if roiHit(at: point, imageRect: imageRect) != nil {
+            NSCursor.openHand.set()
+        } else if imageRect.contains(point) {
+            NSCursor.crosshair.set()
+        } else {
+            NSCursor.arrow.set()
+        }
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
     func setImage(_ cgImage: CGImage) {
         image = NSImage(cgImage: cgImage, size: NSSize(width: cgImage.width, height: cgImage.height))
         imagePixelSize = CGSize(width: cgImage.width, height: cgImage.height)
@@ -3813,14 +3845,52 @@ final class ImageCanvasView: NSView {
         setZoom(zoomFactor * (1 + event.magnification))
     }
 
+    /// ホイール上下回転=画像の拡大縮小。トラックパッドの2本指スクロールは従来どおりパン。
     override func scrollWheel(with event: NSEvent) {
-        guard zoomFactor > 1.001 else {
-            super.scrollWheel(with: event)
+        if event.hasPreciseScrollingDeltas {
+            guard zoomFactor > 1.001 else {
+                super.scrollWheel(with: event)
+                return
+            }
+            panOffset.x -= event.scrollingDeltaX
+            panOffset.y -= event.scrollingDeltaY
+            needsDisplay = true
             return
         }
-        panOffset.x -= event.scrollingDeltaX
-        panOffset.y -= event.scrollingDeltaY
+        let delta = event.scrollingDeltaY
+        guard abs(delta) > 0.01 else { return }
+        setZoom(zoomFactor * (delta > 0 ? 1.1 : 1 / 1.1))
+    }
+
+    // MARK: - 右ボタンドラッグによる全体移動と右クリックメニュー
+
+    private var rightPanState: (last: NSPoint, moved: Bool)?
+
+    override func rightMouseDown(with event: NSEvent) {
+        guard image != nil else { return }
+        rightPanState = (convert(event.locationInWindow, from: nil), false)
+    }
+
+    override func rightMouseDragged(with event: NSEvent) {
+        guard var state = rightPanState else { return }
+        let point = convert(event.locationInWindow, from: nil)
+        panOffset.x += point.x - state.last.x
+        panOffset.y += point.y - state.last.y
+        state.last = point
+        state.moved = true
+        rightPanState = state
+        NSCursor.closedHand.set()
         needsDisplay = true
+    }
+
+    override func rightMouseUp(with event: NSEvent) {
+        let moved = rightPanState?.moved ?? false
+        rightPanState = nil
+        NSCursor.crosshair.set()
+        // ドラッグせず右クリックした場合のみ従来のカテゴリ変更メニューを表示する
+        if !moved, let menu = menu(for: event) {
+            NSMenu.popUpContextMenu(menu, with: event, for: self)
+        }
     }
 
     /// 表示画像を破棄してプレースホルダ表示に戻す（ライブラリから表示中画像を削除した場合など）。
@@ -4183,6 +4253,7 @@ final class ImageCanvasView: NSView {
             rois[index].rect = rect
             move.lastPoint = point
             moveState = move
+            NSCursor.closedHand.set()
             return
         }
 
