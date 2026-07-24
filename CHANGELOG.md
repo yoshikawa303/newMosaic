@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.0.00001 - Build 63 - 2026-07-24
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: サイドパネル（左右）の幅がまったく調整できない不具合を修正した。Auto Layoutの必須幅制約とNSSplitViewの独自ドラッグ処理が競合し、ドラッグ後すぐに元の幅へ戻されていたのが原因。NSSplitViewDelegateのconstrainMinCoordinate/constrainMaxCoordinateで最小・最大幅を与える方式へ変更した。
+- 新機能: ファイルメニューに「設定」を追加した。詳細設定（アイコンサイズを小/中/大で変更可能）、プロジェクト（最近保存したプロジェクトを最大10件まで表示し選択で読込）、保存（現在のモザイクスタイル・レイアウト・検出設定などのアプリ設定状態をプロジェクトファイルへ書き出し）、読込（プロジェクトファイルから設定状態を復元）、初期化（確認ダイアログの上ですべてのアプリ設定を既定値へ戻す。ライブラリの画像・ROIは対象外）。
+- 改善: 「画像を書き出す」を「画像出力」に名称統一した（メニュー・ツールバーとも）。ウィンドウ本体のリニューアルは別途対応予定。
+
+■更新履歴
+
+- `NSSplitView` の境界ドラッグ範囲をAuto Layoutの`greaterThanOrEqualToConstant`ではなく`NSSplitViewDelegate`の`constrainMinCoordinate(ofSubviewAt:)`/`constrainMaxCoordinate(ofSubviewAt:)`で算出する方式へ変更（隣接ビューの現在フレーム＋最小幅から計算。非表示ペインはスキップ）。
+- `AppSettings` へ `exportSnapshot()`/`importSnapshot(_:)`/`resetAll()` を追加し、全設定値のJSONスナップショットをプロジェクトファイル（`.newmosaicproj`）として保存/読込できるようにした。
+- 「最近のプロジェクト」は`NSMenuDelegate.menuNeedsUpdate`でメニューを開く直前に再構築（最大10件、同一パスは重複排除）。
+- 詳細設定ウィンドウを新設し、アイコンサイズ変更を実装。SF Symbolsの`SymbolConfiguration(pointSize:)`とボタンの幅/高さ制約を動的に差し替えることで、ツールバーアイコンの見た目サイズを即座に変更できる。
+
 ## v0.0.00001 - Build 62 - 2026-07-24
 
 ■更新履歴（Readme / ChangeLog 用）

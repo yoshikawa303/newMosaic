@@ -78,8 +78,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(menuItem("画像を開く…", action: "openImage", key: "o", target: target))
         fileMenu.addItem(menuItem("クリップボードから読み込む", action: "pasteImage", key: "v", target: target))
         fileMenu.addItem(.separator())
-        fileMenu.addItem(menuItem("書き出す…", action: "saveImage", key: "s", target: target))
+        fileMenu.addItem(menuItem("画像出力…", action: "exportImage", key: "s", target: target))
         fileMenu.addItem(menuItem("ライブラリをFinderで表示", action: "revealLibrary", key: "", target: target))
+        fileMenu.addItem(.separator())
+
+        let settingsItem = NSMenuItem(title: "設定", action: nil, keyEquivalent: "")
+        let settingsMenu = NSMenu(title: "設定")
+        settingsMenu.addItem(menuItem("詳細設定…", action: "showAdvancedSettings", key: "", target: target))
+        let projectItem = NSMenuItem(title: "プロジェクト", action: nil, keyEquivalent: "")
+        let projectMenu = NSMenu(title: "プロジェクト")
+        projectMenu.delegate = target
+        projectItem.submenu = projectMenu
+        settingsMenu.addItem(projectItem)
+        settingsMenu.addItem(.separator())
+        settingsMenu.addItem(menuItem("保存…", action: "saveProject", key: "", target: target))
+        settingsMenu.addItem(menuItem("読込…", action: "loadProject", key: "", target: target))
+        settingsMenu.addItem(.separator())
+        settingsMenu.addItem(menuItem("初期化…", action: "resetAllSettings", key: "", target: target))
+        settingsItem.submenu = settingsMenu
+        fileMenu.addItem(settingsItem)
         fileItem.submenu = fileMenu
 
         let editItem = NSMenuItem()
@@ -678,6 +695,18 @@ final class MosaicWindowController: NSObject {
     // 下部ステータス兼ヘルプバー
     private let statsLabel = NSTextField(labelWithString: "")
     private var hoverRelays: [HoverHelpRelay] = []
+    // ツールバーアイコンボタン（詳細設定のアイコンサイズ変更で一括リサイズするために保持）
+    private var toolbarIconButtons: [NSButton] = []
+    private var advancedSettingsWindow: NSWindow?
+    private let iconSizeControl = NSSegmentedControl(
+        labels: ["小", "中", "大"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+    private static let iconSizeDefaultsKey = "AdvancedSettings.iconSize"
+    private static let recentProjectsDefaultsKey = "RecentProjects"
+    private static let projectFileExtension = "newmosaicproj"
     private var lastStatusText = ""
     private var batchCancelRequested = false
     private var batchPanel: NSPanel?
@@ -688,7 +717,6 @@ final class MosaicWindowController: NSObject {
         case library, layers, inspector
     }
     private var sidePanels: [SidePanelKind: NSView] = [:]
-    private var paneMinWidthConstraints: [NSLayoutConstraint] = []
     private var isLoadingMosaicStyleControls = false
     private var defaultMosaicStyle = MosaicStyle()
     private var discardedEditStateID: UUID?
@@ -716,7 +744,7 @@ final class MosaicWindowController: NSObject {
         undoButton.keyEquivalentModifierMask = [.command]
         redoButton.keyEquivalent = "z"
         redoButton.keyEquivalentModifierMask = [.command, .shift]
-        let saveButton = makeToolbarButton(symbol: "square.and.arrow.down", help: "画像を書き出す (⌘S)", action: #selector(saveImage))
+        let saveButton = makeToolbarButton(symbol: "square.and.arrow.down", help: "画像出力 (⌘S)", action: #selector(exportImage))
         let linkFolderButton = makeToolbarButton(symbol: "folder.badge.plus", help: "フォルダを一括登録（リンク）", action: #selector(registerFolderAsLinks))
         let repairLinksButton = makeToolbarButton(symbol: "link.badge.plus", help: "リンク切れを修正", action: #selector(repairBrokenLinksAction))
         let batchButton = makeToolbarButton(symbol: "bolt.circle", help: "一括処理（未加工の画像を候補生成→適用→保存）", action: #selector(batchProcessAll))
@@ -808,12 +836,11 @@ final class MosaicWindowController: NSObject {
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 2)
-        // サイドパネル幅を自由に変更できるよう最小幅は控えめにする（内容はツールチップ・省略表示で対応）
-        let leftMin = leftPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220)
-        let rightMin = rightPane.widthAnchor.constraint(greaterThanOrEqualToConstant: 220)
-        paneMinWidthConstraints = [leftMin, rightMin]
-        rightMin.isActive = true
-        canvas.widthAnchor.constraint(greaterThanOrEqualToConstant: 200).isActive = true
+        // 最小幅はAuto LayoutのwidthAnchor制約ではなく、NSSplitViewDelegateの
+        // constrainMinCoordinate/constrainMaxCoordinateで与える（下記delegate実装参照）。
+        // Auto Layoutの必須制約とNSSplitViewの独自フレーム操作を併用すると、
+        // 制約解決時にドラッグ後のフレームが即座に元へ戻され「境界がまったく動かせない」
+        // 不具合につながるため（サイドパネル幅バグの原因）。
         splitView.delegate = self
         leftPane.delegate = self
         rightPane.delegate = self
@@ -1099,10 +1126,6 @@ final class MosaicWindowController: NSObject {
         let rightEmpty = rightPane.arrangedSubviews.isEmpty
         leftPane.isHidden = leftEmpty
         rightPane.isHidden = rightEmpty
-        if paneMinWidthConstraints.count == 2 {
-            paneMinWidthConstraints[0].isActive = !leftEmpty
-            paneMinWidthConstraints[1].isActive = !rightEmpty
-        }
         mainSplitView?.adjustSubviews()
     }
 
@@ -1178,10 +1201,9 @@ final class MosaicWindowController: NSObject {
 
     private func configureToolbarButton(_ button: NSButton, symbol: String, help: String, action: Selector) {
         button.title = ""
-        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: help)
+        button.identifier = NSUserInterfaceItemIdentifier(symbol)
         button.imagePosition = .imageOnly
         button.bezelStyle = .texturedRounded
-        button.controlSize = .large
         button.toolTip = help
         // ホバー中は下部ステータスバーへヘルプ文を表示する
         let relay = HoverHelpRelay(text: help) { [weak self] text in
@@ -1198,8 +1220,45 @@ final class MosaicWindowController: NSObject {
         button.target = self
         button.action = action
         button.translatesAutoresizingMaskIntoConstraints = false
-        button.widthAnchor.constraint(equalToConstant: 32).isActive = true
-        button.heightAnchor.constraint(equalToConstant: 30).isActive = true
+        toolbarIconButtons.append(button)
+        applyIconSize(to: button, symbol: symbol)
+    }
+
+    /// 詳細設定「アイコンサイズ」に応じてツールバーアイコンの見た目サイズを変更する。
+    /// SF Symbolの実描画サイズはSymbolConfigurationのpointSizeで制御し、
+    /// ボタン自体のフレームサイズもwidthAnchor/heightAnchor制約で追従させる
+    /// （固定サイズ制約のままだとアイコンサイズ設定を変えても見た目が変化しないため）。
+    private func applyIconSize(to button: NSButton, symbol: String) {
+        let size = Self.currentIconSizeSetting()
+        let pointSize: CGFloat
+        let frameSize: CGFloat
+        switch size {
+        case 0: pointSize = 12; frameSize = 24
+        case 2: pointSize = 18; frameSize = 40
+        default: pointSize = 15; frameSize = 32
+        }
+        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+        button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.toolTip)?
+            .withSymbolConfiguration(configuration)
+        button.controlSize = size == 2 ? .large : (size == 0 ? .small : .regular)
+        for constraint in button.constraints where constraint.firstAttribute == .width || constraint.firstAttribute == .height {
+            constraint.isActive = false
+        }
+        button.widthAnchor.constraint(equalToConstant: frameSize).isActive = true
+        button.heightAnchor.constraint(equalToConstant: frameSize - 2).isActive = true
+    }
+
+    private static func currentIconSizeSetting() -> Int {
+        let value = AppSettings.shared.integer(forKey: iconSizeDefaultsKey)
+        return (0...2).contains(value) ? value : 2
+    }
+
+    /// 詳細設定でアイコンサイズが変更されたとき、既存の全ツールバーボタンへ即座に反映する。
+    private func applyIconSizeToAllToolbarButtons() {
+        for button in toolbarIconButtons {
+            guard let identifier = button.identifier?.rawValue else { continue }
+            applyIconSize(to: button, symbol: identifier)
+        }
     }
 
     private func makeToolbarSeparator() -> NSView {
@@ -2731,7 +2790,7 @@ final class MosaicWindowController: NSObject {
         redoButton.isEnabled = !redoStack.isEmpty
     }
 
-    @objc private func saveImage() {
+    @objc private func exportImage() {
         guard let loadedImage else {
             updateStatus("保存する画像がありません")
             return
@@ -3446,6 +3505,201 @@ extension MosaicWindowController: NSWindowDelegate {
     }
 }
 
+// MARK: - 詳細設定・プロジェクト（保存/読込/初期化）
+
+extension MosaicWindowController: NSMenuDelegate {
+    /// ファイル＞設定＞プロジェクト の最近のプロジェクト一覧（最大10件）を、開く直前に再構築する。
+    func menuNeedsUpdate(_ menu: NSMenu) {
+        guard menu.title == "プロジェクト" else { return }
+        menu.removeAllItems()
+        let recents = Self.loadRecentProjects()
+        if recents.isEmpty {
+            let empty = NSMenuItem(title: "最近保存されたプロジェクトはありません", action: nil, keyEquivalent: "")
+            empty.isEnabled = false
+            menu.addItem(empty)
+            return
+        }
+        for recent in recents {
+            let item = NSMenuItem(title: recent.name, action: #selector(loadRecentProject(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = recent.path
+            item.toolTip = recent.path
+            menu.addItem(item)
+        }
+    }
+}
+
+extension MosaicWindowController {
+    private struct RecentProject {
+        var path: String
+        var name: String
+    }
+
+    private static func loadRecentProjects() -> [RecentProject] {
+        guard let raw = AppSettings.shared.object(forKey: recentProjectsDefaultsKey) as? [[String: String]] else {
+            return []
+        }
+        return raw.compactMap { entry in
+            guard let path = entry["path"], let name = entry["name"] else { return nil }
+            return RecentProject(path: path, name: name)
+        }
+    }
+
+    /// 保存/読込のたびに「最近のプロジェクト」の先頭へ追加し、同一パスの重複を除いて最大10件に切り詰める。
+    private func addRecentProject(path: String, name: String) {
+        var recents = Self.loadRecentProjects().filter { $0.path != path }
+        recents.insert(RecentProject(path: path, name: name), at: 0)
+        if recents.count > 10 {
+            recents.removeLast(recents.count - 10)
+        }
+        AppSettings.shared.set(recents.map { ["path": $0.path, "name": $0.name] }, forKey: Self.recentProjectsDefaultsKey)
+    }
+
+    // MARK: プロジェクトファイルの保存/読込
+
+    /// 現在のアプリ設定状態（モザイクスタイル・レイアウト・検出設定等の全AppSettings値）を
+    /// プロジェクトファイル（JSON, .newmosaicproj）へ書き出す。
+    @objc func saveProject() {
+        let panel = NSSavePanel()
+        panel.title = "プロジェクトを保存"
+        panel.nameFieldStringValue = "newMosaic Project"
+        if let utType = UTType(filenameExtension: Self.projectFileExtension) {
+            panel.allowedContentTypes = [utType]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let snapshot = AppSettings.shared.exportSnapshot()
+            guard JSONSerialization.isValidJSONObject(snapshot) else {
+                throw CocoaError(.propertyListWriteInvalid)
+            }
+            let data = try JSONSerialization.data(withJSONObject: snapshot, options: [.prettyPrinted, .sortedKeys])
+            try data.write(to: url, options: .atomic)
+            addRecentProject(path: url.path, name: url.deletingPathExtension().lastPathComponent)
+            updateStatus("プロジェクトを保存しました: \(url.lastPathComponent)")
+        } catch {
+            showError(error)
+        }
+    }
+
+    /// プロジェクトファイルを選択して読み込む。
+    @objc func loadProject() {
+        let panel = NSOpenPanel()
+        panel.title = "プロジェクトを読込"
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        if let utType = UTType(filenameExtension: Self.projectFileExtension) {
+            panel.allowedContentTypes = [utType]
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        loadProject(from: url)
+    }
+
+    @objc private func loadRecentProject(_ sender: NSMenuItem) {
+        guard let path = sender.representedObject as? String else { return }
+        loadProject(from: URL(fileURLWithPath: path))
+    }
+
+    private func loadProject(from url: URL) {
+        do {
+            let data = try Data(contentsOf: url)
+            guard let snapshot = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                throw CocoaError(.fileReadCorruptFile, userInfo: [
+                    NSLocalizedDescriptionKey: "プロジェクトファイルの形式が不正です"
+                ])
+            }
+            AppSettings.shared.importSnapshot(snapshot)
+            refreshAllUIFromSettings()
+            addRecentProject(path: url.path, name: url.deletingPathExtension().lastPathComponent)
+            updateStatus("プロジェクトを読み込みました: \(url.lastPathComponent)")
+        } catch {
+            showError(error)
+        }
+    }
+
+    /// すべてのアプリ設定を初期化する（確認ダイアログ付き）。ライブラリの画像・ROIは対象外。
+    @objc func resetAllSettings() {
+        let alert = NSAlert()
+        alert.messageText = "すべての設定を初期化しますか？"
+        alert.informativeText = "モザイクスタイル、レイアウト、検出設定などのアプリ設定がすべて既定値に戻ります。ライブラリの画像やROIは削除されません。この操作は取り消せません。"
+        alert.addButton(withTitle: "初期化")
+        alert.addButton(withTitle: "キャンセル")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        AppSettings.shared.resetAll()
+        refreshAllUIFromSettings()
+        updateStatus("すべての設定を初期化しました")
+    }
+
+    /// 設定の読込・初期化後に、画面上の全コントロールをAppSettingsの現在値へ再同期する。
+    private func refreshAllUIFromSettings() {
+        let savedDomainMode = AppSettings.shared.integer(forKey: Self.domainModeDefaultsKey)
+        domainModeControl.selectItem(at: (0...2).contains(savedDomainMode) ? savedDomainMode : 0)
+        let savedRatio = AppSettings.shared.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
+        groinPositionSlider.doubleValue = savedRatio
+        groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100)) %"
+        loadGenerationFilter()
+        loadMosaicStyleSettings()
+        loadLibraryViewPreferences()
+        applyPanelAssignments()
+        _ = restoreSplitPositions()
+        applyIconSizeToAllToolbarButtons()
+        iconSizeControl.selectedSegment = Self.currentIconSizeSetting()
+        reloadLibrary()
+    }
+
+    // MARK: 詳細設定ウィンドウ
+
+    @objc func showAdvancedSettings() {
+        if let window = advancedSettingsWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        iconSizeControl.selectedSegment = Self.currentIconSizeSetting()
+        iconSizeControl.target = self
+        iconSizeControl.action = #selector(iconSizeChanged)
+        iconSizeControl.toolTip = "ツールバーアイコンの表示サイズ"
+
+        let iconSizeRow = inspectorRow("アイコンサイズ", control: iconSizeControl)
+        let settingsPathLabel = NSTextField(labelWithString: "設定ファイル: \(AppSettings.shared.settingsFileLocation.path)")
+        settingsPathLabel.font = .systemFont(ofSize: 10)
+        settingsPathLabel.textColor = .secondaryLabelColor
+        settingsPathLabel.lineBreakMode = .byTruncatingMiddle
+        settingsPathLabel.maximumNumberOfLines = 2
+
+        let content = NSStackView(views: [iconSizeRow, settingsPathLabel])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 12
+        content.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 380, height: 130),
+            styleMask: [.titled, .closable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "詳細設定"
+        let container = NSView()
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: container.topAnchor),
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            content.bottomAnchor.constraint(lessThanOrEqualTo: container.bottomAnchor)
+        ])
+        window.contentView = container
+        window.center()
+        advancedSettingsWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func iconSizeChanged() {
+        AppSettings.shared.set(iconSizeControl.selectedSegment, forKey: Self.iconSizeDefaultsKey)
+        applyIconSizeToAllToolbarButtons()
+    }
+}
+
 extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
     nonisolated func numberOfRows(in tableView: NSTableView) -> Int {
         MainActor.assumeIsolated { libraryItems.count }
@@ -3546,6 +3800,34 @@ extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDe
 }
 
 extension MosaicWindowController: NSSplitViewDelegate {
+    /// mainSplitView（左ペイン/キャンバス/右ペイン）の境界ドラッグ範囲を、隣接ビューの
+    /// 現在フレーム＋最小幅から算出する。Auto Layoutの必須制約でNSSplitViewの
+    /// フレーム操作と競合させない（サイドパネル幅がまったく動かせないバグの修正）。
+    func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        guard splitView === mainSplitView else { return proposedMinimumPosition }
+        let subviews = splitView.arrangedSubviews
+        guard dividerIndex >= 0, dividerIndex < subviews.count else { return proposedMinimumPosition }
+        let leadingView = subviews[dividerIndex]
+        guard !leadingView.isHidden else { return proposedMinimumPosition }
+        let minWidth: CGFloat = leadingView === canvas ? 200 : 160
+        return leadingView.frame.minX + minWidth
+    }
+
+    func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        guard splitView === mainSplitView else { return proposedMaximumPosition }
+        let subviews = splitView.arrangedSubviews
+        guard dividerIndex + 1 >= 0, dividerIndex + 1 < subviews.count else { return proposedMaximumPosition }
+        let trailingView = subviews[dividerIndex + 1]
+        guard !trailingView.isHidden else { return proposedMaximumPosition }
+        let minWidth: CGFloat = trailingView === canvas ? 200 : 160
+        return trailingView.frame.maxX - minWidth
+    }
+
+    /// サイドパネルはドラッグで完全に折りたためない（幅0への収縮は「◀▶」移動で行う仕様のため）。
+    func splitView(_ splitView: NSSplitView, canCollapseSubview subview: NSView) -> Bool {
+        false
+    }
+
     /// 分割位置の変更（境界ドラッグ・ウィンドウリサイズ）をポータブル設定へ保存する。
     /// AppSettings側で0.3秒デバウンスされるためドラッグ中の多発書き込みは抑制される。
     func splitViewDidResizeSubviews(_ notification: Notification) {
@@ -4854,4 +5136,23 @@ final class AppSettings {
 
     /// 現在の設定ファイルの場所（ステータス表示・診断用）。
     var settingsFileLocation: URL { fileURL }
+
+    // MARK: - プロジェクトファイル（設定スナップショットの保存/読込）・初期化
+
+    /// 現在の全設定値のスナップショット（プロジェクトファイル書き出し用）。
+    func exportSnapshot() -> [String: Any] {
+        values
+    }
+
+    /// スナップショットで全設定値を置き換える（プロジェクトファイル読込用）。
+    func importSnapshot(_ snapshot: [String: Any]) {
+        values = snapshot
+        persistNow()
+    }
+
+    /// すべての設定を初期化する（次回起動時に既定値で再構築される）。
+    func resetAll() {
+        values = [:]
+        persistNow()
+    }
 }

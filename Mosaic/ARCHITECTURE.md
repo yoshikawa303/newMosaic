@@ -148,6 +148,14 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 
 - 全アプリ設定は `AppSettings`（UserDefaults互換API）が、**アプリ本体と同じフォルダ**の `newMosaic_Settings/settings.json` へJSON保存する（Windowsの*.ini相当）。アプリ+設定フォルダをまとめて移動すれば他PCでも同じ設定で動作する。保存先が書き込めない場合は `Application Support/newMosaic/Settings/` へ自動フォールバック。既存UserDefaults設定は初回起動時に自動移行（Build 51）。モデルキャッシュのマーカーは機種ローカル情報のためUserDefaultsのまま。
 - メイン分割は「左ペイン/キャンバス/右ペイン」。各ウィンドウ（ライブラリ/レイヤ/モザイク設定）は右上の「◀」「▶」で左右のサイドパネルへ移動でき、配置（`Layout.panelSide.*`）・ペイン幅・ペイン内分割位置・ウィンドウ枠はすべて `Layout.*` キーで保存・復元される（Build 51〜52）。空ペインは自動で畳む。
+- **サイドパネル幅のドラッグ**（Build 63〜）: `mainSplitView` の境界ドラッグ可能範囲は `NSSplitViewDelegate` の `constrainMinCoordinate`/`constrainMaxCoordinate` で算出する（隣接ビューの現在フレーム＋最小幅）。Auto Layoutの `greaterThanOrEqualToConstant` 必須制約を併用するとNSSplitViewの独自フレーム操作と競合し、ドラッグ直後に元の幅へ戻される（「幅がまったく調整できない」不具合の原因だった）ため、幅制約は使わずdelegateのみで制御する。
+
+## 5.14 プロジェクトファイルと詳細設定
+
+- ファイル＞設定＞「保存」/「読込」は `AppSettings.exportSnapshot()`/`importSnapshot(_:)` で全設定値（モザイクスタイル・レイアウト・検出設定・ライブラリ表示・アイコンサイズ等の `AppSettings` に保存されているすべてのキー）をJSONファイル（`.newmosaicproj`）として書き出し/読み込みする。読込後は `refreshAllUIFromSettings()` で画面上の全コントロールを再同期する。
+- 「プロジェクト」サブメニューは最近保存/読込したプロジェクトを最大10件（同一パスは重複排除）表示し、`NSMenuDelegate.menuNeedsUpdate` でメニューを開く直前に再構築する。
+- 「初期化」は確認ダイアログの上で `AppSettings.resetAll()`（全設定値を空にして次回起動時の既定値に戻す）を実行し、その場でUIへ反映する。ライブラリの画像・ROI（`LibraryEngine` 管理下）は対象外。
+- 「詳細設定」ウィンドウは現状アイコンサイズ（小/中/大）のみを持つ。ツールバーアイコンはSF Symbolsの `SymbolConfiguration(pointSize:)` とボタンの幅/高さ制約を動的に差し替えて見た目サイズを変更する。
 
 ## 5.13 フォルダ一括登録（リンク）と一括処理
 
