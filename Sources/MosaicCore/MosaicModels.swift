@@ -192,6 +192,9 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var polygonPoints: [NormalizedPoint]?
     /// nilの場合は画面全体のモザイク設定を使用する。
     public var style: MosaicROIStyle?
+    /// レイヤパネルのROI選択リスト上でのグループ名。同じ値のROIが1つのグループにまとまる。
+    /// nilは未グループ化（フラット表示）。
+    public var roiGroupName: String?
 
     /// 多角形の既定形状（矩形に内接する六角形。上頂点から時計回り）
     public static let defaultPolygonPoints: [NormalizedPoint] = (0..<6).map { index in
@@ -208,7 +211,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         category: MosaicTargetCategory = .other,
         rotation: Double = 0,
         polygonPoints: [NormalizedPoint]? = nil,
-        style: MosaicROIStyle? = nil
+        style: MosaicROIStyle? = nil,
+        roiGroupName: String? = nil
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -219,10 +223,11 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.rotation = rotation
         self.polygonPoints = polygonPoints
         self.style = style
+        self.roiGroupName = roiGroupName
     }
 
     private enum CodingKeys: String, CodingKey {
-        case id, rect, confidence, source, shape, category, rotation, polygonPoints, style
+        case id, rect, confidence, source, shape, category, rotation, polygonPoints, style, roiGroupName
     }
 
     public init(from decoder: Decoder) throws {
@@ -236,6 +241,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         rotation = try container.decodeIfPresent(Double.self, forKey: .rotation) ?? 0
         polygonPoints = try container.decodeIfPresent([NormalizedPoint].self, forKey: .polygonPoints)
         style = try container.decodeIfPresent(MosaicROIStyle.self, forKey: .style)
+        roiGroupName = try container.decodeIfPresent(String.self, forKey: .roiGroupName)
     }
 }
 

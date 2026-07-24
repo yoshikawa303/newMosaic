@@ -193,6 +193,35 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **ヘルプ＞ショートカット一覧**: 先頭に「よく使うおすすめショートカット」（`isRecommended`）、続けて分類ごとにグループ表示する。テンキー割当があれば併記する。
 - **Build 67でのコードレビュー修正**: 「モザイクを適用」（ライブラリへの保存を伴う）が、ツールチップに表示されないまま裸のReturnキー（修飾キーなし）に割り当てられていた。誤操作でライブラリを上書きしうる状態だったため、⌘Return（Command+Return）へ変更し、ツールバーのツールチップにも表示されるよう修正した。
 
+## 5.17 バージョン表示方式（2026-07-25〜）
+
+- 従来の `v<MARKETING_VERSION> (beta Build <CURRENT_PROJECT_VERSION>)` という2つの版数を併記する方式を廃止し、`MARKETING_VERSION`（`0.0.00000`形式の末尾5桁）だけをコード修正ごとにインクリメントするrunning単一カウンタへ一本化した。`CFBundleVersion` は内部的に同じ数値へ同期するが、UI（ウィンドウタイトル等）には表示しない。表示は `v0.0.00075` のように `v<MARKETING_VERSION>` のみ。
+
+## 5.18 デバッグログ（ヘルプ＞デバッグ＞デバッグログ、2026-07-25〜）
+
+- アプリ独自の永続ログファイルは持たず、macOS Unified Logging（`os.Logger`）へ出力する。`enum AppLog`（`Sources/NewMosaicApp/main.swift`）が subsystem `com.yoshikawa.newMosaic`（MosaicCore側のVision検出診断ログ§5.2と同一subsystem）で category `UI`/`Library`/`Export`/`Project` のロガーを提供する。記録対象はアプリ起動・エラーダイアログ表示・一括処理結果・画像出力成否・プロジェクト読込成否・設定初期化などのイベントのみで、画像内容やファイルパス（ファイル名を除く）、ROI座標は記録しない。
+- 「ヘルプ＞デバッグ＞デバッグログ」ウィンドウ（`showDebugLogWindow()`）は `OSLogStore(scope: .currentProcessIdentifier)` で自プロセスの直近1時間分を取得し、上記4カテゴリとVision検出診断（`Detection`）をまとめて時刻順に一覧表示する。「更新」で再取得、「書き出し…」でテキストファイルへ保存できる（不具合報告時にログを共有しやすくする目的）。
+
+## 5.19 ROI選択リストのグループ化（2026-07-25〜）
+
+- `MosaicROI.roiGroupName: String?`（Codable、後方互換。旧JSONはnilとして読込）を追加し、同じ値を持つROIをレイヤ一覧のROI選択リスト上で1つのグループにまとめる。`ROIListGroup`（表示専用、`[ROIListEntry]`を保持）を新設し、`NSOutlineViewDataSource` の `.roi` リーフ配下を「グループ」＋「未グループ行」の二段構成へ拡張した。
+- 既存の「グループ化」ボタン（`groupSelectedLayers()`）は、人物検出/骨格検出などの `LayerLeaf` 選択のみを対象としており、ROI選択リストの行（`ROIListEntry`。目元・乳首等）を複数選択して押しても常に無反応だった（型が異なり `as? LayerLeaf` に失敗するため）。ROI選択リスト側の選択も検出して `roiGroupName` を設定するよう修正し、レイヤ一覧の右クリックメニュー（`attachLayerContextMenu()`）からも「グループ化」（既存グループが混在する場合は「再グループ化」と表示）・「グループ解除」を実行できるようにした。
+
+## 5.20 画像上のレイヤ選択同期・Command+ドラッグコピー（2026-07-25〜）
+
+- `ImageCanvasView.selectedDetectionLayer`（`fileprivate`、`LayerKind?`）を追加。レイヤ一覧で人物検出/骨格検出レイヤの行を選択すると（`outlineViewSelectionDidChange`経由）、画像上の対応する矩形へ強調枠（`drawSelectedLayerHighlight(_:)`、アクセントカラーの太枠）を表示する。ROI選択リスト（`ROIListEntry`）は元から双方向同期済み（`syncROIListSelectionFromCanvas()`/`outlineViewSelectionDidChange`）。
+- 画像上のROIをCommandキーを押しながらドラッグすると、ドラッグ開始時にROIを複製（新規UUID）してから移動する（Finderのオプションドラッグ相当。`ImageCanvasView.mouseDown`）。元のROIはその場に残る。
+
+## 5.21 モザイクスタイル関連の細部修正（2026-07-25〜）
+
+- **かぶせ画像の巻き添え不具合**: `MosaicEngine.applyMosaic` は、`requiresPatternImage` なパターンで画像が未解決の場合に即例外を投げる仕様のため、ライブプレビュー（`toggleMosaicPreview`/`resumeMosaicPreviewIfNeeded`）で1件でも未設定のROIがあると、他の設定対象でないレイヤのプレビューまで丸ごと解除されていた（例外で`mosaicPreviewCheckbox`がOFFになる）。`applyMosaic` に `skipIncompletePatterns: Bool = false` を追加し、プレビュー2箇所のみ `true` を渡して該当ROIだけスキップするよう変更（「モザイクを適用」の最終書き出しは従来通り厳格に例外を投げ、未設定のまま保存させない）。
+- **パターン画像候補のレイヤタグ連動**: `choosePatternImage()` が、編集中ROIの `category` と一致する同梱素材（`OverlayAssetCatalog`）を「〜向けの素材」として先頭にまとめ、それ以外は「その他の同梱素材」として下にまとめるよう変更。
+- **ノイズパターンのモノクロ化**: `CIRandomGenerator` はRGB各chが独立乱数でカラーノイズになるため、`CIColorControls(saturation: 0)` を追加してモノクロへ統一。プレビューアイコンは実エンジンを呼んで生成しているため自動的に追従する。
+- **パターン選択のタイル表示化**: `stylePatternPopUp`（NSPopUpButton）は状態保持用として非表示のまま残し、UIは `makePatternTileGrid()` が生成するプレビューアイコンのタイル（1行4個、`patternTileButtons`）へ置き換えた。選択状態のハイライトは `updateMosaicStyleControlAvailability()` 内の `refreshPatternTileSelectionHighlight()` で同期し、各タイルはホバー時に `HoverHelpRelay` 経由でステータスバーへヘルプ文（パターン名）を表示する。
+- **インスペクタ幅追従の修正**: モザイク詳細設定の7種のスライダー（透明度・細かさ・輪郭ぼかし・帯の太さ/間隔・雲の密度・鼠径部位置）に `lessThanOrEqualToConstant: 220` の必須最大幅制約を追加し、サイドパネルを広げても際限なく伸びないようにした。`styleRowLabel(_:)` を新設し、`styleGrid`（NSGridView）のラベル列の最小幅を `inspectorRow` と同じ78ptへ統一して左マージンのズレを解消した。
+- **ツールバーアイコンの選択枠**: `configureToolbarButton` に `focusRingType = .none` を追加。フォーカスリングが `.shadowlessSquare` の実フレームへ正しく追従せず横長に見えていた不具合を解消した。
+- **マスク生成の名称変更**: `SegmentEngineKind.displayName` を一般名称へ変更（図形（矩形/楕円）／人物の輪郭（AI自動認識）／物体の輪郭（自動抽出）／対象形状。最後の「対象形状」は「対象の形状（ROI内前景）」から短縮）。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

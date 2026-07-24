@@ -1,5 +1,39 @@
 # Changelog
 
+## v0.0.00075 - 2026-07-25
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 改善: バージョン表示方式を変更した。従来の `v0.0.00001 (beta Build N)` 表示を廃止し、以後は `v0.0.00075` のようにバージョン番号の末尾だけをリリース毎にインクリメントして管理する。
+- 新機能: ヘルプ＞デバッグ＞デバッグログを追加した。アプリ内で発生したイベント（起動・エラー・一括処理結果・画像出力・プロジェクト読込等）とVision検出診断ログを、その場で一覧表示・書き出しできる。
+- バグ修正: ツールバーのアイコン枠が、フォーカスリングの影響でアイコン形状に沿った正方形にならない不具合を修正した。
+- バグ修正: サイドパネル幅を広げると、鼠径部位置スライダーやモザイクパターン詳細設定のスライダー・数値表示が際限なく広がる不具合を修正した。
+- バグ修正: モザイク詳細設定の各項目の左マージンが、他の設定項目と異なりサイドパネル幅に応じてズレる不具合を修正した。
+- 改善: モザイクパターンの選択を、プルダウンメニューからプレビューアイコンのタイル表示へ変更した。各タイルにマウスを乗せるとフローティングヘルプ（ツールチップ）が表示される。
+- 改善: マスク生成の「対象の形状（ROI内前景）」を「対象形状」に短縮し、他の項目名もより分かりやすい一般名称へ変更した（図形／人物の輪郭（AI自動認識）／物体の輪郭（自動抽出）／対象形状）。
+- バグ修正: レイヤ一覧でROI選択リストの行（目元・乳首等）を複数選択して「グループ化」しても常に無反応だった不具合を修正した。ROIのグループ化に対応し、右クリックメニューからも操作できるようにした。
+- 改善: レイヤ一覧で人物検出/骨格検出レイヤの行を選択すると、画像上の対応する領域に強調枠を表示するようにした。
+- 新機能: レイヤ一覧の右クリックメニューに「グループ化」（対象に応じて「再グループ化」表示）・「グループ解除」を追加した。
+- 新機能: 画像上のROI（レイヤ）をCommandキーを押しながらドラッグすると、コピーを作成しながら移動できるようにした。
+- バグ修正: 「かぶせ画像」パターンを選択した際、画像未選択のROIが1件あるだけで、他の設定対象でないレイヤのモザイク表示まで巻き添えで解除されてしまう不具合を修正した。
+- 改善: パターン画像（かぶせ画像）の選択候補を、編集中レイヤのカテゴリに応じて優先的に表示するようにした。
+- バグ修正: モザイク＞ノイズパターンがカラーノイズになっていた不具合を修正し、モノクロノイズへ変更した（プレビューアイコンも連動して修正）。
+
+■更新履歴
+
+- `CLAUDE.md` の運用ルールを更新し、`MARKETING_VERSION` 末尾を単一のrunning版数として管理する方式へ変更（`CFBundleVersion` は内部的に同期するがUI非表示）。`AppDelegate.windowTitle()` から `(beta Build N)` 表示を削除。
+- `enum AppLog`（`Sources/NewMosaicApp/main.swift`）を新設し、`os.Logger`（subsystem `com.yoshikawa.newMosaic`、MosaicCore側のVision検出診断と統一）でUI/Library/Export/Projectの主要イベントを記録。`showDebugLogWindow()` が `OSLogStore(scope: .currentProcessIdentifier)` で直近1時間分を取得し一覧表示・テキスト書き出しする。
+- `configureToolbarButton` に `focusRingType = .none` を追加。フォーカスリングが`.shadowlessSquare`の実フレームに追従せず横長に見える不具合の真因だった。
+- モザイク詳細設定のスライダー（`styleOpacitySlider`等7種）に `lessThanOrEqualToConstant: 220` の必須最大幅制約を追加。`styleRowLabel(_:)` を新設し、`styleGrid`（NSGridView）のラベル列を `inspectorRow` と同じ最小幅78ptへ統一。
+- `MosaicROI` に `roiGroupName: String?` を追加（Codable、後方互換）。`ROIListGroup` クラスを新設し、レイヤ一覧のROI選択リストをグループ表示できるように`NSOutlineViewDataSource`を拡張。`groupSelectedLayers()`/`ungroupSelectedGroup()` がROI選択リストの選択も処理するよう修正。
+- `layerOutlineView.menu` に`NSMenuDelegate`ベースの右クリックメニューを追加（`attachLayerContextMenu()`/`updateLayerContextMenu(_:)`）。既存の「プロジェクト」最近項目用`menuNeedsUpdate`実装へ分岐を追加する形で統合。
+- `ImageCanvasView.selectedDetectionLayer`（`fileprivate`、`LayerKind?`）を追加し、`outlineViewSelectionDidChange`で人物/骨格レイヤの選択を同期。`drawSelectedLayerHighlight(_:)` で強調枠を描画。
+- `ImageCanvasView.mouseDown`のROIヒット時、`event.modifierFlags.contains(.command)`でROIを複製してから`moveState`を新IDに切り替える方式でCommand+ドラッグコピーを実装。
+- `MosaicEngine.applyMosaic` に `skipIncompletePatterns: Bool = false` パラメータを追加。`true`時は画像未選択のROIをエラーにせずスキップする（プレビュー2箇所のみ有効化。「モザイクを適用」の最終書き出しは従来通り厳格にエラーとする）。
+- `choosePatternImage()` を、選択中ROIのカテゴリに一致する素材を先頭にまとめる方式へ変更。
+- `MosaicEngine.makeFillLayer`の`.noise`ケースに`CIColorControls(saturation: 0)`を追加しモノクロ化。
+- `stylePatternPopUp`（NSPopUpButton）を状態保持用に非表示化し、`makePatternTileGrid()`によるプレビューアイコンタイル（`patternTileButtons`）をUIとして使用。選択状態は`updateMosaicStyleControlAvailability()`内の`refreshPatternTileSelectionHighlight()`で同期。
+
 ## v0.0.00001 - Build 74 - 2026-07-25
 
 ■更新履歴（Readme / ChangeLog 用）

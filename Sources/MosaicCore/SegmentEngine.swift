@@ -20,10 +20,10 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
 
     public var displayName: String {
         switch self {
-        case .shape: return "図形ベース（矩形/楕円）"
-        case .visionPersonSegmentation: return "Vision人物セグメンテーション"
-        case .foregroundObjects: return "前景オブジェクト"
-        case .regionForeground: return "対象の形状（ROI内前景）"
+        case .shape: return "図形（矩形/楕円）"
+        case .visionPersonSegmentation: return "人物の輪郭（AI自動認識）"
+        case .foregroundObjects: return "物体の輪郭（自動抽出）"
+        case .regionForeground: return "対象形状"
         }
     }
 }

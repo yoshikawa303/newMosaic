@@ -185,7 +185,8 @@ public final class MosaicEngine {
         rois: [MosaicROI],
         style: MosaicStyle,
         segmentEngine: Segmenting = ShapeSegmentEngine(),
-        patternImageProvider: ((String) -> CGImage?)? = nil
+        patternImageProvider: ((String) -> CGImage?)? = nil,
+        skipIncompletePatterns: Bool = false
     ) throws -> CGImage {
         let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
         var output = CIImage(cgImage: image)
@@ -206,6 +207,10 @@ public final class MosaicEngine {
                 resolvedStyle.patternImage = style.patternImage
             }
             if resolvedStyle.pattern.requiresPatternImage, resolvedStyle.patternImage == nil {
+                // skipIncompletePatterns=true（ライブプレビュー用途）では、画像未選択のROI1件のために
+                // 他の全ROIの表示まで失敗させず、そのROIだけ元画像のまま（未加工）でスキップする。
+                // 「モザイクを適用」等の最終書き出しでは従来通り例外を投げ、未設定のまま保存させない。
+                if skipIncompletePatterns { continue }
                 throw MosaicEngineError.customPatternImageMissing(resolvedStyle.patternImageIdentifier)
             }
 
@@ -379,10 +384,13 @@ public final class MosaicEngine {
                 .applyingFilter("CIPixellate", parameters: [kCIInputScaleKey: max(4, style.blockScale)])
                 .cropped(to: extent)
         case .noise:
+            // CIRandomGeneratorはRGB各chが独立乱数のためカラーノイズになる。
+            // 彩度を0にしてモノクロノイズへ統一する。
             let noise = CIFilter(name: "CIRandomGenerator")?.outputImage ?? CIImage(color: .gray)
             let granularity = max(1, style.blockScale / 4)
             fill = noise
                 .transformed(by: CGAffineTransform(scaleX: granularity, y: granularity))
+                .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
                 .cropped(to: extent)
         case .blur:
             fill = original

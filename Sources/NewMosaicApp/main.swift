@@ -1,7 +1,20 @@
 import AppKit
 import ImageIO
 import MosaicCore
+import OSLog
 import UniformTypeIdentifiers
+
+/// アプリ側（NewMosaicApp）のUnified Loggingラッパー。`MosaicCore`側の検出診断ログ
+/// （subsystem `com.yoshikawa.newMosaic`、category `Detection`）と同一subsystemで統一し、
+/// ヘルプ＞デバッグ＞デバッグログ画面から両方をまとめて参照できるようにする。
+/// 画像内容・ファイルパス・個人情報は記録しない（エラー種別・件数等のみ）。
+enum AppLog {
+    private static let subsystem = "com.yoshikawa.newMosaic"
+    static let ui = Logger(subsystem: subsystem, category: "UI")
+    static let library = Logger(subsystem: subsystem, category: "Library")
+    static let export = Logger(subsystem: subsystem, category: "Export")
+    static let project = Logger(subsystem: subsystem, category: "Project")
+}
 
 @main
 final class NewMosaicApplication {
@@ -20,6 +33,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let controller = MosaicWindowController()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        AppLog.ui.info("applicationDidFinishLaunching: \(Self.windowTitle(), privacy: .public)")
         let window = NSWindow(
             contentRect: NSRect(x: 0, y: 0, width: 1100, height: 760),
             styleMask: [.titled, .closable, .miniaturizable, .resizable],
@@ -63,8 +77,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private static func windowTitle() -> String {
         let info = Bundle.main.infoDictionary
         let marketingVersion = info?["CFBundleShortVersionString"] as? String ?? "0.0.00000"
-        let buildVersion = info?["CFBundleVersion"] as? String ?? "0"
-        return "newMosaic v\(marketingVersion) (beta Build \(buildVersion))"
+        return "newMosaic v\(marketingVersion)"
     }
 
     private func installMainMenu(target: MosaicWindowController) {
@@ -141,6 +154,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(helpItem)
         let helpMenu = NSMenu(title: "ヘルプ")
         helpMenu.addItem(menuItem("ショートカット一覧…", action: "showShortcutsWindow", key: "", target: target))
+        helpMenu.addItem(.separator())
+        let debugItem = NSMenuItem(title: "デバッグ", action: nil, keyEquivalent: "")
+        let debugMenu = NSMenu(title: "デバッグ")
+        debugMenu.addItem(menuItem("デバッグログ…", action: "showDebugLogWindow", key: "", target: target))
+        debugItem.submenu = debugMenu
+        helpMenu.addItem(debugItem)
         helpItem.submenu = helpMenu
         NSApp.helpMenu = helpMenu
 
@@ -475,6 +494,18 @@ private final class ROIListEntry {
     }
 }
 
+/// ROI選択リストのグループ（`MosaicROI.roiGroupName` が同じROIをまとめたもの）。
+@MainActor
+private final class ROIListGroup {
+    var name: String
+    var children: [ROIListEntry]
+
+    init(name: String, children: [ROIListEntry]) {
+        self.name = name
+        self.children = children
+    }
+}
+
 @MainActor
 private final class LayerGroup {
     var name: String
@@ -686,7 +717,10 @@ final class MosaicWindowController: NSObject {
     // モザイク描画スタイル設定（右側インスペクタへ常設。選択ROIごとに個別保持）
     private let selectedLayerStyleLabel = NSTextField(labelWithString: "既定設定（新規レイヤ）")
     private let applyStyleToAllButton = NSButton(title: "全レイヤへ適用", target: nil, action: nil)
+    /// パターン選択の実体（状態保持用）。UI表示はタイル（`patternTileButtons`）へ置き換えたため非表示。
     private let stylePatternPopUp = NSPopUpButton(title: "", target: nil, action: nil)
+    /// パターン選択のプレビューアイコンタイル（`MosaicFillPattern.allCases` と同順）。
+    private var patternTileButtons: [NSButton] = []
     private let styleOpacitySlider = NSSlider(value: 1.0, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
     private let styleOpacityValueLabel = NSTextField(labelWithString: "100%")
     private let styleTintCheckbox = NSButton(checkboxWithTitle: "色を付ける", target: nil, action: nil)
@@ -713,8 +747,13 @@ final class MosaicWindowController: NSObject {
     ]
     private var layerGroups: [LayerGroup] = []
     private var layerGroupCounter = 0
-    /// レイヤパネル「モザイク対象」配下のROI選択リスト（同一カテゴリ名は連番付き）
+    /// レイヤパネル「モザイク対象」配下のROI選択リスト（同一カテゴリ名は連番付き。フラット・全件）
     private var roiListEntries: [ROIListEntry] = []
+    /// ROI選択リストのグループ（`MosaicROI.roiGroupName` 単位）。表示順に構築する。
+    private var roiListGroups: [ROIListGroup] = []
+    /// どのグループにも属さないROI選択リスト行（表示順）。
+    private var ungroupedROIEntries: [ROIListEntry] = []
+    private var roiGroupCounter = 0
     private var roiListSignature: [String] = []
     private var isSyncingROISelection = false
     private var loadedImage: LoadedImage?
@@ -876,6 +915,8 @@ final class MosaicWindowController: NSObject {
     private var numpadEventMonitor: Any?
     private var shortcutsWindow: NSWindow?
     private var numpadAssignmentWindow: NSWindow?
+    private var debugLogWindow: NSWindow?
+    private var debugLogTextView: NSTextView?
 
     /// アプリ内の全ショートカット対応操作の一覧（唯一の情報源）。
     /// メニュー構築・ツールバーのツールチップ・ヘルプ＞ショートカット一覧・
@@ -1585,6 +1626,12 @@ final class MosaicWindowController: NSObject {
         // ボタンの実フレームいっぱいに矩形ハイライトを描くため、どのサイズでも正しく追従する。
         button.bezelStyle = .shadowlessSquare
         button.isBordered = true
+        // NSButtonのフォーカスリングは.shadowlessRoundedベースの既定形状で描画され、
+        // ボタンをconstraintで正方形フレームへ拡大しても追従せず、横長に潰れて
+        // アイコン形状と合わない不具合があった。フォーカスリングを無効化し、
+        // bezelStyle自体が描くボタン枠いっぱいのハイライト（ライブラリ下部の
+        // アイコンと同一のconfigureToolbarButton経由で既に正しく見えている）のみに統一する。
+        button.focusRingType = .none
         button.toolTip = help
         // ホバー中は下部ステータスバーへヘルプ文を表示する
         let relay = HoverHelpRelay(text: help) { [weak self] text in
@@ -1728,15 +1775,21 @@ final class MosaicWindowController: NSObject {
         stylePatternPopUp.target = self
         stylePatternPopUp.action = #selector(mosaicStyleChanged)
         stylePatternPopUp.toolTip = "選択レイヤの塗りつぶしパターン"
-        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider] {
+        stylePatternPopUp.isHidden = true
+        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider, groinPositionSlider] {
             slider.target = self
-            slider.action = #selector(mosaicStyleChanged)
             slider.translatesAutoresizingMaskIntoConstraints = false
-            // 固定幅にするとサイドパネルを狭められないため、希望幅160(低優先)+最小80で圧縮可能にする
+            // 固定幅にするとサイドパネルを狭められないため、希望幅160(低優先)+最小80で圧縮可能にする。
+            // 上限が無いとサイドパネルを広げた際にスライダーだけ際限なく伸びてしまう不具合が
+            // あったため、最大幅も必須制約で明示する。
             let preferred = slider.widthAnchor.constraint(equalToConstant: 160)
             preferred.priority = NSLayoutConstraint.Priority(400)
             preferred.isActive = true
             slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+            slider.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
+        }
+        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider] {
+            slider.action = #selector(mosaicStyleChanged)
         }
         // 設定値ラベルは固定幅+等幅数字+右寄せ（ドラッグ中に幅が変わってスライダーが左右にずれるのを防ぐ）
         for label in [styleOpacityValueLabel, styleBlockScaleValueLabel, styleFeatherValueLabel,
@@ -1768,6 +1821,72 @@ final class MosaicWindowController: NSObject {
         selectedLayerStyleLabel.textColor = .secondaryLabelColor
         selectedLayerStyleLabel.lineBreakMode = .byTruncatingMiddle
         applyStyleToAllButton.toolTip = "現在の設定をすべてのモザイクレイヤへ複製"
+    }
+
+    /// モザイクパターン選択を、プレビューアイコンのタイル表示（1行4個で折り返し）で構築する。
+    /// 実際の選択状態は非表示の `stylePatternPopUp` を引き続き使い（他コードとの整合維持）、
+    /// タイルはそれを操作する見た目だけの表現とする。
+    private func makePatternTileGrid() -> NSView {
+        let columns = 4
+        let patterns = MosaicFillPattern.allCases
+        patternTileButtons = patterns.map { pattern in
+            let button = NSButton()
+            button.title = ""
+            button.image = makePatternPreviewImage(pattern)
+            button.imagePosition = .imageOnly
+            button.bezelStyle = .shadowlessSquare
+            button.isBordered = true
+            button.focusRingType = .none
+            button.wantsLayer = true
+            button.translatesAutoresizingMaskIntoConstraints = false
+            button.widthAnchor.constraint(equalToConstant: 44).isActive = true
+            button.heightAnchor.constraint(equalToConstant: 34).isActive = true
+            button.target = self
+            button.action = #selector(patternTileClicked(_:))
+            button.tag = MosaicFillPattern.allCases.firstIndex(of: pattern) ?? 0
+            button.toolTip = pattern.displayName
+            let relay = HoverHelpRelay(text: pattern.displayName) { [weak self] text in
+                self?.showHoverHelp(text)
+            }
+            hoverRelays.append(relay)
+            button.addTrackingArea(NSTrackingArea(
+                rect: .zero,
+                options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+                owner: relay,
+                userInfo: nil
+            ))
+            return button
+        }
+        let rows = stride(from: 0, to: patternTileButtons.count, by: columns).map { start in
+            Array(patternTileButtons[start..<min(start + columns, patternTileButtons.count)])
+        }
+        let rowStacks = rows.map { row -> NSStackView in
+            let stack = NSStackView(views: row)
+            stack.orientation = .horizontal
+            stack.spacing = 6
+            stack.alignment = .centerY
+            return stack
+        }
+        let grid = NSStackView(views: rowStacks)
+        grid.orientation = .vertical
+        grid.spacing = 6
+        grid.alignment = .leading
+        return grid
+    }
+
+    @objc private func patternTileClicked(_ sender: NSButton) {
+        stylePatternPopUp.selectItem(at: sender.tag)
+        mosaicStyleChanged()
+    }
+
+    /// 現在選択中のパターンに対応するタイルへ強調表示を反映する。
+    private func refreshPatternTileSelectionHighlight() {
+        let selectedIndex = stylePatternPopUp.indexOfSelectedItem
+        for (index, button) in patternTileButtons.enumerated() {
+            button.layer?.borderWidth = index == selectedIndex ? 2 : 0
+            button.layer?.borderColor = NSColor.controlAccentColor.cgColor
+            button.layer?.cornerRadius = 4
+        }
     }
 
     private func makeInspectorPanel() -> NSView {
@@ -1802,15 +1921,15 @@ final class MosaicWindowController: NSObject {
         tintRow.orientation = .horizontal
         tintRow.spacing = 6
         let styleGrid = NSGridView(views: [
-            [NSTextField(labelWithString: "パターン"), stylePatternPopUp, NSGridCell.emptyContentView],
-            [NSTextField(labelWithString: "透明度"), styleOpacitySlider, styleOpacityValueLabel],
-            [NSTextField(labelWithString: "塗りつぶし色"), tintRow, NSGridCell.emptyContentView],
-            [NSTextField(labelWithString: "細かさ"), styleBlockScaleSlider, styleBlockScaleValueLabel],
-            [NSTextField(labelWithString: "輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
-            [NSTextField(labelWithString: "帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
-            [NSTextField(labelWithString: "帯の間隔"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
-            [NSTextField(labelWithString: "雲の密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
-            [NSTextField(labelWithString: "雲"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
+            [styleRowLabel("パターン"), makePatternTileGrid(), NSGridCell.emptyContentView],
+            [styleRowLabel("透明度"), styleOpacitySlider, styleOpacityValueLabel],
+            [styleRowLabel("塗りつぶし色"), tintRow, NSGridCell.emptyContentView],
+            [styleRowLabel("細かさ"), styleBlockScaleSlider, styleBlockScaleValueLabel],
+            [styleRowLabel("輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
+            [styleRowLabel("帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
+            [styleRowLabel("帯の間隔"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
+            [styleRowLabel("雲の密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
+            [styleRowLabel("雲"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
             [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
         ])
         styleGrid.rowSpacing = 7
@@ -1866,6 +1985,18 @@ final class MosaicWindowController: NSObject {
         let label = NSTextField(labelWithString: text)
         applyScaledFont(label, size: 12, weight: .semibold)
         label.textColor = .labelColor
+        return label
+    }
+
+    /// `styleGrid`（モザイク詳細設定）の行ラベルを、`inspectorRow` と同じ最小幅（78pt）で作る。
+    /// 以前は素の `NSTextField` を使っており、他の設定項目（inspectorRow使用）とラベル列の
+    /// 左マージンが揃わず、サイドパネルを狭めた際にモザイク詳細設定だけレイアウトが
+    /// 崩れる不具合があった。
+    private func styleRowLabel(_ title: String) -> NSTextField {
+        let label = NSTextField(labelWithString: title)
+        applyScaledFont(label, size: 13)
+        label.textColor = .secondaryLabelColor
+        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 78).isActive = true
         return label
     }
 
@@ -2086,6 +2217,7 @@ final class MosaicWindowController: NSObject {
         let patterns = MosaicFillPattern.allCases
         let index = stylePatternPopUp.indexOfSelectedItem
         let pattern = (0..<patterns.count).contains(index) ? patterns[index] : .pixelate
+        refreshPatternTileSelectionHighlight()
         styleStripeWidthSlider.isEnabled = pattern.isStripes
         styleStripeSpacingSlider.isEnabled = pattern.isStripes
         styleCloudDensitySlider.isEnabled = pattern == .clouds
@@ -2101,12 +2233,13 @@ final class MosaicWindowController: NSObject {
 
     /// 任意パターン画像を選択し、ライブラリ配下へコピーして永続化する。
     /// パターン画像ボタン: 同梱素材（SNS向け）のメニューを表示する。
+    /// レイヤタグ（現在編集中のROIのカテゴリ）に応じて、かぶせ画像素材の候補表示を切り替える。
+    /// 該当カテゴリ向けの素材を先頭にまとめ、それ以外は「その他の素材」として下にまとめる
+    /// （改善: パターン選択画像はレイヤタグ毎に表示内容を変更する）。
     @objc private func choosePatternImage() {
         let menu = NSMenu()
-        let header = NSMenuItem(title: "同梱素材（SNS向け）", action: nil, keyEquivalent: "")
-        header.isEnabled = false
-        menu.addItem(header)
-        for asset in OverlayAssetCatalog.assets {
+        let currentCategory = canvas.selectedROIID.flatMap { id in canvas.rois.first { $0.id == id } }?.category
+        func addAsset(_ asset: OverlayAsset) {
             let item = NSMenuItem(
                 title: "\(asset.displayName)（\(asset.suggestedCategory.displayName)向け）",
                 action: #selector(selectBuiltinOverlay(_:)),
@@ -2119,6 +2252,28 @@ final class MosaicWindowController: NSObject {
                 item.image = preview
             }
             menu.addItem(item)
+        }
+        if let currentCategory {
+            let matching = OverlayAssetCatalog.assets.filter { $0.suggestedCategory == currentCategory }
+            let others = OverlayAssetCatalog.assets.filter { $0.suggestedCategory != currentCategory }
+            if !matching.isEmpty {
+                let header = NSMenuItem(title: "\(currentCategory.displayName)向けの素材", action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+                matching.forEach(addAsset)
+            }
+            if !others.isEmpty {
+                if !matching.isEmpty { menu.addItem(.separator()) }
+                let header = NSMenuItem(title: "その他の同梱素材", action: nil, keyEquivalent: "")
+                header.isEnabled = false
+                menu.addItem(header)
+                others.forEach(addAsset)
+            }
+        } else {
+            let header = NSMenuItem(title: "同梱素材（SNS向け）", action: nil, keyEquivalent: "")
+            header.isEnabled = false
+            menu.addItem(header)
+            OverlayAssetCatalog.assets.forEach(addAsset)
         }
         menu.addItem(.separator())
         let fileItem = NSMenuItem(title: "ファイルから選択...", action: #selector(choosePatternImageFromFile), keyEquivalent: "")
@@ -2363,6 +2518,7 @@ final class MosaicWindowController: NSObject {
         layerOutlineView.delegate = self
         layerOutlineView.allowsMultipleSelection = true
         layerOutlineView.indentationPerLevel = 14
+        attachLayerContextMenu()
         let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("layer"))
         column.width = 220
         column.resizingMask = .autoresizingMask
@@ -2416,28 +2572,54 @@ final class MosaicWindowController: NSObject {
     }
 
     /// ROI選択リストの行データを再構築する。同一カテゴリ名が複数ある場合のみ連番を付与する。
+    /// あわせて `roiGroupName` が同じROIをグループへまとめる（レイヤ一覧のグループ化機能対応）。
     private func rebuildROIListEntries() {
         var counts: [String: Int] = [:]
         for roi in canvas.rois { counts[roi.category.displayName, default: 0] += 1 }
         var counters: [String: Int] = [:]
+        var entryByROIID: [UUID: ROIListEntry] = [:]
         roiListEntries = canvas.rois.map { roi in
             let name = roi.category.displayName
             let pattern = (roi.style?.pattern ?? defaultMosaicStyle.pattern).displayName
-            guard counts[name, default: 0] > 1 else {
-                return ROIListEntry(roiID: roi.id, title: "\(name) · \(pattern)")
+            let entry: ROIListEntry
+            if counts[name, default: 0] > 1 {
+                counters[name, default: 0] += 1
+                entry = ROIListEntry(roiID: roi.id, title: "\(name) \(counters[name] ?? 0) · \(pattern)")
+            } else {
+                entry = ROIListEntry(roiID: roi.id, title: "\(name) · \(pattern)")
             }
-            counters[name, default: 0] += 1
-            return ROIListEntry(roiID: roi.id, title: "\(name) \(counters[name] ?? 0) · \(pattern)")
+            entryByROIID[roi.id] = entry
+            return entry
         }
         roiListSignature = canvas.rois.map {
-            "\($0.id.uuidString)#\($0.category.rawValue)#\(($0.style?.pattern ?? defaultMosaicStyle.pattern).rawValue)"
+            "\($0.id.uuidString)#\($0.category.rawValue)#\(($0.style?.pattern ?? defaultMosaicStyle.pattern).rawValue)#\($0.roiGroupName ?? "")"
         }
+
+        var groupsByName: [String: ROIListGroup] = [:]
+        var groupOrder: [String] = []
+        var ungrouped: [ROIListEntry] = []
+        for roi in canvas.rois {
+            guard let entry = entryByROIID[roi.id] else { continue }
+            if let groupName = roi.roiGroupName {
+                if let group = groupsByName[groupName] {
+                    group.children.append(entry)
+                } else {
+                    let group = ROIListGroup(name: groupName, children: [entry])
+                    groupsByName[groupName] = group
+                    groupOrder.append(groupName)
+                }
+            } else {
+                ungrouped.append(entry)
+            }
+        }
+        roiListGroups = groupOrder.compactMap { groupsByName[$0] }
+        ungroupedROIEntries = ungrouped
     }
 
     /// ROIの件数・カテゴリが変わったときだけリストを再読込する（ドラッグ移動中の毎フレーム再描画を避ける）。
     private func refreshROIListIfNeeded() {
         let signature = canvas.rois.map {
-            "\($0.id.uuidString)#\($0.category.rawValue)#\(($0.style?.pattern ?? defaultMosaicStyle.pattern).rawValue)"
+            "\($0.id.uuidString)#\($0.category.rawValue)#\(($0.style?.pattern ?? defaultMosaicStyle.pattern).rawValue)#\($0.roiGroupName ?? "")"
         }
         guard signature != roiListSignature else { return }
         reloadLayerList()
@@ -2466,11 +2648,66 @@ final class MosaicWindowController: NSObject {
     /// 既存グループの内側にある子レイヤ（人物検出/骨格検出など）も対象にでき、
     /// 元の場所（未グループ配列・元グループ）から取り除いた上で新しいグループへまとめる
     /// （元グループが空になった場合はそのグループごと削除する）。
+    /// レイヤ一覧（アウトライン）の右クリックメニューを構築する。項目の表示/非表示・タイトルは
+    /// 右クリック直前に `updateLayerContextMenu(_:)` で選択内容に応じて更新する。
+    private func attachLayerContextMenu() {
+        let menu = NSMenu()
+        menu.delegate = self
+        menu.addItem(withTitle: "グループ化", action: #selector(groupSelectedLayers), keyEquivalent: "")
+        menu.addItem(withTitle: "グループ解除", action: #selector(ungroupSelectedGroup), keyEquivalent: "")
+        layerOutlineView.menu = menu
+    }
+
+    /// 右クリックされた行を選択に含めた上で、グループ化/グループ解除項目の表示・タイトルを更新する。
+    /// 複数レイヤ選択後の右クリックで「グループ化」（既にグループ化済みの項目が混ざる場合は
+    /// 「再グループ化」）・グループ行選択時は「グループ解除」を表示する。
+    private func updateLayerContextMenu(_ menu: NSMenu) {
+        let clickedRow = layerOutlineView.clickedRow
+        if clickedRow >= 0, !layerOutlineView.selectedRowIndexes.contains(clickedRow) {
+            layerOutlineView.selectRowIndexes(IndexSet(integer: clickedRow), byExtendingSelection: false)
+        }
+        let items = layerOutlineView.selectedRowIndexes.map { layerOutlineView.item(atRow: $0) }
+        let leaves = items.compactMap { $0 as? LayerLeaf }
+        let roiEntries = items.compactMap { $0 as? ROIListEntry }
+        let hasGroupSelected = items.contains { $0 is LayerGroup || $0 is ROIListGroup }
+        let canGroup = leaves.count >= 2 || roiEntries.count >= 2
+        let alreadyGrouped = leaves.contains { leaf in layerGroups.contains { $0.children.contains { $0 === leaf } } }
+            || roiEntries.contains { entry in roiListGroups.contains { $0.children.contains { $0 === entry } } }
+        guard menu.items.count >= 2 else { return }
+        menu.items[0].title = (canGroup && alreadyGrouped) ? "再グループ化" : "グループ化"
+        menu.items[0].isHidden = !canGroup
+        menu.items[1].isHidden = !hasGroupSelected
+    }
+
     @objc private func groupSelectedLayers() {
         var leavesToGroup: [LayerLeaf] = []
+        var roiEntriesToGroup: [ROIListEntry] = []
         for index in layerOutlineView.selectedRowIndexes {
-            guard let leaf = layerOutlineView.item(atRow: index) as? LayerLeaf else { continue }
-            leavesToGroup.append(leaf)
+            let item = layerOutlineView.item(atRow: index)
+            if let leaf = item as? LayerLeaf {
+                leavesToGroup.append(leaf)
+            } else if let entry = item as? ROIListEntry {
+                roiEntriesToGroup.append(entry)
+            }
+        }
+        // ROI選択リストの行（目元・乳首等）が選択されている場合はROIのグループ化として扱う。
+        // 人物検出/骨格検出などのレイヤ（LayerLeaf）とは別のデータ型のため、
+        // 従来はROI行を選択してもグループ化ボタンが常に無反応になる欠落があった。
+        if !roiEntriesToGroup.isEmpty {
+            guard roiEntriesToGroup.count >= 2 else {
+                updateStatus("グループ化するROIを2つ以上選択してください")
+                return
+            }
+            roiGroupCounter += 1
+            let groupName = "グループ\(roiGroupCounter)"
+            let ids = Set(roiEntriesToGroup.map(\.roiID))
+            for index in canvas.rois.indices where ids.contains(canvas.rois[index].id) {
+                canvas.rois[index].roiGroupName = groupName
+            }
+            editorRevision += 1
+            reloadLayerList()
+            updateStatus("\(groupName) を作成しました（\(roiEntriesToGroup.count)件）")
+            return
         }
         guard leavesToGroup.count >= 2 else {
             updateStatus("グループ化するレイヤを2つ以上選択してください")
@@ -2491,14 +2728,26 @@ final class MosaicWindowController: NSObject {
 
     @objc private func ungroupSelectedGroup() {
         var didUngroup = false
+        var didUngroupROI = false
         for index in layerOutlineView.selectedRowIndexes {
-            if let group = layerOutlineView.item(atRow: index) as? LayerGroup {
+            let item = layerOutlineView.item(atRow: index)
+            if let group = item as? LayerGroup {
                 ungroupedLayers.append(contentsOf: group.children)
                 layerGroups.removeAll { $0 === group }
                 didUngroup = true
+            } else if let roiGroup = item as? ROIListGroup {
+                let ids = Set(roiGroup.children.map(\.roiID))
+                for roiIndex in canvas.rois.indices where ids.contains(canvas.rois[roiIndex].id) {
+                    canvas.rois[roiIndex].roiGroupName = nil
+                }
+                didUngroupROI = true
             }
         }
-        if didUngroup {
+        if didUngroupROI {
+            editorRevision += 1
+            reloadLayerList()
+            updateStatus("ROIグループを解除しました")
+        } else if didUngroup {
             editorRevision += 1
             reloadLayerList()
             updateStatus("グループを解除しました")
@@ -2859,6 +3108,7 @@ final class MosaicWindowController: NSObject {
         } else {
             updateStatus("一括処理が完了しました（\(processed)件\(failNote)）")
         }
+        AppLog.library.info("一括処理終了: 処理済み=\(processed) 失敗=\(failed) キャンセル=\(cancelled)")
     }
 
     @objc private func openImage() {
@@ -3091,7 +3341,12 @@ final class MosaicWindowController: NSObject {
                     rois: canvas.rois,
                     style: defaultMosaicStyleForRendering(),
                     segmentEngine: currentSegmentEngine(),
-                    patternImageProvider: { [weak self] in self?.patternImage(for: $0) }
+                    patternImageProvider: { [weak self] in self?.patternImage(for: $0) },
+                    // かぶせ画像パターンを選んだだけで画像未選択のROIが1件でもあると、従来は
+                    // applyMosaic全体が例外を投げ、それ以外の設定対象でないレイヤの
+                    // プレビューまで巻き添えで解除されてしまっていた。プレビューでは
+                    // 未設定のROIだけ元画像のままスキップし、他レイヤは正常表示する。
+                    skipIncompletePatterns: true
                 )
                 renderedImage = output
                 canvas.setImage(output)
@@ -3131,7 +3386,8 @@ final class MosaicWindowController: NSObject {
                 rois: canvas.rois,
                 style: defaultMosaicStyleForRendering(),
                 segmentEngine: currentSegmentEngine(),
-                patternImageProvider: { [weak self] in self?.patternImage(for: $0) }
+                patternImageProvider: { [weak self] in self?.patternImage(for: $0) },
+                skipIncompletePatterns: true
             )
             renderedImage = output
             canvas.setImage(output)
@@ -4014,6 +4270,7 @@ final class MosaicWindowController: NSObject {
     }
 
     private func showError(_ error: Error) {
+        AppLog.ui.error("showError: \(error.localizedDescription, privacy: .public)")
         let alert = NSAlert(error: error)
         alert.runModal()
     }
@@ -4360,7 +4617,9 @@ extension MosaicWindowController {
             )
             closeExportWindow()
             finalizeExport(image: imageToWrite, url: url)
+            AppLog.export.info("画像出力: format=\(format.rawValue, privacy: .public)")
         } catch {
+            AppLog.export.error("画像出力に失敗: format=\(format.rawValue, privacy: .public) error=\(error.localizedDescription, privacy: .public)")
             showError(error)
         }
     }
@@ -4387,6 +4646,10 @@ extension MosaicWindowController {
 extension MosaicWindowController: NSMenuDelegate {
     /// ファイル＞設定＞プロジェクト の最近のプロジェクト一覧（最大10件）を、開く直前に再構築する。
     func menuNeedsUpdate(_ menu: NSMenu) {
+        if menu === layerOutlineView.menu {
+            updateLayerContextMenu(menu)
+            return
+        }
         guard menu.title == "プロジェクト" else { return }
         menu.removeAllItems()
         let recents = Self.loadRecentProjects()
@@ -4488,7 +4751,9 @@ extension MosaicWindowController {
             refreshAllUIFromSettings()
             addRecentProject(path: url.path, name: url.deletingPathExtension().lastPathComponent)
             updateStatus("プロジェクトを読み込みました: \(url.lastPathComponent)")
+            AppLog.project.info("プロジェクトを読み込みました: \(url.lastPathComponent, privacy: .public)")
         } catch {
+            AppLog.project.error("プロジェクト読込に失敗: \(error.localizedDescription, privacy: .public)")
             showError(error)
         }
     }
@@ -4504,18 +4769,8 @@ extension MosaicWindowController {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         AppSettings.shared.resetAll()
         refreshAllUIFromSettings()
-        updateStatus("すべての設定を初期化しました \(layoutDiagnosticsSummary())")
-    }
-
-    /// 右サイドパネル幅の不具合調査用の一時的な診断情報（実機の実測値が無いと原因を特定できないため）。
-    /// 原因判明後に削除する。
-    private func layoutDiagnosticsSummary() -> String {
-        guard let mainSplit = mainSplitView, let leftPane = leftPaneSplitView,
-              let rightPane = rightPaneSplitView else { return "[診断: ビュー未取得]" }
-        return "[診断: main=\(Int(mainSplit.bounds.width)) " +
-            "leftHidden=\(leftPane.isHidden) leftW=\(Int(leftPane.frame.width)) " +
-            "canvasW=\(Int(canvas.frame.width)) rightW=\(Int(rightPane.frame.width)) " +
-            "divider=\(Int(mainSplit.dividerThickness)) subviews=\(mainSplit.arrangedSubviews.count)]"
+        updateStatus("すべての設定を初期化しました")
+        AppLog.ui.info("すべての設定を初期化しました")
     }
 
     /// 設定の読込・初期化後に、画面上の全コントロールをAppSettingsの現在値へ再同期する。
@@ -4843,6 +5098,121 @@ extension MosaicWindowController {
         shortcutsWindow = window
         window.makeKeyAndOrderFront(nil)
     }
+
+    // MARK: - ヘルプ＞デバッグ＞デバッグログ
+
+    /// アプリのUnified Logging（`AppLog`／MosaicCoreの検出診断ログ、subsystem
+    /// `com.yoshikawa.newMosaic`）を、直近分だけこのプロセス内から読み出して一覧表示する。
+    /// 画像内容やファイルパスは記録していないため、そのまま画面表示・書き出しして問題ない。
+    @objc func showDebugLogWindow() {
+        if let window = debugLogWindow {
+            refreshDebugLog()
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let textView = NSTextView()
+        textView.isEditable = false
+        textView.isSelectable = true
+        textView.font = Self.scaledMonospacedDigitFont(11)
+        textView.textContainerInset = NSSize(width: 8, height: 8)
+        textView.autoresizingMask = [.width]
+        textView.isVerticallyResizable = true
+        textView.isHorizontallyResizable = false
+        debugLogTextView = textView
+
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.documentView = textView
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+
+        let refreshButton = NSButton(title: "更新", target: self, action: #selector(refreshDebugLog))
+        applyScaledFont(refreshButton, size: 12)
+        let exportButton = NSButton(title: "書き出し…", target: self, action: #selector(exportDebugLog))
+        applyScaledFont(exportButton, size: 12)
+        let infoLabel = NSTextField(labelWithString: "件数を絞って直近分のみ表示します（subsystem: com.yoshikawa.newMosaic）")
+        applyScaledFont(infoLabel, size: 10)
+        infoLabel.textColor = .secondaryLabelColor
+        let buttonRow = NSStackView(views: [infoLabel, NSView(), refreshButton, exportButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 8
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSStackView(views: [buttonRow, scroll])
+        content.orientation = .vertical
+        content.spacing = 8
+        content.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 720, height: 480),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "デバッグログ"
+        window.minSize = NSSize(width: 420, height: 260)
+        window.contentView = content
+        window.center()
+        debugLogWindow = window
+        window.makeKeyAndOrderFront(nil)
+        refreshDebugLog()
+    }
+
+    @objc private func refreshDebugLog() {
+        debugLogTextView?.string = Self.fetchDebugLogText()
+        if let textView = debugLogTextView {
+            textView.scrollToEndOfDocument(nil)
+        }
+    }
+
+    @objc private func exportDebugLog() {
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.plainText]
+        panel.nameFieldStringValue = "newMosaic_debug_log.txt"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try Self.fetchDebugLogText().write(to: url, atomically: true, encoding: .utf8)
+            updateStatus("デバッグログを書き出しました: \(url.lastPathComponent)")
+        } catch {
+            showError(error)
+        }
+    }
+
+    /// 直近1時間分の自アプリログ（subsystem `com.yoshikawa.newMosaic`）を取得し、
+    /// 「時刻 [category] レベル: メッセージ」形式のテキストへ整形する。
+    private static func fetchDebugLogText() -> String {
+        guard let store = try? OSLogStore(scope: .currentProcessIdentifier) else {
+            return "ログストアを取得できませんでした。"
+        }
+        let since = store.position(date: Date().addingTimeInterval(-3600))
+        guard let entries = try? store.getEntries(at: since) else {
+            return "ログの取得に失敗しました。"
+        }
+        let formatter = DateFormatter()
+        formatter.dateFormat = "HH:mm:ss.SSS"
+        var lines: [String] = []
+        for entry in entries {
+            guard let logEntry = entry as? OSLogEntryLog,
+                  logEntry.subsystem == "com.yoshikawa.newMosaic" else { continue }
+            let time = formatter.string(from: entry.date)
+            lines.append("\(time) [\(logEntry.category)] \(logEntry.level.description): \(entry.composedMessage)")
+        }
+        return lines.isEmpty ? "直近1時間のログはありません。" : lines.joined(separator: "\n")
+    }
+}
+
+private extension OSLogEntryLog.Level {
+    var description: String {
+        switch self {
+        case .debug: return "DEBUG"
+        case .info: return "INFO"
+        case .notice: return "NOTICE"
+        case .error: return "ERROR"
+        case .fault: return "FAULT"
+        case .undefined: return "?"
+        @unknown default: return "?"
+        }
+    }
 }
 
 extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
@@ -5033,13 +5403,19 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return layerGroups.count + ungroupedLayers.count }
         if let group = item as? LayerGroup { return group.children.count }
-        if let leaf = item as? LayerLeaf, leaf.kind == .roi { return roiListEntries.count }
+        if let leaf = item as? LayerLeaf, leaf.kind == .roi {
+            return roiListGroups.count + ungroupedROIEntries.count
+        }
+        if let roiGroup = item as? ROIListGroup { return roiGroup.children.count }
         return 0
     }
 
     func outlineView(_ outlineView: NSOutlineView, isItemExpandable item: Any) -> Bool {
         if item is LayerGroup { return true }
-        if let leaf = item as? LayerLeaf, leaf.kind == .roi { return !roiListEntries.isEmpty }
+        if item is ROIListGroup { return true }
+        if let leaf = item as? LayerLeaf, leaf.kind == .roi {
+            return !roiListGroups.isEmpty || !ungroupedROIEntries.isEmpty
+        }
         return false
     }
 
@@ -5049,8 +5425,10 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
             return ungroupedLayers[index - layerGroups.count]
         }
         if let group = item as? LayerGroup { return group.children[index] }
-        if let leaf = item as? LayerLeaf, leaf.kind == .roi, index < roiListEntries.count {
-            return roiListEntries[index]
+        if let roiGroup = item as? ROIListGroup { return roiGroup.children[index] }
+        if let leaf = item as? LayerLeaf, leaf.kind == .roi {
+            if index < roiListGroups.count { return roiListGroups[index] }
+            return ungroupedROIEntries[index - roiListGroups.count]
         }
         return ungroupedLayers[0]
     }
@@ -5093,6 +5471,12 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
             cell.onToggle = nil
             cell.onOutlineToggle = nil
             cell.onTagToggle = nil
+        } else if let roiGroup = item as? ROIListGroup {
+            // ROIグループの見出し行（表示チェックなし。グループ名のみ）
+            cell.configure(title: roiGroup.name, state: .off, allowsMixed: false, showsCheckbox: false)
+            cell.onToggle = nil
+            cell.onOutlineToggle = nil
+            cell.onTagToggle = nil
         }
         return cell
     }
@@ -5102,10 +5486,18 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     func outlineViewSelectionDidChange(_ notification: Notification) {
-        guard !isSyncingROISelection else { return }
-        let selectedEntries = layerOutlineView.selectedRowIndexes.compactMap {
-            layerOutlineView.item(atRow: $0) as? ROIListEntry
+        let selectedItems = layerOutlineView.selectedRowIndexes.map { layerOutlineView.item(atRow: $0) }
+
+        // 人物検出/骨格検出レイヤの選択を画像上の強調表示へ反映する
+        // （レイヤ一覧の選択状態と画像上の表示を一致させる）。
+        if let leaf = selectedItems.compactMap({ $0 as? LayerLeaf }).first, leaf.kind.isPerson || leaf.kind.isPose {
+            canvas.selectedDetectionLayer = leaf.kind
+        } else {
+            canvas.selectedDetectionLayer = nil
         }
+
+        guard !isSyncingROISelection else { return }
+        let selectedEntries = selectedItems.compactMap { $0 as? ROIListEntry }
         guard let entry = selectedEntries.first else { return }
         isSyncingROISelection = true
         canvas.selectedROIID = entry.roiID
@@ -5185,6 +5577,9 @@ final class ImageCanvasView: NSView {
 
     var personLayerRects: [NormalizedRect] = [] { didSet { needsDisplay = true } }
     var poseLayerRects: [NormalizedRect] = [] { didSet { needsDisplay = true } }
+    /// レイヤ一覧で選択中の人物検出/骨格検出レイヤ（画像上に強調枠を表示するため）。
+    /// レイヤ一覧側の選択状態と画像上の表示を一致させる。
+    fileprivate var selectedDetectionLayer: LayerKind? { didSet { needsDisplay = true } }
     var personLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var poseLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var personLayerMasks: [CGImage?] = [] { didSet { needsDisplay = true } }
@@ -5643,6 +6038,18 @@ final class ImageCanvasView: NSView {
 
         let imageRect = imageDrawRect()
         if let hit = roiHit(at: point, imageRect: imageRect) {
+            // Command+ドラッグ: 選択中のレイヤ（ROI）をコピーしてから移動する
+            // （Finderのオプションドラッグ相当。コピーはドラッグ開始と同時に生成し、
+            // 元のROIはその場に残す）。
+            if event.modifierFlags.contains(.command) {
+                onManualEditWillBegin?()
+                var duplicate = hit
+                duplicate.id = UUID()
+                rois.append(duplicate)
+                selectedROIID = duplicate.id
+                moveState = MoveState(roiID: duplicate.id, lastPoint: point, didBeginEdit: true)
+                return
+            }
             selectedROIID = hit.id
             moveState = MoveState(roiID: hit.id, lastPoint: point)
             return
@@ -6009,6 +6416,9 @@ final class ImageCanvasView: NSView {
             if showsTag {
                 drawLayerName("人物検出\(index + 1)", in: viewR, color: .systemBlue)
             }
+            if case .person(index) = selectedDetectionLayer {
+                drawSelectedLayerHighlight(viewR)
+            }
         }
         for (index, rect) in poseLayerRects.enumerated() {
             guard index < poseLayerVisibility.count, poseLayerVisibility[index] else { continue }
@@ -6028,7 +6438,18 @@ final class ImageCanvasView: NSView {
             if showsTag {
                 drawLayerName("骨格検出\(index + 1)", in: viewR, color: .systemOrange)
             }
+            if case .pose(index) = selectedDetectionLayer {
+                drawSelectedLayerHighlight(viewR)
+            }
         }
+    }
+
+    /// レイヤ一覧で選択中の人物検出/骨格検出レイヤを画像上に強調表示する。
+    private func drawSelectedLayerHighlight(_ rect: NSRect) {
+        let path = NSBezierPath(rect: rect.insetBy(dx: -2, dy: -2))
+        path.lineWidth = 3
+        NSColor.controlAccentColor.setStroke()
+        path.stroke()
     }
 
     /// レイヤ範囲の右下内側にレイヤ名を表示する。

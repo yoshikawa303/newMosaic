@@ -18,8 +18,8 @@
 - 機能追加・バグ修正後は、`Mosaic/ARCHITECTURE.md` と `Mosaic/QUALITY_STATS.md` を必要に応じて更新する。
 - ログ経路・ログ運用を変更した場合は `Mosaic/DEBUG_LOG_INVENTORY.md` を更新する。
 - バージョン更新時は `CHANGELOG.md` を更新する。
-- コード修正を行うたびに `CURRENT_PROJECT_VERSION` 相当の Build 番号をインクリメントする。
-- 明示的なリリースアップ指示がない修正では `MARKETING_VERSION` は維持し、表示リリース番号は `v<MARKETING_VERSION> (beta Build <CURRENT_PROJECT_VERSION>)` とする。
+- コード修正を行うたびに `MARKETING_VERSION` 末尾のパッチ値をインクリメントする（2026-07-25〜。旧来の別建て `Build <N>` 表示は廃止し、パッチ値がそのままリリース番号として機能する）。`CURRENT_PROJECT_VERSION`（`CFBundleVersion`）は内部的にパッチ値と同じ数値へ同期するが、UI上には表示しない。
+- 表示リリース番号は `v<MARKETING_VERSION>` のみとする（`(beta Build N)` は表示しない）。
 - ローカル build 生成物や一時生成物はソース管理へ残置しない。CLI ビルド成果物は原則 `.build/` または `/Volumes/DATA/XCode_DerivedData/newMosaic/...` に限定する。
 
 ## 2.1 チャット作業履歴の記録
@@ -46,7 +46,7 @@
 
 ## 3. バージョン / リリースアップ
 
-- バージョン形式は `0.0.00000` とする。
+- バージョン形式は `0.0.00000` とする。パッチ値（末尾5桁）は毎回のコード修正でインクリメントする running な単一カウンタであり、旧来の別建て `Build <N>` 表示は使わない。
 - 「バージョンアップ」「リリースアップ」は同一手順として扱う。
 - 種別指定なしはパッチ値のみインクリメントする。
 - リリースアップ依頼時は以下を1タスクとして扱う。
