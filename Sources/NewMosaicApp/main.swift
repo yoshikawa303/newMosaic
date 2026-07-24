@@ -231,6 +231,16 @@ private enum LibraryViewMode: Int {
     case thumbnailList = 2
 }
 
+private enum LibraryProcessedFilter: Int, CaseIterable {
+    case all = 0
+    case unprocessed = 1
+    case processed = 2
+}
+
+private enum LibrarySortKey: String {
+    case name, status, resolution, roiCount, updatedAt
+}
+
 private struct EditorState {
     var rois: [MosaicROI]
     var renderedImage: CGImage?
@@ -708,6 +718,65 @@ final class MosaicWindowController: NSObject {
     private var libraryItems: [MosaicLibraryItem] = []
     private var libraryViewMode: LibraryViewMode = .thumbnailGrid
     private var selectedLibraryItemID: UUID?
+    // 処理済みフラグ・テキスト検索フィルタ、列ソート状態
+    private var libraryProcessedFilter: LibraryProcessedFilter = .all
+    private var librarySearchText: String = ""
+    private var librarySortKey: LibrarySortKey = .updatedAt
+    private var librarySortAscending: Bool = false
+    private let libraryProcessedFilterControl = NSSegmentedControl(
+        labels: ["すべて", "未処理", "処理済"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
+    private let librarySearchField = NSSearchField()
+    private var libraryThumbnailColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("thumbnail"))
+    private var libraryNameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
+    private var libraryStatusColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("status"))
+    private var libraryResolutionColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("resolution"))
+    private var libraryROIColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("roi"))
+    private var libraryUpdatedColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("updated"))
+
+    /// 現在の処理済みフィルタ・検索テキスト・ソート設定を適用したライブラリ表示用配列。
+    /// 一覧・選択・キー操作（カーソルキー移動等）はすべてこの配列を基準に動作する
+    /// （libraryItems自体はフィルタの影響を受けない全件リストとして保持する）。
+    private var displayedLibraryItems: [MosaicLibraryItem] {
+        var items = libraryItems
+        switch libraryProcessedFilter {
+        case .all: break
+        case .unprocessed: items = items.filter { $0.processedRelativePath == nil }
+        case .processed: items = items.filter { $0.processedRelativePath != nil }
+        }
+        if !librarySearchText.isEmpty {
+            let needle = librarySearchText
+            items = items.filter { $0.sourceName.localizedCaseInsensitiveContains(needle) }
+        }
+        let ascending = librarySortAscending
+        switch librarySortKey {
+        case .name:
+            items.sort {
+                let order = $0.sourceName.localizedStandardCompare($1.sourceName)
+                return ascending ? order == .orderedAscending : order == .orderedDescending
+            }
+        case .status:
+            items.sort {
+                let lhs = $0.processedRelativePath != nil
+                let rhs = $1.processedRelativePath != nil
+                return ascending ? (!lhs && rhs) : (lhs && !rhs)
+            }
+        case .resolution:
+            items.sort {
+                let lhs = $0.imagePixelWidth * $0.imagePixelHeight
+                let rhs = $1.imagePixelWidth * $1.imagePixelHeight
+                return ascending ? lhs < rhs : lhs > rhs
+            }
+        case .roiCount:
+            items.sort { ascending ? $0.rois.count < $1.rois.count : $0.rois.count > $1.rois.count }
+        case .updatedAt:
+            items.sort { ascending ? $0.updatedAt < $1.updatedAt : $0.updatedAt > $1.updatedAt }
+        }
+        return items
+    }
     private var thumbnailCache: [UUID: NSImage] = [:]
     private var thumbnailCacheUpdatedAt: [UUID: Date] = [:]
     private var undoStack: [EditorState] = []
@@ -3137,20 +3206,45 @@ final class MosaicWindowController: NSObject {
         modeRow.spacing = 8
         modeRow.translatesAutoresizingMaskIntoConstraints = false
 
+        // 処理済みフラグフィルタ・テキスト検索フィルタ（タブ切替コントロールの下に配置）
+        libraryProcessedFilterControl.selectedSegment = libraryProcessedFilter.rawValue
+        libraryProcessedFilterControl.target = self
+        libraryProcessedFilterControl.action = #selector(libraryFilterChanged)
+        libraryProcessedFilterControl.toolTip = "処理済みフラグで絞り込む"
+        librarySearchField.placeholderString = "ファイル名で検索"
+        librarySearchField.target = self
+        librarySearchField.action = #selector(librarySearchChanged)
+        librarySearchField.translatesAutoresizingMaskIntoConstraints = false
+        librarySearchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        let filterRow = NSStackView(views: [libraryProcessedFilterControl, librarySearchField])
+        filterRow.orientation = .horizontal
+        filterRow.spacing = 8
+        filterRow.translatesAutoresizingMaskIntoConstraints = false
+
         libraryScrollView.hasVerticalScroller = true
         libraryScrollView.translatesAutoresizingMaskIntoConstraints = false
 
-        tableView.headerView = nil
+        // リスト表示（テキスト/サムネイル）は項目を横一列に並べた列テーブルとし、
+        // 列見出しクリックでソートできるようにする（サムネイル列はサムネイル表示モードのみ使用）。
+        tableView.headerView = NSTableHeaderView()
         tableView.delegate = self
         tableView.dataSource = self
         tableView.target = self
         tableView.doubleAction = #selector(openSelectedLibraryOriginal)
         tableView.allowsMultipleSelection = true
-        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("item"))
-        column.title = "Item"
-        column.width = 260
-        column.resizingMask = .autoresizingMask
-        tableView.addTableColumn(column)
+        tableView.usesAlternatingRowBackgroundColors = true
+        libraryThumbnailColumn = makeLibraryColumn(id: "thumbnail", title: "", width: 44, sortKey: nil)
+        libraryNameColumn = makeLibraryColumn(id: "name", title: "ファイル名", width: 160, sortKey: .name)
+        libraryStatusColumn = makeLibraryColumn(id: "status", title: "状態", width: 60, sortKey: .status)
+        libraryResolutionColumn = makeLibraryColumn(id: "resolution", title: "解像度", width: 90, sortKey: .resolution)
+        libraryROIColumn = makeLibraryColumn(id: "roi", title: "ROI", width: 40, sortKey: .roiCount)
+        libraryUpdatedColumn = makeLibraryColumn(id: "updated", title: "更新日時", width: 120, sortKey: .updatedAt)
+        for column in [libraryThumbnailColumn, libraryNameColumn, libraryStatusColumn,
+                       libraryResolutionColumn, libraryROIColumn, libraryUpdatedColumn] {
+            tableView.addTableColumn(column)
+        }
+        // 既定ソート（更新日時の新しい順）に合わせた初期インジケータを表示する
+        tableView.sortDescriptors = [NSSortDescriptor(key: LibrarySortKey.updatedAt.rawValue, ascending: false)]
 
         configureCollectionView()
         libraryScrollView.documentView = libraryViewMode == .thumbnailGrid ? collectionView : tableView
@@ -3166,6 +3260,7 @@ final class MosaicWindowController: NSObject {
 
         panel.addSubview(title)
         panel.addSubview(modeRow)
+        panel.addSubview(filterRow)
         panel.addSubview(libraryScrollView)
         panel.addSubview(buttons)
         NSLayoutConstraint.activate([
@@ -3175,7 +3270,10 @@ final class MosaicWindowController: NSObject {
             modeRow.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
             modeRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             modeRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
-            libraryScrollView.topAnchor.constraint(equalTo: modeRow.bottomAnchor, constant: 8),
+            filterRow.topAnchor.constraint(equalTo: modeRow.bottomAnchor, constant: 6),
+            filterRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
+            filterRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            libraryScrollView.topAnchor.constraint(equalTo: filterRow.bottomAnchor, constant: 8),
             libraryScrollView.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             libraryScrollView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             buttons.topAnchor.constraint(equalTo: libraryScrollView.bottomAnchor, constant: 8),
@@ -3185,6 +3283,43 @@ final class MosaicWindowController: NSObject {
         ])
         updateLibraryModeVisibility()
         return panel
+    }
+
+    /// ソート対応の列を1つ構築する。`sortKey` がnilの列（サムネイル）はソート不可。
+    private func makeLibraryColumn(id: String, title: String, width: CGFloat, sortKey: LibrarySortKey?) -> NSTableColumn {
+        let column = NSTableColumn(identifier: NSUserInterfaceItemIdentifier(id))
+        column.title = title
+        column.width = width
+        column.minWidth = max(30, width * 0.6)
+        if let sortKey {
+            column.sortDescriptorPrototype = NSSortDescriptor(key: sortKey.rawValue, ascending: true)
+        }
+        return column
+    }
+
+    @objc private func libraryFilterChanged() {
+        guard let filter = LibraryProcessedFilter(rawValue: libraryProcessedFilterControl.selectedSegment) else { return }
+        libraryProcessedFilter = filter
+        refreshLibraryDisplay()
+    }
+
+    @objc private func librarySearchChanged() {
+        librarySearchText = librarySearchField.stringValue
+        refreshLibraryDisplay()
+    }
+
+    /// フィルタ・検索・ソート条件の変更後に一覧を再描画する（選択状態は可能な範囲で維持する）。
+    private func refreshLibraryDisplay() {
+        let previousSelectedID = selectedLibraryItemID
+        tableView.reloadData()
+        collectionView.reloadData()
+        if !displayedLibraryItems.isEmpty {
+            tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<displayedLibraryItems.count))
+        }
+        if let previousSelectedID, let item = displayedLibraryItems.first(where: { $0.id == previousSelectedID }) {
+            selectLibraryItemInUI(item)
+        }
+        updateStatsBar()
     }
 
     /// ライブラリのアノテーション（元画像+保存済みROI）をYOLO形式でエクスポートする。
@@ -3231,8 +3366,8 @@ final class MosaicWindowController: NSObject {
 
     @objc private func collectionViewDoubleClicked(_ recognizer: NSClickGestureRecognizer) {
         let point = recognizer.location(in: collectionView)
-        guard let indexPath = collectionView.indexPathForItem(at: point), indexPath.item < libraryItems.count else { return }
-        selectedLibraryItemID = libraryItems[indexPath.item].id
+        guard let indexPath = collectionView.indexPathForItem(at: point), indexPath.item < displayedLibraryItems.count else { return }
+        selectedLibraryItemID = displayedLibraryItems[indexPath.item].id
         openSelectedLibraryOriginal()
     }
 
@@ -3278,6 +3413,7 @@ final class MosaicWindowController: NSObject {
 
     private func updateLibraryModeVisibility() {
         thumbnailSizeSlider.isHidden = libraryViewMode != .thumbnailGrid
+        libraryThumbnailColumn.isHidden = libraryViewMode != .thumbnailList
         switch libraryViewMode {
         case .thumbnailGrid:
             libraryScrollView.documentView = collectionView
@@ -3285,11 +3421,17 @@ final class MosaicWindowController: NSObject {
         case .textList, .thumbnailList:
             libraryScrollView.documentView = tableView
             tableView.reloadData()
-            if !libraryItems.isEmpty {
-                tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<libraryItems.count))
+            if !displayedLibraryItems.isEmpty {
+                tableView.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<displayedLibraryItems.count))
             }
         }
     }
+
+    private static let libraryDateFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yy/MM/dd HH:mm"
+        return formatter
+    }()
 
     private func pruneThumbnailCache() {
         let currentIDs = Set(libraryItems.map(\.id))
@@ -3336,11 +3478,11 @@ final class MosaicWindowController: NSObject {
         switch libraryViewMode {
         case .thumbnailGrid:
             guard let id = selectedLibraryItemID else { return nil }
-            return libraryItems.first { $0.id == id }
+            return displayedLibraryItems.first { $0.id == id }
         case .textList, .thumbnailList:
             let row = tableView.selectedRow
-            guard row >= 0, row < libraryItems.count else { return nil }
-            return libraryItems[row]
+            guard row >= 0, row < displayedLibraryItems.count else { return nil }
+            return displayedLibraryItems[row]
         }
     }
 
@@ -3351,9 +3493,9 @@ final class MosaicWindowController: NSObject {
             return collectionView.selectionIndexPaths
                 .map(\.item)
                 .sorted()
-                .compactMap { $0 < libraryItems.count ? libraryItems[$0] : nil }
+                .compactMap { $0 < displayedLibraryItems.count ? displayedLibraryItems[$0] : nil }
         case .textList, .thumbnailList:
-            return tableView.selectedRowIndexes.compactMap { $0 < libraryItems.count ? libraryItems[$0] : nil }
+            return tableView.selectedRowIndexes.compactMap { $0 < displayedLibraryItems.count ? displayedLibraryItems[$0] : nil }
         }
     }
 
@@ -3416,7 +3558,7 @@ final class MosaicWindowController: NSObject {
 
     private func selectLibraryItemInUI(_ item: MosaicLibraryItem) {
         selectedLibraryItemID = item.id
-        if let row = libraryItems.firstIndex(where: { $0.id == item.id }) {
+        if let row = displayedLibraryItems.firstIndex(where: { $0.id == item.id }) {
             tableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
             tableView.scrollRowToVisible(row)
             collectionView.selectionIndexPaths = [IndexPath(item: row, section: 0)]
@@ -3426,11 +3568,11 @@ final class MosaicWindowController: NSObject {
 
     /// カーソルキーでのライブラリ画像切替。自動保存の設定に応じて保存確認を行ってから切り替える。
     private func navigateLibrary(by delta: Int) {
-        guard !libraryItems.isEmpty else { return }
-        let currentIndex = currentLibraryItem.flatMap { current in libraryItems.firstIndex { $0.id == current.id } }
+        guard !displayedLibraryItems.isEmpty else { return }
+        let currentIndex = currentLibraryItem.flatMap { current in displayedLibraryItems.firstIndex { $0.id == current.id } }
         let newIndex = (currentIndex ?? -1) + delta
-        guard newIndex >= 0, newIndex < libraryItems.count else { return }
-        requestLibrarySwitch(to: libraryItems[newIndex])
+        guard newIndex >= 0, newIndex < displayedLibraryItems.count else { return }
+        requestLibrarySwitch(to: displayedLibraryItems[newIndex])
     }
 
     private func requestLibrarySwitch(to item: MosaicLibraryItem) {
@@ -3691,7 +3833,7 @@ final class MosaicWindowController: NSObject {
 
     /// ステータスバー右端の統計（選択数/全画像数・解像度・色ビット数・ROI数）を更新する。
     private func updateStatsBar() {
-        let total = libraryItems.count
+        let total = displayedLibraryItems.count
         let selected: Int
         if libraryViewMode == .thumbnailGrid {
             selected = collectionView.selectionIndexPaths.count
@@ -4511,52 +4653,45 @@ extension MosaicWindowController {
 
 extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
     nonisolated func numberOfRows(in tableView: NSTableView) -> Int {
-        MainActor.assumeIsolated { libraryItems.count }
+        MainActor.assumeIsolated { displayedLibraryItems.count }
     }
 
+    /// 列ごとにセルを生成する（項目を横一列に並べたリスト表示。列見出しクリックでソート可能）。
+    /// サムネイル列はサムネイル表示モードのみ使用する。
     nonisolated func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         MainActor.assumeIsolated {
-            guard row >= 0, row < libraryItems.count else { return nil }
-            let item = libraryItems[row]
-            let showThumbnail = libraryViewMode == .thumbnailList
-            let identifier = NSUserInterfaceItemIdentifier(showThumbnail ? "LibraryCellThumb" : "LibraryCellText")
-            let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? NSTableCellView()
-            cell.identifier = identifier
+            guard row >= 0, row < displayedLibraryItems.count,
+                  let columnID = tableColumn?.identifier.rawValue else { return nil }
+            let item = displayedLibraryItems[row]
+            let identifier = NSUserInterfaceItemIdentifier("LibraryCell.\(columnID)")
 
-            let label = cell.textField ?? NSTextField(labelWithString: "")
-            label.lineBreakMode = .byTruncatingMiddle
-            label.font = Self.scaledFont(12)
-            let linkMark = libraryEngine.isLinkBroken(item) ? "⚠️リンク切れ " : (item.isLinked ? "🔗" : "")
-            label.stringValue = "\(item.processedRelativePath == nil ? "元" : "済") \(linkMark)\(item.sourceName)\n\(item.imagePixelWidth)x\(item.imagePixelHeight) ROI \(item.rois.count)"
-            label.textColor = libraryEngine.isLinkBroken(item) ? .systemRed : .labelColor
-            label.maximumNumberOfLines = 2
-
-            if showThumbnail {
-                let imageView = cell.imageView ?? NSImageView()
-                imageView.imageScaling = .scaleProportionallyUpOrDown
-                if imageView.superview == nil {
+            if columnID == "thumbnail" {
+                let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? {
+                    let cell = NSTableCellView()
+                    let imageView = NSImageView()
+                    imageView.imageScaling = .scaleProportionallyUpOrDown
                     imageView.translatesAutoresizingMaskIntoConstraints = false
                     cell.addSubview(imageView)
                     NSLayoutConstraint.activate([
-                        imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                        imageView.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 2),
+                        imageView.trailingAnchor.constraint(lessThanOrEqualTo: cell.trailingAnchor, constant: -2),
                         imageView.centerYAnchor.constraint(equalTo: cell.centerYAnchor),
                         imageView.widthAnchor.constraint(equalToConstant: 36),
                         imageView.heightAnchor.constraint(equalToConstant: 36)
                     ])
                     cell.imageView = imageView
-                }
-                imageView.image = thumbnail(for: item)
-                if label.superview == nil {
-                    label.translatesAutoresizingMaskIntoConstraints = false
-                    cell.addSubview(label)
-                    NSLayoutConstraint.activate([
-                        label.leadingAnchor.constraint(equalTo: imageView.trailingAnchor, constant: 8),
-                        label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
-                        label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
-                    ])
-                    cell.textField = label
-                }
-            } else if label.superview == nil {
+                    return cell
+                }()
+                cell.identifier = identifier
+                cell.imageView?.image = thumbnail(for: item)
+                return cell
+            }
+
+            let cell = tableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? {
+                let cell = NSTableCellView()
+                let label = NSTextField(labelWithString: "")
+                label.lineBreakMode = .byTruncatingMiddle
+                label.font = Self.scaledFont(11)
                 label.translatesAutoresizingMaskIntoConstraints = false
                 cell.addSubview(label)
                 NSLayoutConstraint.activate([
@@ -4565,19 +4700,51 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
                     label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
                 ])
                 cell.textField = label
+                return cell
+            }()
+            cell.identifier = identifier
+            guard let label = cell.textField else { return cell }
+
+            let isBroken = libraryEngine.isLinkBroken(item)
+            switch columnID {
+            case "name":
+                let linkMark = isBroken ? "⚠️ " : (item.isLinked ? "🔗" : "")
+                label.stringValue = linkMark + item.sourceName
+                label.toolTip = isBroken ? "リンク切れ: \(item.sourceName)" : item.sourceName
+            case "status":
+                label.stringValue = item.processedRelativePath == nil ? "元" : "済"
+            case "resolution":
+                label.stringValue = "\(item.imagePixelWidth)×\(item.imagePixelHeight)"
+            case "roi":
+                label.stringValue = "\(item.rois.count)"
+            case "updated":
+                label.stringValue = Self.libraryDateFormatter.string(from: item.updatedAt)
+            default:
+                label.stringValue = ""
             }
+            label.textColor = isBroken ? .systemRed : .labelColor
             return cell
         }
     }
 
     nonisolated func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        MainActor.assumeIsolated { libraryViewMode == .thumbnailList ? 44 : 34 }
+        MainActor.assumeIsolated { libraryViewMode == .thumbnailList ? 40 : 22 }
+    }
+
+    /// 列見出しクリックによるソート（項目名クリックでリストソート可能にする改善への対応）。
+    func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard let descriptor = tableView.sortDescriptors.first,
+              let key = descriptor.key,
+              let sortKey = LibrarySortKey(rawValue: key) else { return }
+        librarySortKey = sortKey
+        librarySortAscending = descriptor.ascending
+        refreshLibraryDisplay()
     }
 }
 
 extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDelegate {
     nonisolated func collectionView(_ collectionView: NSCollectionView, numberOfItemsInSection section: Int) -> Int {
-        MainActor.assumeIsolated { libraryItems.count }
+        MainActor.assumeIsolated { displayedLibraryItems.count }
     }
 
     nonisolated func collectionView(
@@ -4585,7 +4752,7 @@ extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDe
         itemForRepresentedObjectAt indexPath: IndexPath
     ) -> NSCollectionViewItem {
         MainActor.assumeIsolated {
-            let item = libraryItems[indexPath.item]
+            let item = displayedLibraryItems[indexPath.item]
             guard let gridItem = collectionView.makeItem(
                 withIdentifier: LibraryGridItem.identifier,
                 for: indexPath
@@ -4601,8 +4768,8 @@ extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDe
 
     nonisolated func collectionView(_ collectionView: NSCollectionView, didSelectItemsAt indexPaths: Set<IndexPath>) {
         MainActor.assumeIsolated {
-            guard let indexPath = indexPaths.first, indexPath.item < libraryItems.count else { return }
-            selectedLibraryItemID = libraryItems[indexPath.item].id
+            guard let indexPath = indexPaths.first, indexPath.item < displayedLibraryItems.count else { return }
+            selectedLibraryItemID = displayedLibraryItems[indexPath.item].id
             updateStatsBar()
         }
     }
