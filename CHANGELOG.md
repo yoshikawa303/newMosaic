@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.0.00001 - Build 74 - 2026-07-25
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: 「初期化」後に右サイドパネル幅が既定値（ライブラリ2列表示相当）へ反映されない不具合の真因を、Build 73で追加した診断表示の実測値から特定し修正した。
+
+■更新履歴
+
+- Build 73で追加した診断表示（`main=958 leftHidden=true leftW=1 canvasW=200 rightW=756`）から、キャンバス幅が`constrainMinCoordinate`delegateで定義した最小幅の定数（200）ちょうどにクランプされていることが判明した。`NSSplitView.setPosition(_:ofDividerAt:)`はプログラムからの呼び出しでも`constrainMinCoordinate`/`constrainMaxCoordinate`delegateを経由して結果をクランプする仕様だが、この2つのdelegateはインタラクティブなドラッグ操作を想定して隣接ビューの「現在のフレーム値」を基準に計算するよう書かれていたため、初期化・復元などプログラムによる一括レイアウト設定中（隣接ビューのフレームがまだ更新途中）に適用されると、意図しない位置へクランプされていた。これがBuild 69〜72で右ペイン幅の既定化が繰り返し失敗していた真因だった。
+- 既存の`isRestoringSplitPositions`フラグ（`splitViewDidResizeSubviews`の保存処理を抑制するために導入済み）を、`constrainMinCoordinate`/`constrainMaxCoordinate`delegateでも参照し、フラグが立っている間（プログラムによる一括設定中）はこの制約を適用しないようにした。あわせて、右ペイン幅を扱う全関数（`restoreSplitPositions()`・`setMainSplitRightPaneWidth()`・`applyPaneWidth()`・`applyPanelAssignments()`・`applyInitialLayoutIfNeeded()`）でこのフラグを設定・復元する際、ネストした呼び出し（例: `applyInitialLayoutIfNeeded()`が内部で`restoreSplitPositions()`を呼ぶ）で内側のdeferが外側のフラグを誤って`false`に戻してしまわないよう、「呼び出し前の値へ復元する」方式（`let wasRestoring = isRestoringSplitPositions; ...; defer { isRestoringSplitPositions = wasRestoring }`）へ統一した。
+
 ## v0.0.00001 - Build 73 - 2026-07-25
 
 ■更新履歴（Readme / ChangeLog 用）

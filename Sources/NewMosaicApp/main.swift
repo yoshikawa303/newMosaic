@@ -1359,6 +1359,9 @@ final class MosaicWindowController: NSObject {
     /// 指定サイドのペイン幅をmainSplit上へ即時反映し、次回起動時の復元用に設定へも保存する。
     private func applyPaneWidth(_ width: CGFloat, side: String) {
         guard let mainSplit = mainSplitView, let rightPane = rightPaneSplitView else { return }
+        let wasRestoring = isRestoringSplitPositions
+        isRestoringSplitPositions = true
+        defer { isRestoringSplitPositions = wasRestoring }
         mainSplit.layoutSubtreeIfNeeded()
         if side == "left" {
             mainSplit.setPosition(width, ofDividerAt: 0)
@@ -1380,19 +1383,22 @@ final class MosaicWindowController: NSObject {
     /// 挙動の詳細に依存せず確実に反映するため、候補インデックスを順に試し、
     /// 実際の幅を測定して一致した時点で確定する。
     private func setMainSplitRightPaneWidth(_ width: CGFloat, mainSplit: NSSplitView, rightPane: NSView) {
+        // constrainMinCoordinate/constrainMaxCoordinateはsetPosition(_:ofDividerAt:)からも
+        // 呼ばれる。ドラッグ用に書かれたこの制約が、まだ更新されていない隣接ビューの古い
+        // フレーム値を基準に意図しない位置へクランプしてしまい、Build 69〜72で右ペイン幅の
+        // 既定化が繰り返し失敗していた真因だった（実測診断で判明）。プログラムからの
+        // 一括設定中は制約を無効化する。
+        let wasRestoring = isRestoringSplitPositions
+        isRestoringSplitPositions = true
+        defer { isRestoringSplitPositions = wasRestoring }
         mainSplit.layoutSubtreeIfNeeded()
         let target = max(200, mainSplit.bounds.width - mainSplit.dividerThickness - width)
         let lastIndex = mainSplit.arrangedSubviews.count - 2
         var candidates = [lastIndex]
         if !candidates.contains(0) { candidates.append(0) }
-        NSLog(
-            "[newMosaic] setMainSplitRightPaneWidth: want=\(width) target=\(target) " +
-            "candidates=\(candidates) beforeRightW=\(rightPane.frame.width) mainW=\(mainSplit.bounds.width)"
-        )
         for index in candidates where index >= 0 {
             mainSplit.setPosition(target, ofDividerAt: index)
             mainSplit.layoutSubtreeIfNeeded()
-            NSLog("[newMosaic]   tried index=\(index) -> rightW=\(rightPane.frame.width)")
             if abs(rightPane.frame.width - width) < 30 { return }
         }
     }
@@ -1421,6 +1427,9 @@ final class MosaicWindowController: NSObject {
     private func applyPanelAssignments() {
         guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView,
               let mainSplit = mainSplitView else { return }
+        let wasRestoring = isRestoringSplitPositions
+        isRestoringSplitPositions = true
+        defer { isRestoringSplitPositions = wasRestoring }
         let wasLeftHidden = leftPane.isHidden
         let wasRightHidden = rightPane.isHidden
 
@@ -1461,6 +1470,9 @@ final class MosaicWindowController: NSObject {
     func applyInitialLayoutIfNeeded() {
         guard let rightPane = rightPaneSplitView, let leftPane = leftPaneSplitView,
               let mainSplit = mainSplitView else { return }
+        let wasRestoring = isRestoringSplitPositions
+        isRestoringSplitPositions = true
+        defer { isRestoringSplitPositions = wasRestoring }
         rightPane.layoutSubtreeIfNeeded()
         mainSplit.layoutSubtreeIfNeeded()
         let restored = restoreSplitPositions()
@@ -1502,8 +1514,9 @@ final class MosaicWindowController: NSObject {
               let leftPane = leftPaneSplitView,
               let mainSplit = mainSplitView else { return false }
         var restored = false
+        let wasRestoring = isRestoringSplitPositions
         isRestoringSplitPositions = true
-        defer { isRestoringSplitPositions = false }
+        defer { isRestoringSplitPositions = wasRestoring }
 
         // メイン分割: 左ペイン幅（divider 0）と右ペイン幅
         if !leftPane.isHidden,
@@ -4962,6 +4975,13 @@ extension MosaicWindowController: NSSplitViewDelegate {
     /// 現在フレーム＋最小幅から算出する。Auto Layoutの必須制約でNSSplitViewの
     /// フレーム操作と競合させない（サイドパネル幅がまったく動かせないバグの修正）。
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        // setPosition(_:ofDividerAt:)はプログラムからの呼び出しでもこのdelegateを経由するため、
+        // インタラクティブなドラッグ用に書かれた本制約（隣接ビューの現在フレームに依存）を
+        // 初期化・復元などの一括レイアウト設定中に適用すると、まだ古いフレーム値のままの
+        // 隣接ビューを基準に不本意な位置へクランプされてしまう不具合があった
+        // （「初期化してもレイアウトが既定値へ戻らない」不具合の真因）。
+        // 一括設定中はこの制約を適用しない。
+        guard !isRestoringSplitPositions else { return proposedMinimumPosition }
         guard splitView === mainSplitView else { return proposedMinimumPosition }
         let subviews = splitView.arrangedSubviews
         guard dividerIndex >= 0, dividerIndex < subviews.count else { return proposedMinimumPosition }
@@ -4972,6 +4992,7 @@ extension MosaicWindowController: NSSplitViewDelegate {
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        guard !isRestoringSplitPositions else { return proposedMaximumPosition }
         guard splitView === mainSplitView else { return proposedMaximumPosition }
         let subviews = splitView.arrangedSubviews
         guard dividerIndex + 1 >= 0, dividerIndex + 1 < subviews.count else { return proposedMaximumPosition }

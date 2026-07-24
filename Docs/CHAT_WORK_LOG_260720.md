@@ -1585,3 +1585,25 @@
   検証は `swift build` / `swift test` 73/73 PASS / `agent_governance_guard.sh` PASS / `local_quality_gate.sh` PASS、Build 73で再パッケージ。
 
 - 作業時間: 約20分
+
+### 2026-07-25 11:10 JST - Claude Code - 種別: 依頼内容 - Build 73の診断表示の実測値を共有
+
+- 内容:
+
+  （添付: 「初期化」実行後のステータスバーに表示された診断情報のスクリーンショット。`[診断: main=958 leftHidden=true leftW=1 canvasW=200 rightW=756 divider=1 subviews=3]`）
+
+### 2026-07-25 11:30 JST - Claude Code - 種別: 作業結果 - 真因を実測値から特定し、constrainMinCoordinate/MaxCoordinateのクランプ不具合を修正（Build 74）
+
+- 内容:
+
+  共有いただいた実測値 `canvasW=200` が、キャンバスの最小幅として`NSSplitViewDelegate`の`constrainMinCoordinate`実装内で定義している定数（200）と完全に一致していたことが決め手になった。
+
+  **真因**: `NSSplitView.setPosition(_:ofDividerAt:)` はプログラムからの呼び出しであっても、内部で`constrainMinCoordinate`/`constrainMaxCoordinate`delegateを経由して結果をクランプする仕様だった。この2つのdelegateはユーザーがマウスでドラッグする対話的な操作を想定して「隣接ビューの現在のフレーム値」を基準に範囲計算するよう書かれており、初期化直後など、プログラムが一括でレイアウトを設定している最中（隣接ビューのフレームがまだ更新途中）に適用されると、意図しない位置へ強制的にクランプしてしまっていた。Build 69〜72で「divider indexが0か`count-2`か」を何度も検証していたが、実際にはindexの選び方は無関係で、この制約自体が邪魔をしていたことが真因だった。
+
+  **修正**: `splitViewDidResizeSubviews`（分割位置変更の保存処理）の抑制に既に使っていた`isRestoringSplitPositions`フラグを、`constrainMinCoordinate`/`constrainMaxCoordinate`でも参照するようにし、フラグが立っている間（プログラムによる一括設定中）はこの制約を適用しないようにした。あわせて、右ペイン幅を扱う5つの関数すべてで、このフラグの設定・復元を「呼び出し前の値へ戻す」方式に統一し、ネストした呼び出し（`applyInitialLayoutIfNeeded()`が内部で`restoreSplitPositions()`を呼ぶ等）で内側の処理が外側のフラグを誤って解除してしまう不具合も併せて防いだ。
+
+  今回は実測データに基づく特定ができたため、確度の高い修正になっている。診断表示は次回問題なければ削除予定。
+
+  検証は `swift build` / `swift test` 73/73 PASS / `agent_governance_guard.sh` PASS / `local_quality_gate.sh` PASS、Build 74で再パッケージ。
+
+- 作業時間: 約30分
