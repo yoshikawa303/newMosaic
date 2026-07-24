@@ -452,13 +452,13 @@ private final class LayerRowView: NSTableCellView {
         checkbox.target = self
         checkbox.action = #selector(handleToggle)
         label.translatesAutoresizingMaskIntoConstraints = false
-        label.font = .systemFont(ofSize: 12)
+        label.font = MosaicWindowController.scaledFont(12)
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         for detail in [outlineCheckbox, tagCheckbox] {
             detail.translatesAutoresizingMaskIntoConstraints = false
             detail.controlSize = .mini
-            detail.font = .systemFont(ofSize: 10)
+            detail.font = MosaicWindowController.scaledFont(10)
             detail.target = self
         }
         outlineCheckbox.action = #selector(handleOutlineToggle)
@@ -730,8 +730,16 @@ final class MosaicWindowController: NSObject {
         action: nil
     )
     private static let iconSizeDefaultsKey = "AdvancedSettings.iconSize"
+    private static let textSizeDefaultsKey = "AdvancedSettings.textSize"
+    private let textSizeControl = NSSegmentedControl(
+        labels: ["小", "中", "大"],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
     private static let recentProjectsDefaultsKey = "RecentProjects"
-    private static let projectFileExtension = "newmosaicproj"
+    // Win/Mac両対応の4文字拡張子（newMosaic Config の略）。旧 "newmosaicproj" は冗長なため短縮。
+    private static let projectFileExtension = "nmcf"
     private var lastStatusText = ""
     private var batchCancelRequested = false
     private var batchPanel: NSPanel?
@@ -783,7 +791,7 @@ final class MosaicWindowController: NSObject {
         statusLabel.lineBreakMode = .byTruncatingTail
         statusLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
 
-        zoomLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        zoomLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
         zoomLabel.alignment = .center
         zoomLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
@@ -878,9 +886,9 @@ final class MosaicWindowController: NSObject {
         let statusSeparator = NSBox()
         statusSeparator.boxType = .separator
         statusSeparator.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.font = Self.scaledFont(11)
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
-        statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        statsLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
         statsLabel.textColor = .secondaryLabelColor
         statsLabel.alignment = .right
         statsLabel.lineBreakMode = .byTruncatingHead
@@ -1088,7 +1096,7 @@ final class MosaicWindowController: NSObject {
         let rightButton = NSButton(title: "▶", target: self, action: #selector(movePanelToRight(_:)))
         for button in [leftButton, rightButton] {
             button.isBordered = false
-            button.font = .systemFont(ofSize: 9)
+            button.font = Self.scaledFont(9)
             button.contentTintColor = .secondaryLabelColor
             button.translatesAutoresizingMaskIntoConstraints = false
             button.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
@@ -1275,10 +1283,12 @@ final class MosaicWindowController: NSObject {
         let size = Self.currentIconSizeSetting()
         let pointSize: CGFloat
         let frameSize: CGFloat
+        // 従来の既定（大=18pt/40pt枠）が小さすぎるとの指摘を受け、全体的に一段階大きくシフトした
+        // （旧「大」を新「小」の基準とし、中・大はそこから拡大。既定値は「中」）。
         switch size {
-        case 0: pointSize = 12; frameSize = 24
-        case 2: pointSize = 18; frameSize = 40
-        default: pointSize = 15; frameSize = 32
+        case 0: pointSize = 18; frameSize = 40
+        case 2: pointSize = 28; frameSize = 58
+        default: pointSize = 23; frameSize = 48
         }
         let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.toolTip)?
@@ -1292,8 +1302,48 @@ final class MosaicWindowController: NSObject {
     }
 
     private static func currentIconSizeSetting() -> Int {
-        let value = AppSettings.shared.integer(forKey: iconSizeDefaultsKey)
-        return (0...2).contains(value) ? value : 2
+        let value = AppSettings.shared.object(forKey: iconSizeDefaultsKey) as? Int
+        guard let value, (0...2).contains(value) else { return 1 } // 既定値=中
+        return value
+    }
+
+    // MARK: - 画面内テキストサイズ
+
+    private static func currentTextSizeSetting() -> Int {
+        let value = AppSettings.shared.object(forKey: textSizeDefaultsKey) as? Int
+        guard let value, (0...2).contains(value) else { return 1 } // 既定値=中
+        return value
+    }
+
+    /// 「テキストサイズ」設定（小/中/大）による倍率。既定（中）は等倍。
+    static func textScale() -> CGFloat {
+        switch currentTextSizeSetting() {
+        case 0: return 0.85
+        case 2: return 1.2
+        default: return 1.0
+        }
+    }
+
+    /// テキストサイズ設定を反映したシステムフォント。画面上のUIラベル・キャンバス描画テキストに使う
+    /// （モザイクパターンのプレビューアイコン等、固定サイズの絵として描くテキストには使わない）。
+    static func scaledFont(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        .systemFont(ofSize: size * textScale(), weight: weight)
+    }
+
+    static func scaledMonospacedDigitFont(_ size: CGFloat, weight: NSFont.Weight = .regular) -> NSFont {
+        .monospacedDigitSystemFont(ofSize: size * textScale(), weight: weight)
+    }
+
+    /// テキストサイズ変更時、動的に再生成されるUI（レイヤ一覧・ライブラリ一覧・キャンバス描画・
+    /// ステータスバー）へ即座に反映する。ウィンドウ起動時にのみ組み立てる静的な見出し等は
+    /// 次回起動時に反映される（テキストサイズ変更のたびにウィンドウ全体を再構築するリスクを避けるため）。
+    @objc private func textSizeChanged() {
+        AppSettings.shared.set(textSizeControl.selectedSegment, forKey: Self.textSizeDefaultsKey)
+        reloadLayerList()
+        reloadLibrary()
+        canvas.needsDisplay = true
+        updateStatsBar()
+        updateStatus("テキストサイズを変更しました（一部の表示は次回起動時に反映されます）")
     }
 
     /// 詳細設定でアイコンサイズが変更されたとき、既存の全ツールバーボタンへ即座に反映する。
@@ -1336,7 +1386,7 @@ final class MosaicWindowController: NSObject {
         for label in [styleOpacityValueLabel, styleBlockScaleValueLabel, styleFeatherValueLabel,
                       styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleCloudDensityValueLabel,
                       groinPositionValueLabel] {
-            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
             label.alignment = .right
             label.translatesAutoresizingMaskIntoConstraints = false
             label.widthAnchor.constraint(equalToConstant: 48).isActive = true
@@ -1357,8 +1407,8 @@ final class MosaicWindowController: NSObject {
         stylePatternImageButton.target = self
         stylePatternImageButton.action = #selector(choosePatternImage)
         stylePatternImageLabel.textColor = .secondaryLabelColor
-        stylePatternImageLabel.font = .systemFont(ofSize: 11)
-        selectedLayerStyleLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        stylePatternImageLabel.font = Self.scaledFont(11)
+        selectedLayerStyleLabel.font = Self.scaledFont(11, weight: .medium)
         selectedLayerStyleLabel.textColor = .secondaryLabelColor
         selectedLayerStyleLabel.lineBreakMode = .byTruncatingMiddle
         applyStyleToAllButton.toolTip = "現在の設定をすべてのモザイクレイヤへ複製"
@@ -1371,7 +1421,7 @@ final class MosaicWindowController: NSObject {
         panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "インスペクタ")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = Self.scaledFont(15, weight: .semibold)
 
         let shapeRow = inspectorRow("追加形状", control: shapeControl)
         let maskRow = inspectorRow("マスク生成", control: segmentEngineControl)
@@ -1458,7 +1508,7 @@ final class MosaicWindowController: NSObject {
 
     private func inspectorHeading(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = .systemFont(ofSize: 12, weight: .semibold)
+        label.font = Self.scaledFont(12, weight: .semibold)
         label.textColor = .labelColor
         return label
     }
@@ -1466,7 +1516,9 @@ final class MosaicWindowController: NSObject {
     private func inspectorRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSStackView {
         let label = NSTextField(labelWithString: title)
         label.textColor = .secondaryLabelColor
-        label.widthAnchor.constraint(equalToConstant: 78).isActive = true
+        // 固定幅（旧: equalToConstant）だと、幅より長いラベル文字列が隣接コントロールへ
+        // はみ出して重なって見える不具合があったため、最小幅のみを指定して伸縮可能にする。
+        label.widthAnchor.constraint(greaterThanOrEqualToConstant: 78).isActive = true
         var views: [NSView] = [label, control]
         if let trailing { views.append(trailing) }
         let row = NSStackView(views: views)
@@ -1932,7 +1984,7 @@ final class MosaicWindowController: NSObject {
         panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "レイヤ")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = Self.scaledFont(15, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         // レイヤ表示トグル（ツールバーから移設: 人物検出レイヤ・骨格検出レイヤ・ROIレイヤの一括ON/OFF）
@@ -2916,7 +2968,7 @@ final class MosaicWindowController: NSObject {
         panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "ライブラリ")
-        title.font = .systemFont(ofSize: 15, weight: .semibold)
+        title.font = Self.scaledFont(15, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         viewModeControl.selectedSegment = libraryViewMode.rawValue
@@ -3606,7 +3658,7 @@ extension MosaicWindowController {
 
         let chooseFolderButton = NSButton(title: "保存先を変更…", target: self, action: #selector(exportChooseFolder))
 
-        exportFormatNoteLabel.font = .systemFont(ofSize: 10)
+        exportFormatNoteLabel.font = Self.scaledFont(10)
         exportFormatNoteLabel.textColor = .secondaryLabelColor
         exportFormatNoteLabel.maximumNumberOfLines = 3
         exportFormatNoteLabel.lineBreakMode = .byWordWrapping
@@ -3645,9 +3697,9 @@ extension MosaicWindowController {
         exportPreviewZoomImageView.heightAnchor.constraint(equalToConstant: 220).isActive = true
 
         let fullLabel = NSTextField(labelWithString: "全体プレビュー")
-        fullLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        fullLabel.font = Self.scaledFont(11, weight: .medium)
         let zoomLabel = NSTextField(labelWithString: "拡大プレビュー（中央部）")
-        zoomLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        zoomLabel.font = Self.scaledFont(11, weight: .medium)
 
         let previewColumn = NSStackView(views: [
             fullLabel, exportPreviewFullImageView, zoomLabel, exportPreviewZoomImageView
@@ -4021,6 +4073,7 @@ extension MosaicWindowController {
         _ = restoreSplitPositions()
         applyIconSizeToAllToolbarButtons()
         iconSizeControl.selectedSegment = Self.currentIconSizeSetting()
+        textSizeControl.selectedSegment = Self.currentTextSizeSetting()
         reloadLibrary()
     }
 
@@ -4036,22 +4089,33 @@ extension MosaicWindowController {
         iconSizeControl.action = #selector(iconSizeChanged)
         iconSizeControl.toolTip = "ツールバーアイコンの表示サイズ"
 
-        let iconSizeRow = inspectorRow("アイコンサイズ", control: iconSizeControl)
-        let settingsPathLabel = NSTextField(labelWithString: "設定ファイル: \(AppSettings.shared.settingsFileLocation.path)")
-        settingsPathLabel.font = .systemFont(ofSize: 10)
-        settingsPathLabel.textColor = .secondaryLabelColor
-        settingsPathLabel.lineBreakMode = .byTruncatingMiddle
-        settingsPathLabel.maximumNumberOfLines = 2
+        textSizeControl.selectedSegment = Self.currentTextSizeSetting()
+        textSizeControl.target = self
+        textSizeControl.action = #selector(textSizeChanged)
+        textSizeControl.toolTip = "画面内のテキストサイズ（一部の表示は次回起動時に反映されます）"
 
-        let content = NSStackView(views: [iconSizeRow, settingsPathLabel])
+        let iconSizeRow = inspectorRow("アイコンサイズ", control: iconSizeControl)
+        let textSizeRow = inspectorRow("テキストサイズ", control: textSizeControl)
+
+        // 「設定ファイル」行もinspectorRowで統一し、アイコンサイズ等のラベルと
+        // 左寄せ位置・テキストサイズを揃える（旧実装は別スタイルのラベルで揃っていなかった）。
+        let settingsPathValueLabel = NSTextField(labelWithString: AppSettings.shared.settingsFileLocation.path)
+        settingsPathValueLabel.textColor = .secondaryLabelColor
+        settingsPathValueLabel.lineBreakMode = .byTruncatingMiddle
+        settingsPathValueLabel.maximumNumberOfLines = 2
+        settingsPathValueLabel.translatesAutoresizingMaskIntoConstraints = false
+        settingsPathValueLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 300).isActive = true
+        let settingsPathRow = inspectorRow("設定ファイル", control: settingsPathValueLabel)
+
+        let content = NSStackView(views: [iconSizeRow, textSizeRow, settingsPathRow])
         content.orientation = .vertical
         content.alignment = .leading
-        content.spacing = 12
-        content.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        content.spacing = 14
+        content.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
         content.translatesAutoresizingMaskIntoConstraints = false
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 380, height: 130),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 180),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -4093,7 +4157,7 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
 
             let label = cell.textField ?? NSTextField(labelWithString: "")
             label.lineBreakMode = .byTruncatingMiddle
-            label.font = .systemFont(ofSize: 12)
+            label.font = Self.scaledFont(12)
             let linkMark = libraryEngine.isLinkBroken(item) ? "⚠️リンク切れ " : (item.isLinked ? "🔗" : "")
             label.stringValue = "\(item.processedRelativePath == nil ? "元" : "済") \(linkMark)\(item.sourceName)\n\(item.imagePixelWidth)x\(item.imagePixelHeight) ROI \(item.rois.count)"
             label.textColor = libraryEngine.isLinkBroken(item) ? .systemRed : .labelColor
@@ -4325,7 +4389,7 @@ final class LibraryGridItem: NSCollectionViewItem {
         thumbnailView.imageScaling = .scaleProportionallyUpOrDown
         thumbnailView.translatesAutoresizingMaskIntoConstraints = false
 
-        captionField.font = .systemFont(ofSize: 11)
+        captionField.font = MosaicWindowController.scaledFont(11)
         captionField.alignment = .center
         captionField.lineBreakMode = .byTruncatingMiddle
         captionField.maximumNumberOfLines = 1
@@ -5036,7 +5100,7 @@ final class ImageCanvasView: NSView {
     private func drawPlaceholder() {
         let text = "画像を開く"
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 28, weight: .semibold),
+            .font: MosaicWindowController.scaledFont(28, weight: .semibold),
             .foregroundColor: NSColor.secondaryLabelColor
         ]
         let size = text.size(withAttributes: attributes)
@@ -5070,7 +5134,7 @@ final class ImageCanvasView: NSView {
     private func drawCategoryLabel(_ roi: MosaicROI, near rect: NSRect, color: NSColor) {
         let text = roi.category.displayName
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .font: MosaicWindowController.scaledFont(10, weight: .semibold),
             .foregroundColor: NSColor.white,
             .backgroundColor: color.withAlphaComponent(0.85)
         ]
@@ -5230,7 +5294,7 @@ final class ImageCanvasView: NSView {
     /// レイヤ範囲の右下内側にレイヤ名を表示する。
     private func drawLayerName(_ text: String, in rect: NSRect, color: NSColor) {
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.systemFont(ofSize: 10, weight: .semibold),
+            .font: MosaicWindowController.scaledFont(10, weight: .semibold),
             .foregroundColor: NSColor.white,
             .backgroundColor: color.withAlphaComponent(0.85)
         ]

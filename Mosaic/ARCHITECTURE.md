@@ -153,10 +153,10 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 
 ## 5.14 プロジェクトファイルと詳細設定
 
-- ファイル＞設定＞「保存」/「読込」は `AppSettings.exportSnapshot()`/`importSnapshot(_:)` で全設定値（モザイクスタイル・レイアウト・検出設定・ライブラリ表示・アイコンサイズ等の `AppSettings` に保存されているすべてのキー）をJSONファイル（`.newmosaicproj`）として書き出し/読み込みする。読込後は `refreshAllUIFromSettings()` で画面上の全コントロールを再同期する。
+- ファイル＞設定＞「保存」/「読込」は `AppSettings.exportSnapshot()`/`importSnapshot(_:)` で全設定値（モザイクスタイル・レイアウト・検出設定・ライブラリ表示・アイコンサイズ等の `AppSettings` に保存されているすべてのキー）をJSONファイル（`.nmcf`, newMosaic Config の略。Win/Mac対応の4文字拡張子。旧`.newmosaicproj`は冗長のためBuild 66で短縮）として書き出し/読み込みする。読込後は `refreshAllUIFromSettings()` で画面上の全コントロールを再同期する。
 - 「プロジェクト」サブメニューは最近保存/読込したプロジェクトを最大10件（同一パスは重複排除）表示し、`NSMenuDelegate.menuNeedsUpdate` でメニューを開く直前に再構築する。
 - 「初期化」は確認ダイアログの上で `AppSettings.resetAll()`（全設定値を空にして次回起動時の既定値に戻す）を実行し、その場でUIへ反映する。ライブラリの画像・ROI（`LibraryEngine` 管理下）は対象外。
-- 「詳細設定」ウィンドウは現状アイコンサイズ（小/中/大）のみを持つ。ツールバーアイコンはSF Symbolsの `SymbolConfiguration(pointSize:)` とボタンの幅/高さ制約を動的に差し替えて見た目サイズを変更する。
+- 「詳細設定」ウィンドウはアイコンサイズ（小/中/大）とテキストサイズ（小/中/大）を持つ（Build 66〜）。ツールバーアイコンはSF Symbolsの `SymbolConfiguration(pointSize:)` とボタンの幅/高さ制約を動的に差し替えて見た目サイズを変更する（既定=中。小=18pt/40pt枠、中=23pt/48pt枠、大=28pt/58pt枠。Build 66で全体を一段階拡大し、既定値も大→中へ変更）。テキストサイズは `MosaicWindowController.textScale()`（小=0.85倍・中=1.0倍・大=1.2倍）を介して画面内のラベル・キャンバス描画テキストのフォントサイズへ反映する。レイヤ一覧・ライブラリ一覧・キャンバス描画・ステータスバーなど動的に再構築される表示は変更時に即座に反映されるが、起動時にのみ組み立てる静的な見出し等は次回起動時に反映される。
 
 ## 5.13 フォルダ一括登録（リンク）と一括処理
 
