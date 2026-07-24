@@ -1385,9 +1385,14 @@ final class MosaicWindowController: NSObject {
         let lastIndex = mainSplit.arrangedSubviews.count - 2
         var candidates = [lastIndex]
         if !candidates.contains(0) { candidates.append(0) }
+        NSLog(
+            "[newMosaic] setMainSplitRightPaneWidth: want=\(width) target=\(target) " +
+            "candidates=\(candidates) beforeRightW=\(rightPane.frame.width) mainW=\(mainSplit.bounds.width)"
+        )
         for index in candidates where index >= 0 {
             mainSplit.setPosition(target, ofDividerAt: index)
             mainSplit.layoutSubtreeIfNeeded()
+            NSLog("[newMosaic]   tried index=\(index) -> rightW=\(rightPane.frame.width)")
             if abs(rightPane.frame.width - width) < 30 { return }
         }
     }
@@ -4486,7 +4491,18 @@ extension MosaicWindowController {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         AppSettings.shared.resetAll()
         refreshAllUIFromSettings()
-        updateStatus("すべての設定を初期化しました")
+        updateStatus("すべての設定を初期化しました \(layoutDiagnosticsSummary())")
+    }
+
+    /// 右サイドパネル幅の不具合調査用の一時的な診断情報（実機の実測値が無いと原因を特定できないため）。
+    /// 原因判明後に削除する。
+    private func layoutDiagnosticsSummary() -> String {
+        guard let mainSplit = mainSplitView, let leftPane = leftPaneSplitView,
+              let rightPane = rightPaneSplitView else { return "[診断: ビュー未取得]" }
+        return "[診断: main=\(Int(mainSplit.bounds.width)) " +
+            "leftHidden=\(leftPane.isHidden) leftW=\(Int(leftPane.frame.width)) " +
+            "canvasW=\(Int(canvas.frame.width)) rightW=\(Int(rightPane.frame.width)) " +
+            "divider=\(Int(mainSplit.dividerThickness)) subviews=\(mainSplit.arrangedSubviews.count)]"
     }
 
     /// 設定の読込・初期化後に、画面上の全コントロールをAppSettingsの現在値へ再同期する。

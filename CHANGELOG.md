@@ -1,5 +1,16 @@
 # Changelog
 
+## v0.0.00001 - Build 73 - 2026-07-25
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 調査用: Build 72でも右サイドパネル幅の不具合が解消しなかったため、推測での修正を一旦停止し、実測値を得るための一時的な診断表示を追加した（機能変更なし）。
+
+■更新履歴
+
+- 「初期化」実行後のステータスバー表示に、実測値（mainSplit幅・左ペイン非表示状態と幅・キャンバス幅・右ペイン幅・divider太さ・arrangedSubviews数）を一時的に付加した（`layoutDiagnosticsSummary()`）。原因特定後に削除する。
+- `setMainSplitRightPaneWidth()` の各候補divider index試行前後の幅をNSLog（Console.appで確認可能）へ出力するようにした。
+
 ## v0.0.00001 - Build 72 - 2026-07-25
 
 ■更新履歴（Readme / ChangeLog 用）
