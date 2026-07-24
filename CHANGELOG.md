@@ -1,5 +1,33 @@
 # Changelog
 
+## v0.0.00076 - 2026-07-25
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: デバッグログウィンドウを開く・更新するたびにアプリが固まる不具合を修正した（バックグラウンド実行に変更）。
+- バグ修正: ツールバーアイコンの選択枠がアイコン形状に沿った正方形にならない不具合を、ネイティブのベゼル/フォーカスリングに依存しない自前描画方式へ変更して解消した。
+- 新機能: レイヤ一覧でROIグループ（またはROI選択リストの複数選択）を選ぶと、画像上でもまとめて強調表示され、いずれか1つをドラッグするとグループ全体を一括移動できるようにした。
+- バグ修正: レイヤパネルの幅が十分でもレイヤ名が省略表示される不具合を修正した。
+- 改善: インスペクタ上部にあった「選択レイヤ情報」を下部ステータスバーへ移動し、「(既定設定を継承)」→「<継承>」、「(個別設定)」→「<個別>」と簡潔な表記にした。レイヤパネルのROI行にも、レイヤ名とモザイク種別の間に同じフラグを表示する。
+- 改善: モザイクパターン名を変更した（「任意パターン画像」→「パターン画像」、「かぶせ画像」→「マスク画像」）。ボタン名も短縮した（「パターン画像を選択…」→「画像選択…」、「全レイヤへ適用」→「全レイヤ適用」）。
+- 改善: 「モザイク表示」のON/OFFと、レイヤの「輪郭」「タグ」表示を、レイヤパネルの「表示:」設定へ統合した。輪郭/タグはレイヤ行毎の個別設定から全レイヤ一括設定へ変更した。
+- 改善: 候補生成時、体や顔が傾いている場合にROIの形状（目元・眼窩下〜あご・乳首・鼠径部）を認識範囲の向きに合わせて自動回転するようにした。
+- バグ修正: モザイク詳細設定（透明度等）の左マージンとスライダー-数値間の間隔が、サイドパネル幅に応じて広がる不具合を修正した（`styleGrid`の最大幅制約が不足していたのが真因）。
+- 改善: ライブラリのテキスト/サムネイル表示選択時、意味を持たない表示拡大縮小アイコンをグレーアウトするようにした。
+
+■更新履歴
+
+- `refreshDebugLog()`/`exportDebugLog()` を `Task.detached` によるバックグラウンド実行へ変更し、`OSLogStore` の走査（システム全体スキャン）をメインスレッドから排除。あわせて取得範囲を1時間→10分、最大500件へ縮小した。
+- `SquareIconButton`（`NSButton`サブクラス）を新設し、`isBordered = false` + `draw(_:)`内で`isHighlighted`時のみ`bounds`いっぱいに矩形ハイライトを自前描画する方式へ変更。`.texturedRounded`/`.shadowlessSquare`ベゼルやフォーカスリングはいずれも大きな正方形フレームへ追従しなかったことが繰り返しの不具合の真因だった。
+- `ImageCanvasView.selectedROIGroupIDs: Set<UUID>` と `GroupMoveState` を追加し、`mouseDown`/`mouseDragged`/`mouseUp` へグループ一括移動を実装。`outlineViewSelectionDidChange` がROIグループ選択（複数の`ROIListEntry`選択も含む）を検知して同期する。
+- `layerOutlineView.sizeLastColumnToFit()` を `splitViewDidResizeSubviews` と `reloadLayerList()` の両方で呼ぶよう変更。単一列の`resizingMask = .autoresizingMask`だけではサイドパネルの分割ドラッグに追従しないことがあった。
+- `selectedLayerStyleLabel`（NSTextField）を廃止し、`selectedLayerStatusSummary: String?` + `updateStatsBar()`へ統合。`rebuildROIListEntries()`のROI行タイトルへ `<継承>`/`<個別>` フラグを追加。
+- `MosaicEngine`の`.customImage`/`.overlayImage`表示名、`applyStyleToAllButton`/`stylePatternImageButton`のタイトルを変更。
+- `mosaicPreviewCheckbox`をレイヤパネルの`togglesRow`へ移動。`layerOutlineAllCheckbox`/`layerTagAllCheckbox`（全レイヤ一括の輪郭/タグ表示）を新設し、`LayerRowView`から行毎の`outlineCheckbox`/`tagCheckbox`を削除（`LayerLeaf.showsOutline`/`showsTag`のモデル自体とcanvas描画側は変更なし、UIのみ一括操作化）。
+- `SensitiveROIGenerator`（胸部/鼠径部ROI）に`tiltAngleDegrees`/`unitVector`ヘルパーを追加し、肩ライン/腰ラインの傾きをROIの`rotation`と横方向オフセットへ反映。`FaceRegionBuilder`にも`tiltAngleDegrees(leftEyePoints:rightEyePoints:)`を追加し、Vision顔検出（`FaceRegionDetector`）の目元/眼窩下〜あごROIへ適用（アニメ向けDWPose経由の`AnimePoseEstimator.faceRegionROIs`は左右の目キーポイントが分離されていないため未対応）。
+- `styleGrid`（NSGridView）に`widthAnchor.constraint(lessThanOrEqualToConstant: 362)`を追加。NSGridViewは他のinspectorRow系の行と異なり内容から一意な幅が決まらず、親スタック内で伸縮してしまっていたのが左マージン不一致の真因だった。
+- `thumbSmallerButton`/`thumbLargerButton`をインスタンスプロパティへ変更し、`updateLibraryModeVisibility()`で`libraryViewMode == .thumbnailGrid`のときのみ有効化。
+
 ## v0.0.00075 - 2026-07-25
 
 ■更新履歴（Readme / ChangeLog 用）

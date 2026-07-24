@@ -48,6 +48,25 @@ public enum FaceRegionBuilder {
             height: height * 1.06
         ).clamped()
     }
+
+    /// 左右の目の中心を結ぶ線の傾き（度、時計回り。画像座標は左上原点でy下方向が正）。
+    /// 顔が傾いている場合に「目元」「眼窩下〜あご」ROIの回転（`MosaicROI.rotation`）へ反映し、
+    /// 認識範囲（顔の向き）に沿った形状にするために使う。
+    public static func tiltAngleDegrees(
+        leftEyePoints: [(x: Double, y: Double)],
+        rightEyePoints: [(x: Double, y: Double)]
+    ) -> Double {
+        guard !leftEyePoints.isEmpty, !rightEyePoints.isEmpty else { return 0 }
+        let leftCenter = (
+            x: leftEyePoints.map(\.x).reduce(0, +) / Double(leftEyePoints.count),
+            y: leftEyePoints.map(\.y).reduce(0, +) / Double(leftEyePoints.count)
+        )
+        let rightCenter = (
+            x: rightEyePoints.map(\.x).reduce(0, +) / Double(rightEyePoints.count),
+            y: rightEyePoints.map(\.y).reduce(0, +) / Double(rightEyePoints.count)
+        )
+        return atan2(rightCenter.y - leftCenter.y, rightCenter.x - leftCenter.x) * 180 / .pi
+    }
 }
 
 /// 実写向けの顔領域検出器。`VNDetectFaceLandmarksRequest` のランドマーク
@@ -75,10 +94,14 @@ public final class FaceRegionDetector {
                 }
             }
 
-            let eyePoints = imagePoints(landmarks.leftEye) + imagePoints(landmarks.rightEye)
+            let leftEyePoints = imagePoints(landmarks.leftEye)
+            let rightEyePoints = imagePoints(landmarks.rightEye)
+            let eyePoints = leftEyePoints + rightEyePoints
             let browPoints = imagePoints(landmarks.leftEyebrow) + imagePoints(landmarks.rightEyebrow)
             let contourPoints = imagePoints(landmarks.faceContour)
             let confidence = Double(face.confidence)
+            // 顔が傾いている場合、両目を結ぶ線の角度をROIの回転へ反映し、認識範囲（顔の向き）に沿わせる。
+            let faceAngle = FaceRegionBuilder.tiltAngleDegrees(leftEyePoints: leftEyePoints, rightEyePoints: rightEyePoints)
 
             if let rect = FaceRegionBuilder.eyesRect(eyePoints: eyePoints, browPoints: browPoints) {
                 rois.append(MosaicROI(
@@ -86,7 +109,8 @@ public final class FaceRegionDetector {
                     confidence: confidence,
                     source: "face-region",
                     shape: .rectangle,
-                    category: .eyes
+                    category: .eyes,
+                    rotation: faceAngle
                 ))
             }
             if let rect = FaceRegionBuilder.lowerFaceRect(eyePoints: eyePoints, contourPoints: contourPoints) {
@@ -95,7 +119,8 @@ public final class FaceRegionDetector {
                     confidence: confidence,
                     source: "face-region",
                     shape: .rectangle,
-                    category: .lowerFace
+                    category: .lowerFace,
+                    rotation: faceAngle
                 ))
             }
         }

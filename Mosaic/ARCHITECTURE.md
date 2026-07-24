@@ -219,8 +219,21 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **ノイズパターンのモノクロ化**: `CIRandomGenerator` はRGB各chが独立乱数でカラーノイズになるため、`CIColorControls(saturation: 0)` を追加してモノクロへ統一。プレビューアイコンは実エンジンを呼んで生成しているため自動的に追従する。
 - **パターン選択のタイル表示化**: `stylePatternPopUp`（NSPopUpButton）は状態保持用として非表示のまま残し、UIは `makePatternTileGrid()` が生成するプレビューアイコンのタイル（1行4個、`patternTileButtons`）へ置き換えた。選択状態のハイライトは `updateMosaicStyleControlAvailability()` 内の `refreshPatternTileSelectionHighlight()` で同期し、各タイルはホバー時に `HoverHelpRelay` 経由でステータスバーへヘルプ文（パターン名）を表示する。
 - **インスペクタ幅追従の修正**: モザイク詳細設定の7種のスライダー（透明度・細かさ・輪郭ぼかし・帯の太さ/間隔・雲の密度・鼠径部位置）に `lessThanOrEqualToConstant: 220` の必須最大幅制約を追加し、サイドパネルを広げても際限なく伸びないようにした。`styleRowLabel(_:)` を新設し、`styleGrid`（NSGridView）のラベル列の最小幅を `inspectorRow` と同じ78ptへ統一して左マージンのズレを解消した。
-- **ツールバーアイコンの選択枠**: `configureToolbarButton` に `focusRingType = .none` を追加。フォーカスリングが `.shadowlessSquare` の実フレームへ正しく追従せず横長に見えていた不具合を解消した。
+- **ツールバーアイコンの選択枠（Build時点でfocusRingType=.noneのみでは未解決。§5.22で`SquareIconButton`により最終解決）**: `configureToolbarButton` に `focusRingType = .none` を追加したが、ネイティブベゼル自体も大きな正方形フレームへ追従しないケースが残り、再発報告があった。
 - **マスク生成の名称変更**: `SegmentEngineKind.displayName` を一般名称へ変更（図形（矩形/楕円）／人物の輪郭（AI自動認識）／物体の輪郭（自動抽出）／対象形状。最後の「対象形状」は「対象の形状（ROI内前景）」から短縮）。
+
+## 5.22 UI再修正・ROIグループの画像上一括操作・自動回転（2026-07-25 v0.0.00076〜）
+
+- **ツールバーアイコン選択枠の最終解決**: `.texturedRounded`/`.shadowlessSquare`ベゼルとフォーカスリングは、いずれもAppKit内部の既定寸法に依存した描画のため大きな正方形フレームへ追従せず、2回の異なる修正でも再発した。ネイティブのベゼル・フォーカスリングを一切使わない`SquareIconButton`（`NSButton`サブクラス。`isBordered = false`、`draw(_:)`内で`isHighlighted`時のみ`bounds`いっぱいに矩形ハイライトを自前描画）へ置き換え、サイズに依存しない描画へ変更した。`makeToolbarButton`/`shortcutToolbarButton`の両生成経路で使用する。
+- **デバッグログのフリーズ修正**: `OSLogStore`の走査（システム全体を一旦スキャンしてから絞り込むため直近分でも数秒かかることがある）をメインスレッドで同期実行しており、ウィンドウを開く・更新するたびにUIが固まっていた。`refreshDebugLog()`/`exportDebugLog()`を`Task.detached`でバックグラウンド実行し、取得範囲も1時間→10分・最大500件へ縮小した。
+- **ROIグループの画像上一括選択・一括移動**: `ImageCanvasView.selectedROIGroupIDs: Set<UUID>`を追加。レイヤ一覧で`ROIListGroup`（または複数の`ROIListEntry`）を選択すると、画像上でも該当ROI全てに強調枠（`drawSelectedLayerHighlight`）を表示し、いずれか1つをドラッグすると`GroupMoveState`により全ROIを同じ量だけ一括移動する。`outlineViewSelectionDidChange`で同期する。
+- **レイヤ名の省略表示バグ**: `layerOutlineView`の唯一の列は`resizingMask = .autoresizingMask`だけではサイドパネルの分割ドラッグに追従せず、パネル幅が十分でも旧い（狭い）列幅のままトランケートされ続けていた。`splitViewDidResizeSubviews`と`reloadLayerList()`の両方で`layerOutlineView.sizeLastColumnToFit()`を呼ぶよう変更。
+- **選択レイヤ情報のステータスバー移動**: インスペクタ上部にあった`selectedLayerStyleLabel`（NSTextField）を廃止し、`selectedLayerStatusSummary: String?`として下部ステータスバー（`updateStatsBar()`）へ統合。表記は「(既定設定を継承)」→「`<継承>`」、「(個別設定)」→「`<個別>`」に簡略化。レイヤ一覧のROI選択リスト行タイトル（`rebuildROIListEntries()`）にも、レイヤ名とモザイク種別の間へ同じフラグを追加した。
+- **輪郭/タグ表示の一括化**: `LayerRowView`から行毎の`outlineCheckbox`/`tagCheckbox`ミニコントロールを削除（`LayerLeaf.showsOutline`/`showsTag`のモデル・canvas描画側は変更なし）。代わりにレイヤパネルの表示:設定へ`layerOutlineAllCheckbox`/`layerTagAllCheckbox`（全レイヤ一括の輪郭/タグ表示）を新設。「モザイク表示」（`mosaicPreviewCheckbox`）も「ワークフロー」からレイヤパネルの表示:行へ移動した。
+- **モザイクパターン名・ボタン名の変更**: `MosaicFillPattern`の`.customImage`「パターン画像」、`.overlayImage`「マスク画像（マスク・メガネ等）」に変更。`applyStyleToAllButton`「全レイヤ適用」、`stylePatternImageButton`「画像選択...」に短縮。
+- **候補生成時のROI自動回転**: `SensitiveROIGenerator`（胸部/鼠径部）に`tiltAngleDegrees`/`unitVector`ヘルパーを追加し、肩ライン/腰ラインの傾きを`MosaicROI.rotation`と横方向オフセット（肩ラインの単位ベクトル方向）へ反映。体が横臥・斜め姿勢のとき、ROI形状が認識範囲（体の向き）に沿うようになる。`FaceRegionBuilder`にも`tiltAngleDegrees(leftEyePoints:rightEyePoints:)`を追加し、Vision顔検出（`FaceRegionDetector`）の目元/眼窩下〜あごROIへ適用（アニメ向けDWPose経由の`AnimePoseEstimator.faceRegionROIs`は左右の目キーポイントが分離されておらず未対応のまま）。既存テスト（`roiGeneratorUsesPoseJointsForChestAndGroin`等）は水平姿勢（傾き0度）のフィクスチャのため回帰なし。
+- **モザイク詳細設定の左マージン再修正**: `styleGrid`（NSGridView）は他のinspectorRow系の行と異なり内容から一意な幅が決まらず、親の`content`スタック（`alignment = .leading`だが`leadingAnchor`/`trailingAnchor`をdocumentへ両端固定しているため、intrinsicContentSizeが不定なビューは伸縮してしまう）内で幅いっぱいに引き伸ばされていたのが真因。`styleGrid.widthAnchor.constraint(lessThanOrEqualToConstant: 362)`（ラベル78+間隔8+スライダー220+間隔8+数値48の想定最大値）を追加して解消。
+- **ライブラリの拡大縮小アイコン無効化**: `thumbSmallerButton`/`thumbLargerButton`をインスタンスプロパティ化し、`updateLibraryModeVisibility()`で`libraryViewMode == .thumbnailGrid`のときのみ有効化（テキスト/サムネイルリスト表示では意味を持たないため）。
 
 ## 6. 品質基準
 

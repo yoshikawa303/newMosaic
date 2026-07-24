@@ -28,9 +28,11 @@
 - 内容: イベント種別・件数・エラーのローカライズ済み説明のみ。画像内容、ファイルパス（`.lastPathComponent`の
   ファイル名のみ許容）、ROI座標等の個人情報は記録しない。
 - 参照: ヘルプ＞デバッグ＞デバッグログ（`MosaicWindowController.showDebugLogWindow()`）。
-  `OSLogStore(scope: .currentProcessIdentifier)` で自プロセスの直近1時間分を取得し、上記4カテゴリと
+  `OSLogStore(scope: .currentProcessIdentifier)` で自プロセスの直近10分・最大500件を取得し、上記4カテゴリと
   Vision検出診断（`Detection`）をまとめて時刻順に一覧表示する。「書き出し…」でテキストファイルへ保存できる
   （ユーザーからの不具合報告時にログを渡しやすくする目的）。
+  `OSLogStore`のシステム全体スキャンによる取得処理はメインスレッドで実行すると数秒単位でUIが
+  固まるため、`Task.detached`でバックグラウンド実行する（v0.0.00076〜。取得範囲も1時間→10分へ縮小）。
 - 確認例（Terminal）: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic"' --last 1h`
 - 削除: アプリ独自ファイルは作成しない（書き出しを行った場合はそのテキストファイルをユーザーが管理）。
   OSのUnified Logging保持方針に従う。

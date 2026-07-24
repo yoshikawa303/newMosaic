@@ -803,14 +803,25 @@ public final class SensitiveROIGenerator: ROIGenerating {
         let nippleY = shoulderY + torsoHeight * min(max(chestPositionRatio, 0.1), 0.9)
         let size = max(0.015, shoulderWidth * 0.14)
         let confidence = Double(min(left.confidence, right.confidence))
+        // 体が傾いている（横臥・斜め姿勢）場合、肩のラインが水平でなくなるため、
+        // ROIも同じ角度へ回転させ左右の中心オフセットも肩ライン方向へ沿わせる
+        // （認識範囲の向きに形状を合わせる）。
+        let shoulderAngle = Self.tiltAngleDegrees(
+            from: CGPoint(x: left.x, y: left.y),
+            to: CGPoint(x: right.x, y: right.y)
+        )
+        let offsetUnit = Self.unitVector(from: CGPoint(x: left.x, y: left.y), to: CGPoint(x: right.x, y: right.y))
         return [-1.0, 1.0].map { side in
-            let centerXOffset = centerX + side * shoulderWidth * 0.22
+            let offset = shoulderWidth * 0.22 * side
+            let centerXOffset = centerX + offset * offsetUnit.x
+            let centerYOffset = nippleY + offset * offsetUnit.y
             return MosaicROI(
-                rect: NormalizedRect(x: centerXOffset - size / 2, y: nippleY - size / 2, width: size, height: size),
+                rect: NormalizedRect(x: centerXOffset - size / 2, y: centerYOffset - size / 2, width: size, height: size),
                 confidence: confidence,
                 source: "pose-chest",
                 shape: .ellipse,
-                category: .nipple
+                category: .nipple,
+                rotation: shoulderAngle
             )
         }
     }
@@ -826,12 +837,18 @@ public final class SensitiveROIGenerator: ROIGenerating {
         let drop = kneeCenterY(for: hint).map { max(0.01, ($0 - hip.y) * ratio) } ?? hipWidth * ratio * 1.6
         let width = hipWidth * 0.9
         let height = hipWidth * 0.7
+        // 体が傾いている場合、腰のラインの角度をROIの回転へ反映し、認識範囲の向きに沿わせる。
+        let hipAngle = Self.tiltAngleDegrees(
+            from: CGPoint(x: leftHip.x, y: leftHip.y),
+            to: CGPoint(x: rightHip.x, y: rightHip.y)
+        )
         return MosaicROI(
             rect: NormalizedRect(x: hip.x - width / 2, y: hip.y + drop - height / 2, width: width, height: height),
             confidence: Double(min(leftHip.confidence, rightHip.confidence)),
             source: "pose-groin",
             shape: .ellipse,
-            category: .other
+            category: .other,
+            rotation: hipAngle
         )
     }
 
@@ -849,6 +866,22 @@ public final class SensitiveROIGenerator: ROIGenerating {
         let knees = [hint.joint(.leftKnee), hint.joint(.rightKnee)].compactMap { $0?.y }
         guard !knees.isEmpty else { return nil }
         return knees.reduce(0, +) / Double(knees.count)
+    }
+
+    /// 関節2点を結ぶ線の傾き（度、時計回り。画像座標は左上原点でy下方向が正）。
+    /// 体が横臥・斜め姿勢で傾いている場合に、ROIの回転（`MosaicROI.rotation`）へ反映し、
+    /// 認識範囲（体の向き）に沿った形状にするために使う。
+    private static func tiltAngleDegrees(from a: CGPoint, to b: CGPoint) -> Double {
+        Double(atan2(b.y - a.y, b.x - a.x)) * 180 / .pi
+    }
+
+    /// 2点を結ぶ単位ベクトル（長さがほぼ0の場合は水平（1, 0)を返す）。
+    private static func unitVector(from a: CGPoint, to b: CGPoint) -> CGPoint {
+        let dx = b.x - a.x
+        let dy = b.y - a.y
+        let length = hypot(dx, dy)
+        guard length > 0.0001 else { return CGPoint(x: 1, y: 0) }
+        return CGPoint(x: dx / length, y: dy / length)
     }
 }
 

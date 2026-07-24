@@ -12,7 +12,7 @@ public enum MosaicEngineError: Error, LocalizedError {
             return "モザイク画像を生成できませんでした"
         case .customPatternImageMissing(let identifier):
             let detail = identifier.map { "（ID: \($0)）" } ?? ""
-            return "任意パターン画像が見つかりません\(detail)。パターン画像を選択し直してください"
+            return "パターン画像が見つかりません\(detail)。画像を選択し直してください"
         }
     }
 }
@@ -42,8 +42,8 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
         case .stripesHorizontal: return "ボーダー（横）"
         case .stripesRandom: return "ボーダーランダム"
         case .clouds: return "雲"
-        case .customImage: return "任意パターン画像"
-        case .overlayImage: return "かぶせ画像（マスク・メガネ等）"
+        case .customImage: return "パターン画像"
+        case .overlayImage: return "マスク画像（マスク・メガネ等）"
         }
     }
 
