@@ -126,6 +126,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// NSScrollView内で内容を上寄せ表示するための反転ドキュメントビュー。
+/// 非flippedのままだと内容が短いときに下寄せ表示になる（サイドパネル移動時の不要な空間の原因）。
+private final class FlippedDocumentView: NSView {
+    override var isFlipped: Bool { true }
+}
+
 private enum LibraryViewMode: Int {
     case thumbnailGrid = 0
     case textList = 1
@@ -667,7 +673,7 @@ final class MosaicWindowController: NSObject {
         let savedRatio = AppSettings.shared.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
         super.init()
         groinPositionSlider.doubleValue = savedRatio
-        groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100))%"
+        groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100)) %"
         let root = NSView()
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
@@ -982,7 +988,8 @@ final class MosaicWindowController: NSObject {
         panel.addSubview(stack)
         NSLayoutConstraint.activate([
             stack.topAnchor.constraint(equalTo: panel.topAnchor, constant: 8),
-            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8)
+            // スクロールバーと重ならないよう左へ寄せる
+            stack.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -26)
         ])
     }
 
@@ -1143,8 +1150,24 @@ final class MosaicWindowController: NSObject {
             slider.target = self
             slider.action = #selector(mosaicStyleChanged)
             slider.translatesAutoresizingMaskIntoConstraints = false
-            slider.widthAnchor.constraint(equalToConstant: 160).isActive = true
+            // 固定幅にするとサイドパネルを狭められないため、希望幅160(低優先)+最小80で圧縮可能にする
+            let preferred = slider.widthAnchor.constraint(equalToConstant: 160)
+            preferred.priority = NSLayoutConstraint.Priority(400)
+            preferred.isActive = true
+            slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         }
+        // 設定値ラベルは固定幅+等幅数字+右寄せ（ドラッグ中に幅が変わってスライダーが左右にずれるのを防ぐ）
+        for label in [styleOpacityValueLabel, styleBlockScaleValueLabel, styleFeatherValueLabel,
+                      styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleCloudDensityValueLabel,
+                      groinPositionValueLabel] {
+            label.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+            label.alignment = .right
+            label.translatesAutoresizingMaskIntoConstraints = false
+            label.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        }
+        // 「色を付ける」チェックはカラーウェルの左に置く（行ラベルは「塗りつぶし色」）
+        styleTintCheckbox.title = ""
+        styleTintCheckbox.toolTip = "色を付ける（チェックで塗りつぶし色を適用）"
         styleTintCheckbox.target = self
         styleTintCheckbox.action = #selector(mosaicStyleChanged)
         styleCloudToneCheckbox.target = self
@@ -1180,16 +1203,26 @@ final class MosaicWindowController: NSObject {
         let generateLayerRow = NSStackView(views: [generatePersonCheckbox, generatePoseCheckbox])
         generateLayerRow.orientation = .horizontal
         generateLayerRow.spacing = 10
-        let categories = NSStackView(views: categoryFilterChecks.map(\.button))
-        categories.orientation = .vertical
-        categories.spacing = 2
-        categories.alignment = .leading
+        // 候補カテゴリは3列表示（1行目=顔領域、2行目=部位、3行目=その他）
+        func categoryButton(_ category: MosaicTargetCategory) -> NSView {
+            categoryFilterChecks.first(where: { $0.category == category })?.button ?? NSView()
+        }
+        let categories = NSGridView(views: [
+            [categoryButton(.eyes), categoryButton(.lowerFace), NSGridCell.emptyContentView],
+            [categoryButton(.nipple), categoryButton(.femaleGenital), categoryButton(.maleGenital)],
+            [categoryButton(.other), NSGridCell.emptyContentView, NSGridCell.emptyContentView]
+        ])
+        categories.rowSpacing = 3
+        categories.columnSpacing = 12
         let groinRow = inspectorRow("鼠径部位置", control: groinPositionSlider, trailing: groinPositionValueLabel)
 
+        let tintRow = NSStackView(views: [styleTintCheckbox, styleTintColorWell])
+        tintRow.orientation = .horizontal
+        tintRow.spacing = 6
         let styleGrid = NSGridView(views: [
             [NSTextField(labelWithString: "パターン"), stylePatternPopUp, NSGridCell.emptyContentView],
             [NSTextField(labelWithString: "透明度"), styleOpacitySlider, styleOpacityValueLabel],
-            [styleTintCheckbox, styleTintColorWell, NSGridCell.emptyContentView],
+            [NSTextField(labelWithString: "塗りつぶし色"), tintRow, NSGridCell.emptyContentView],
             [NSTextField(labelWithString: "細かさ"), styleBlockScaleSlider, styleBlockScaleValueLabel],
             [NSTextField(labelWithString: "輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
             [NSTextField(labelWithString: "帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
@@ -1221,7 +1254,7 @@ final class MosaicWindowController: NSObject {
         content.edgeInsets = NSEdgeInsets(top: 10, left: 12, bottom: 12, right: 12)
         content.translatesAutoresizingMaskIntoConstraints = false
 
-        let document = NSView()
+        let document = FlippedDocumentView()
         document.translatesAutoresizingMaskIntoConstraints = false
         document.addSubview(content)
         let scroll = NSScrollView()
@@ -1271,7 +1304,7 @@ final class MosaicWindowController: NSObject {
     /// 白地に太字の「画」を描いた横長画像の**右半分だけ**へ実際のパターン処理を適用し、
     /// 元画像（左）と加工結果（右）の違いが一目で分かるようにする（ユーザー指定の仕様）。
     private func makePatternPreviewImage(_ pattern: MosaicFillPattern) -> NSImage? {
-        let width = 56
+        let width = 32
         let height = 24
         let scale = 2  // Retina解像度で描画し、小サイズでも文字とパターンをくっきり見せる
         let pixelWidth = width * scale
@@ -1294,7 +1327,7 @@ final class MosaicWindowController: NSObject {
         NSGraphicsContext.current = graphicsContext
         let text = "画" as NSString
         let attributes: [NSAttributedString.Key: Any] = [
-            .font: NSFont.boldSystemFont(ofSize: CGFloat(pixelHeight) * 0.82),
+            .font: NSFont.boldSystemFont(ofSize: CGFloat(pixelHeight) * 0.95),
             .foregroundColor: NSColor.black
         ]
         let textSize = text.size(withAttributes: attributes)
@@ -1315,11 +1348,12 @@ final class MosaicWindowController: NSObject {
             source: "pattern-preview",
             shape: .rectangle
         )
+        // 各パラメータは小さいアイコン内で実際の加工の見た目が分かる値にする
         var style = MosaicStyle(
             pattern: pattern,
-            blockScale: 9,
-            stripeWidth: 5,
-            stripeSpacing: 4,
+            blockScale: 6,
+            stripeWidth: 4,
+            stripeSpacing: 3,
             cloudDensity: 0.75
         )
         // 画像必須パターンのプレビューにはプレースホルダ（かぶせ画像=サングラス風の黒帯）を使う
@@ -1472,12 +1506,12 @@ final class MosaicWindowController: NSObject {
         styleCloudDensitySlider.isEnabled = pattern == .clouds
         styleCloudToneCheckbox.isEnabled = pattern == .clouds
         stylePatternImageButton.isEnabled = pattern.requiresPatternImage
-        styleCloudDensityValueLabel.stringValue = "\(Int(styleCloudDensitySlider.doubleValue * 100))%"
-        styleOpacityValueLabel.stringValue = "\(Int(styleOpacitySlider.doubleValue * 100))%"
-        styleBlockScaleValueLabel.stringValue = "\(Int(styleBlockScaleSlider.doubleValue))"
-        styleFeatherValueLabel.stringValue = "\(Int(styleFeatherSlider.doubleValue))px"
-        styleStripeWidthValueLabel.stringValue = "\(Int(styleStripeWidthSlider.doubleValue))px"
-        styleStripeSpacingValueLabel.stringValue = "\(Int(styleStripeSpacingSlider.doubleValue))px"
+        styleCloudDensityValueLabel.stringValue = "\(Int(styleCloudDensitySlider.doubleValue * 100)) %"
+        styleOpacityValueLabel.stringValue = "\(Int(styleOpacitySlider.doubleValue * 100)) %"
+        styleBlockScaleValueLabel.stringValue = "\(Int(styleBlockScaleSlider.doubleValue)) px"
+        styleFeatherValueLabel.stringValue = "\(Int(styleFeatherSlider.doubleValue)) px"
+        styleStripeWidthValueLabel.stringValue = "\(Int(styleStripeWidthSlider.doubleValue)) px"
+        styleStripeSpacingValueLabel.stringValue = "\(Int(styleStripeSpacingSlider.doubleValue)) px"
     }
 
     /// 任意パターン画像を選択し、ライブラリ配下へコピーして永続化する。
@@ -1662,7 +1696,7 @@ final class MosaicWindowController: NSObject {
     @objc private func groinPositionChanged() {
         let ratio = groinPositionSlider.doubleValue
         AppSettings.shared.set(ratio, forKey: Self.groinPositionDefaultsKey)
-        groinPositionValueLabel.stringValue = "\(Int(ratio * 100))%"
+        groinPositionValueLabel.stringValue = "\(Int(ratio * 100)) %"
         updateStatus("鼠径部位置の基準: 腰から膝方向へ\(Int(ratio * 100))%（次回の候補生成から適用）")
     }
 
