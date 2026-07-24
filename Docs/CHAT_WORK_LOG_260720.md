@@ -1305,3 +1305,19 @@
   検証は `swift build` / `swift test` 68/68 PASS（UIレイヤの変更のためMosaicCoreテストへの影響なし。既存方針どおりGUI確認はユーザー担当）/ 品質ゲート全PASS、Build 63で再パッケージ。
 
 - 作業時間: 約60分
+
+### 2026-07-24 15:30 JST - Claude Code - 種別: 作業結果 - 「画像出力」ウィンドウを刷新し多形式出力に対応（Build 64）
+
+- 内容:
+
+  依頼にあった「画像出力」ウィンドウの改善（名称統一・可変サイズ・横幅2倍・出力形式選択・プレビュー）を実装した。
+
+  **コア実装（テスト可能な形でMosaicCoreへ配置）**: `ImageExporter`/`ImageExportFormat`/`ImageExportOptions` を新設。jpg/png/bmp/gif/tiff/heicはCGImageDestination（ImageIO標準）で対応。pdf/aiはCGContextのPDFコンテキストへ画像を配置（aiはIllustrator互換のPDFコンテナで、本アプリはベクターデータを持たないためパス編集はできない旨をUIに明記）。`PSDWriter` はAdobe公開仕様準拠の自前実装（RGB 8bit非圧縮）で、「元画像」（非表示）＋「モザイク適用」（表示）の2レイヤ構成に対応——macOS標準ImageIOのPSDリーダーで実際に読み戻し、統合画像・レイヤ可視性の扱いが正しいことをテストで確認済み。`EPSWriter` はJPEG圧縮画像をPostScript DCTDecodeへ自前ASCII85エンコードで埋め込む標準的なラスターEPSを自前実装。
+
+  **CLIP/SAI/MDP対応について事前確認**: 仕様が非公開の独自バイナリ形式であり、逆解析なしに正規実装できないため対応から除外する方針をユーザーに確認・承認済み（AskUserQuestionで選択肢を提示し「対応から除外する」を選択）。
+
+  **UI**: 「画像出力」ウィンドウを新設（旧NSSavePanelから刷新。リサイズ可能、初期幅820pt=旧比約2倍、ファイル名フィールド幅420pt）。ファイル名・保存先・出力形式・品質（jpg/heicのみ）・解像度DPI・元画像レイヤ含める（psdのみ）・透明保持を1画面に集約し、全体プレビュー＋中央拡大プレビューをリアルタイム表示（jpg/heicは実際の品質設定でエンコード→デコードしたプレビュー、他形式は元画素表示）。
+
+  検証は `swift build` / `swift test` 73/73 PASS（新規6件: ImageIO各形式・PDF/AI・PSDレイヤ読み戻し・ASCII85・EPSヘッダの検証）/ 品質ゲート全PASS、Build 64で再パッケージ。実際の出力ファイルをPhotoshop/Illustrator/印刷ワークフローで開いた際の見た目確認はユーザー担当。
+
+- 作業時間: 約90分

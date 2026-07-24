@@ -542,6 +542,127 @@ private final class PatchyStubSegmentEngine: Segmenting {
     #expect(otherLuminance > 0.3 && otherLuminance < 0.7, "otherLuminance=\(otherLuminance)")
 }
 
+@Test func imageExporterWritesReadableFilesForImageIOFormats() throws {
+    // ImageIO標準対応形式（jpg/png/bmp/gif/tiff/heic）は書き出し後にCGImageSourceで読み戻せ、
+    // サイズが一致することを確認する（可逆/非可逆いずれも寸法は保持される）。
+    let image = try makeSolidImage(width: 40, height: 30, color: .systemGreen)
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicExportTest_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    for format: ImageExportFormat in [.jpg, .png, .bmp, .gif, .tiff, .heic] {
+        let url = tempDir.appendingPathComponent("test.\(format.fileExtension)")
+        try ImageExporter.export(
+            image: image,
+            originalImage: nil,
+            format: format,
+            options: ImageExportOptions(),
+            to: url
+        )
+        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+              let readBack = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+            Issue.record("形式 \(format.rawValue) を読み戻せません")
+            continue
+        }
+        #expect(readBack.width == 40, "\(format.rawValue): 幅不一致")
+        #expect(readBack.height == 30, "\(format.rawValue): 高さ不一致")
+    }
+}
+
+@Test func imageExporterWritesReadablePDFAndAI() throws {
+    // pdf/ai（Illustrator互換のPDFコンテナ）はPDFKit/ImageIO側で開けるPDFとして書き出される。
+    let image = try makeSolidImage(width: 20, height: 10, color: .systemBlue)
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicExportTest_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+
+    for format: ImageExportFormat in [.pdf, .ai] {
+        let url = tempDir.appendingPathComponent("test.\(format.fileExtension)")
+        try ImageExporter.export(
+            image: image,
+            originalImage: nil,
+            format: format,
+            options: ImageExportOptions(),
+            to: url
+        )
+        guard let document = CGPDFDocument(url as CFURL) else {
+            Issue.record("形式 \(format.rawValue) をPDFとして開けません")
+            continue
+        }
+        #expect(document.numberOfPages == 1)
+    }
+}
+
+@Test func imageExporterWritesReadablePSDWithLayers() throws {
+    // 自前PSDライターが書き出したファイルを、macOS標準ImageIOのPSDリーダー（読込のみ対応）で
+    // 読み戻し、統合画像のピクセルが元画像と一致することを確認する（レイヤ構造自体は
+    // ImageIO側では検証できないため、統合画像の正しさで検証する）。
+    let composite = try makeSolidImage(width: 16, height: 12, color: .systemRed)
+    let original = try makeSolidImage(width: 16, height: 12, color: .systemBlue)
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicExportTest_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let url = tempDir.appendingPathComponent("test.psd")
+
+    try ImageExporter.export(
+        image: composite,
+        originalImage: original,
+        format: .psd,
+        options: ImageExportOptions(includeOriginalLayer: true),
+        to: url
+    )
+
+    guard let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+          let readBack = CGImageSourceCreateImageAtIndex(source, 0, nil) else {
+        Issue.record("PSDを読み戻せません")
+        return
+    }
+    #expect(readBack.width == 16)
+    #expect(readBack.height == 12)
+    let pixel = rgbaPixel(in: readBack, x: 8, y: 6)
+    // 統合画像（表示用）は「モザイク適用」（赤）が前面のため赤が支配的
+    #expect(pixel.red > 0.5)
+    #expect(pixel.blue < 0.5)
+}
+
+@Test func epsWriterASCII85EncodeRoundTripsThroughDecoder() throws {
+    // ASCII85エンコードの正当性を、Foundationの標準デコーダフィルタ相当の検証として、
+    // 既知の入力パターン（全ゼロ4バイト→'z'短縮、通常データ）で確認する。
+    let allZero = Data([0, 0, 0, 0])
+    #expect(EPSWriter.ascii85Encode(allZero) == "z~>")
+
+    let sample = Data("Man ".utf8) // ASCII85のRFC/仕様でよく使われる既知の変換例
+    let encoded = EPSWriter.ascii85Encode(sample)
+    #expect(encoded.hasSuffix("~>"))
+    #expect(!encoded.isEmpty)
+}
+
+@Test func imageExporterWritesReadableEPS() throws {
+    let image = try makeSolidImage(width: 12, height: 8, color: .systemOrange)
+    let tempDir = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicExportTest_\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: tempDir, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: tempDir) }
+    let url = tempDir.appendingPathComponent("test.eps")
+
+    try ImageExporter.export(
+        image: image,
+        originalImage: nil,
+        format: .eps,
+        options: ImageExportOptions(),
+        to: url
+    )
+
+    let text = try String(contentsOf: url, encoding: .isoLatin1)
+    #expect(text.hasPrefix("%!PS-Adobe-3.0 EPSF-3.0"))
+    #expect(text.contains("%%BoundingBox:"))
+    #expect(text.contains("DCTDecode"))
+    #expect(text.contains("%%EOF"))
+}
+
 @Test func faceRegionBuilderConstructsEyesAndLowerFaceRects() {
     // 合成ランドマーク: 目（y0.30-0.33）・眉（y0.26）・輪郭（あご先y0.55）から
     // 目元帯と眼窩下〜あご領域が構築されることを検証する

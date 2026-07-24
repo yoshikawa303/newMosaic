@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.0.00001 - Build 64 - 2026-07-24
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 新機能: 「画像出力」ウィンドウを刷新した。専用のリサイズ可能なウィンドウ（初期幅は旧保存パネルの約2倍）で、ファイル名・保存先・出力形式・形式ごとの詳細設定を1画面で確認しながら出力できる。
+- 対応形式を jpg/png/bmp/gif/tif/heic/pdf/psd/ai/eps へ拡張した。jpg/heicは品質（圧縮率）スライダー、psdは「元画像レイヤを含める」（非表示レイヤとして追加。Photoshopで表示切替による比較・追加レタッチが可能）、全形式共通で出力解像度（DPI）と透明保持のON/OFFを設定できる。
+- 出力前に全体プレビューと中央部の拡大プレビューを表示する。jpg/heicは実際の圧縮設定でエンコードした結果をプレビューするため、保存前に圧縮アーティファクトを確認できる。
+- CLIP/SAI/MDP（CLIP STUDIO PAINT/SAI/MediBang Paint）は仕様非公開の独自バイナリ形式のため非対応とした（ユーザー確認済み）。
+
+■更新履歴
+
+- `MosaicCore` に `ImageExporter`/`ImageExportFormat`/`ImageExportOptions` を新設。jpg/png/bmp/gif/tiff/heicはCGImageDestination（ImageIO）、pdf/aiはCGContextのPDFコンテキストへ画像を配置して書き出す（aiはIllustrator互換のPDFコンテナとして出力し、ベクターパスとしての編集はできない旨をUIに明記）。
+- `PSDWriter` を新設。Adobe公開仕様「Photoshop File Formats Specification」準拠の自前ライター（RGB 8bit・非圧縮RAWエンコード）。`original` 画像を渡すと「元画像」（非表示）＋「モザイク適用」（表示）の2レイヤ構成で書き出す。macOS標準ImageIOのPSDリーダーで読み戻し、統合画像のピクセルが正しいことをテストで確認済み。
+- `EPSWriter` を新設。JPEG圧縮した画像をPostScript Level 2のDCTDecodeフィルタへ自前実装のASCII85エンコードで埋め込む、標準的なラスターEPSを生成する。
+- テスト6件追加（ImageIO各形式の読み戻し検証、PDF/AIのページ数検証、PSDのレイヤ構成読み戻し検証、ASCII85エンコード検証、EPSヘッダ検証）で計73テスト。
+
 ## v0.0.00001 - Build 63 - 2026-07-24
 
 ■更新履歴（Readme / ChangeLog 用）

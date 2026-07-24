@@ -698,6 +698,31 @@ final class MosaicWindowController: NSObject {
     // ツールバーアイコンボタン（詳細設定のアイコンサイズ変更で一括リサイズするために保持）
     private var toolbarIconButtons: [NSButton] = []
     private var advancedSettingsWindow: NSWindow?
+    // 画像出力ウィンドウ
+    private var exportWindow: NSWindow?
+    private var exportSourceImage: CGImage?
+    private var exportOriginalImage: CGImage?
+    private var exportSourceName = "export"
+    private var exportFolderURL: URL?
+    private let exportFilenameField = NSTextField(string: "")
+    private let exportFolderLabel = NSTextField(labelWithString: "")
+    private let exportFormatPopUp = NSPopUpButton(title: "", target: nil, action: nil)
+    private let exportQualitySlider = NSSlider(value: 92, minValue: 10, maxValue: 100, target: nil, action: nil)
+    private let exportQualityValueLabel = NSTextField(labelWithString: "92 %")
+    private let exportDPIField = NSTextField(string: "350")
+    private let exportIncludeOriginalLayerCheckbox = NSButton(
+        checkboxWithTitle: "元画像レイヤを含める（非表示レイヤとして追加）",
+        target: nil,
+        action: nil
+    )
+    private let exportPreserveTransparencyCheckbox = NSButton(
+        checkboxWithTitle: "透明を保持する（オフで白背景に統合）",
+        target: nil,
+        action: nil
+    )
+    private let exportPreviewFullImageView = NSImageView()
+    private let exportPreviewZoomImageView = NSImageView()
+    private let exportFormatNoteLabel = NSTextField(labelWithString: "")
     private let iconSizeControl = NSSegmentedControl(
         labels: ["小", "中", "大"],
         trackingMode: .selectOne,
@@ -2792,20 +2817,22 @@ final class MosaicWindowController: NSObject {
 
     @objc private func exportImage() {
         guard let loadedImage else {
-            updateStatus("保存する画像がありません")
+            updateStatus("画像出力する画像がありません")
             return
         }
-        let image = renderedImage ?? loadedImage.cgImage
-        let panel = NSSavePanel()
-        panel.allowedContentTypes = [.png]
-        panel.nameFieldStringValue = loadedImage.url.deletingPathExtension().lastPathComponent + "_mosaic.png"
-        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportSourceImage = renderedImage ?? loadedImage.cgImage
+        exportOriginalImage = loadedImage.cgImage
+        exportSourceName = loadedImage.url.deletingPathExtension().lastPathComponent
+        showExportWindow()
+    }
 
+    /// 「画像出力」完了処理: 元のexportImage()が担っていたライブラリ保存・履歴記録・
+    /// 学習サンプル記録を、新しい画像出力ウィンドウからの書き出し後にも同様に行う。
+    private func finalizeExport(image: CGImage, url: URL) {
         do {
-            try savePNG(image, to: url)
             let historyURL = try defaultHistoryURL()
             let entry = MosaicHistoryEntry(
-                imageName: loadedImage.url.lastPathComponent,
+                imageName: url.lastPathComponent,
                 imagePixelWidth: image.width,
                 imagePixelHeight: image.height,
                 rois: canvas.rois
@@ -2817,7 +2844,7 @@ final class MosaicWindowController: NSObject {
                 recordLearningSamples()
                 reloadLibrary()
             }
-            updateStatus("保存しました: \(url.lastPathComponent)")
+            updateStatus("画像出力しました: \(url.lastPathComponent)")
         } catch {
             showError(error)
         }
@@ -3427,14 +3454,6 @@ final class MosaicWindowController: NSObject {
         return false
     }
 
-    private func savePNG(_ image: CGImage, to url: URL) throws {
-        let bitmap = NSBitmapImageRep(cgImage: image)
-        guard let data = bitmap.representation(using: .png, properties: [:]) else {
-            throw CocoaError(.fileWriteUnknown)
-        }
-        try data.write(to: url, options: .atomic)
-    }
-
     private func defaultHistoryURL() throws -> URL {
         let base = try FileManager.default.url(
             for: .applicationSupportDirectory,
@@ -3502,6 +3521,340 @@ extension MosaicWindowController: NSWindowDelegate {
     private func saveWindowFrame(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         AppSettings.shared.set(NSStringFromRect(window.frame), forKey: "Layout.windowFrame")
+    }
+}
+
+// MARK: - 画像出力ウィンドウ
+
+extension MosaicWindowController {
+    /// 「画像出力」ウィンドウを構築・表示する。可変サイズ・旧NSSavePanelの約2倍の横幅、
+    /// 出力形式選択（jpg/png/bmp/gif/tif/heic/pdf/psd/ai/eps）、形式ごとの詳細設定、
+    /// 全体プレビュー＋一部拡大プレビューを備える。
+    private func showExportWindow() {
+        if exportWindow == nil {
+            exportWindow = buildExportWindow()
+        }
+        exportFilenameField.stringValue = exportSourceName + "_mosaic"
+        if exportFolderURL == nil {
+            exportFolderURL = libraryEngine.rootURL
+        }
+        updateExportFolderLabel()
+        exportFormatPopUp.selectItem(withTitle: ImageExportFormat.png.displayName)
+        exportFormatChanged()
+        if let window = exportWindow {
+            if let parent = view.window {
+                parent.beginSheet(window)
+            } else {
+                window.center()
+                window.makeKeyAndOrderFront(nil)
+            }
+        }
+    }
+
+    private func buildExportWindow() -> NSWindow {
+        exportFormatPopUp.removeAllItems()
+        exportFormatPopUp.addItems(withTitles: ImageExportFormat.allCases.map(\.displayName))
+        exportFormatPopUp.target = self
+        exportFormatPopUp.action = #selector(exportFormatChanged)
+
+        exportQualitySlider.target = self
+        exportQualitySlider.action = #selector(exportQualityChanged)
+        exportQualitySlider.translatesAutoresizingMaskIntoConstraints = false
+        exportQualitySlider.widthAnchor.constraint(equalToConstant: 200).isActive = true
+
+        exportDPIField.target = self
+        exportDPIField.action = #selector(exportOptionChanged)
+        exportDPIField.translatesAutoresizingMaskIntoConstraints = false
+        exportDPIField.widthAnchor.constraint(equalToConstant: 80).isActive = true
+
+        exportIncludeOriginalLayerCheckbox.state = .on
+        exportIncludeOriginalLayerCheckbox.target = self
+        exportIncludeOriginalLayerCheckbox.action = #selector(exportOptionChanged)
+
+        exportPreserveTransparencyCheckbox.state = .on
+        exportPreserveTransparencyCheckbox.target = self
+        exportPreserveTransparencyCheckbox.action = #selector(exportOptionChanged)
+
+        exportFilenameField.translatesAutoresizingMaskIntoConstraints = false
+        // 「デフォルトのサイズが小さすぎ使いづらい」報告への対応で、旧NSSavePanel標準幅の
+        // 概ね2倍にあたる幅を確保する
+        exportFilenameField.widthAnchor.constraint(equalToConstant: 420).isActive = true
+
+        let chooseFolderButton = NSButton(title: "保存先を変更…", target: self, action: #selector(exportChooseFolder))
+
+        exportFormatNoteLabel.font = .systemFont(ofSize: 10)
+        exportFormatNoteLabel.textColor = .secondaryLabelColor
+        exportFormatNoteLabel.maximumNumberOfLines = 3
+        exportFormatNoteLabel.lineBreakMode = .byWordWrapping
+        exportFormatNoteLabel.translatesAutoresizingMaskIntoConstraints = false
+        exportFormatNoteLabel.widthAnchor.constraint(equalToConstant: 420).isActive = true
+
+        let formRows = NSStackView(views: [
+            inspectorRow("ファイル名", control: exportFilenameField),
+            inspectorRow("保存先", control: exportFolderLabel, trailing: chooseFolderButton),
+            inspectorRow("形式", control: exportFormatPopUp),
+            inspectorRow("品質", control: exportQualitySlider, trailing: exportQualityValueLabel),
+            inspectorRow("解像度 (DPI)", control: exportDPIField),
+            exportIncludeOriginalLayerCheckbox,
+            exportPreserveTransparencyCheckbox,
+            exportFormatNoteLabel
+        ])
+        formRows.orientation = .vertical
+        formRows.alignment = .leading
+        formRows.spacing = 10
+        formRows.translatesAutoresizingMaskIntoConstraints = false
+
+        exportPreviewFullImageView.imageScaling = .scaleProportionallyUpOrDown
+        exportPreviewFullImageView.wantsLayer = true
+        exportPreviewFullImageView.layer?.borderWidth = 1
+        exportPreviewFullImageView.layer?.borderColor = NSColor.separatorColor.cgColor
+        exportPreviewFullImageView.translatesAutoresizingMaskIntoConstraints = false
+        exportPreviewFullImageView.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        exportPreviewFullImageView.heightAnchor.constraint(equalToConstant: 220).isActive = true
+
+        exportPreviewZoomImageView.imageScaling = .scaleProportionallyUpOrDown
+        exportPreviewZoomImageView.wantsLayer = true
+        exportPreviewZoomImageView.layer?.borderWidth = 1
+        exportPreviewZoomImageView.layer?.borderColor = NSColor.separatorColor.cgColor
+        exportPreviewZoomImageView.translatesAutoresizingMaskIntoConstraints = false
+        exportPreviewZoomImageView.widthAnchor.constraint(equalToConstant: 300).isActive = true
+        exportPreviewZoomImageView.heightAnchor.constraint(equalToConstant: 220).isActive = true
+
+        let fullLabel = NSTextField(labelWithString: "全体プレビュー")
+        fullLabel.font = .systemFont(ofSize: 11, weight: .medium)
+        let zoomLabel = NSTextField(labelWithString: "拡大プレビュー（中央部）")
+        zoomLabel.font = .systemFont(ofSize: 11, weight: .medium)
+
+        let previewColumn = NSStackView(views: [
+            fullLabel, exportPreviewFullImageView, zoomLabel, exportPreviewZoomImageView
+        ])
+        previewColumn.orientation = .vertical
+        previewColumn.alignment = .leading
+        previewColumn.spacing = 6
+        previewColumn.translatesAutoresizingMaskIntoConstraints = false
+
+        let mainRow = NSStackView(views: [formRows, previewColumn])
+        mainRow.orientation = .horizontal
+        mainRow.alignment = .top
+        mainRow.spacing = 24
+        mainRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let cancelButton = NSButton(title: "キャンセル", target: self, action: #selector(exportCancelled))
+        cancelButton.keyEquivalent = "\u{1b}"
+        let exportButton = NSButton(title: "画像出力", target: self, action: #selector(exportConfirmed))
+        exportButton.keyEquivalent = "\r"
+        exportButton.bezelStyle = .rounded
+        exportButton.hasDestructiveAction = false
+        let buttonRow = NSStackView(views: [NSView(), cancelButton, exportButton])
+        buttonRow.orientation = .horizontal
+        buttonRow.spacing = 10
+        buttonRow.translatesAutoresizingMaskIntoConstraints = false
+
+        let content = NSStackView(views: [mainRow, buttonRow])
+        content.orientation = .vertical
+        content.alignment = .trailing
+        content.spacing = 20
+        content.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let container = NSView()
+        container.addSubview(content)
+        NSLayoutConstraint.activate([
+            content.topAnchor.constraint(equalTo: container.topAnchor),
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            mainRow.leadingAnchor.constraint(equalTo: content.leadingAnchor),
+            mainRow.trailingAnchor.constraint(equalTo: content.trailingAnchor),
+            buttonRow.trailingAnchor.constraint(equalTo: content.trailingAnchor)
+        ])
+
+        // 「画像を書き出す」→「画像出力」への名称統一に合わせ、操作ウィンドウ名も同一にする。
+        // 可変サイズ（.resizable）にし、旧NSSavePanelより大幅に広い初期幅を確保する。
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 820, height: 520),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "画像出力"
+        window.minSize = NSSize(width: 640, height: 420)
+        window.contentView = container
+        return window
+    }
+
+    private func updateExportFolderLabel() {
+        exportFolderLabel.stringValue = exportFolderURL?.path ?? "未選択"
+        exportFolderLabel.lineBreakMode = .byTruncatingMiddle
+        exportFolderLabel.toolTip = exportFolderURL?.path
+    }
+
+    @objc private func exportChooseFolder() {
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.allowsMultipleSelection = false
+        panel.prompt = "選択"
+        if let current = exportFolderURL {
+            panel.directoryURL = current
+        }
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        exportFolderURL = url
+        updateExportFolderLabel()
+    }
+
+    private func selectedExportFormat() -> ImageExportFormat {
+        let index = exportFormatPopUp.indexOfSelectedItem
+        let formats = ImageExportFormat.allCases
+        guard (0..<formats.count).contains(index) else { return .png }
+        return formats[index]
+    }
+
+    @objc private func exportFormatChanged() {
+        let format = selectedExportFormat()
+        exportQualitySlider.isEnabled = format.supportsQuality
+        exportQualityValueLabel.textColor = format.supportsQuality ? .labelColor : .tertiaryLabelColor
+        exportIncludeOriginalLayerCheckbox.isHidden = !format.supportsLayers
+        switch format {
+        case .ai:
+            exportFormatNoteLabel.stringValue = "※本アプリはベクターデータを持たないため、Illustratorで開けるPDF互換の画像コンテナとして出力します（パスとしての編集はできません）。"
+        case .eps:
+            exportFormatNoteLabel.stringValue = "※JPEG圧縮した画像をPostScriptへ埋め込む標準的なラスターEPSとして出力します。"
+        case .psd:
+            exportFormatNoteLabel.stringValue = "※「モザイク適用」レイヤ（表示）と「元画像」レイヤ（非表示）の2レイヤ構成で書き出します。Photoshopでレイヤーの表示切替による比較・追加レタッチができます。"
+        default:
+            exportFormatNoteLabel.stringValue = ""
+        }
+        let extensionText = "." + format.fileExtension
+        var name = exportFilenameField.stringValue
+        for other in ImageExportFormat.allCases where name.hasSuffix("." + other.fileExtension) {
+            name = String(name.dropLast(other.fileExtension.count + 1))
+        }
+        exportFilenameField.stringValue = name
+        exportFormatNoteLabel.toolTip = extensionText
+        updateExportPreview()
+    }
+
+    @objc private func exportQualityChanged() {
+        exportQualityValueLabel.stringValue = "\(Int(exportQualitySlider.doubleValue)) %"
+        updateExportPreview()
+    }
+
+    @objc private func exportOptionChanged() {
+        updateExportPreview()
+    }
+
+    private func currentExportOptions() -> ImageExportOptions {
+        let dpi = Double(exportDPIField.stringValue) ?? 350
+        return ImageExportOptions(
+            quality: exportQualitySlider.doubleValue / 100.0,
+            dpi: max(1, dpi),
+            includeOriginalLayer: exportIncludeOriginalLayerCheckbox.state == .on,
+            preserveTransparency: exportPreserveTransparencyCheckbox.state == .on
+        )
+    }
+
+    /// プレビューを更新する。JPEG/HEICは実際に品質設定でエンコード→デコードした結果を表示し、
+    /// 圧縮アーティファクトを保存前に確認できるようにする。それ以外の形式は元画素をそのまま表示する。
+    private func updateExportPreview() {
+        guard let source = exportSourceImage else { return }
+        let format = selectedExportFormat()
+        let previewSource: CGImage
+        if format.supportsQuality, let encoded = Self.inMemoryPreviewEncode(source, format: format, quality: exportQualitySlider.doubleValue / 100.0) {
+            previewSource = encoded
+        } else {
+            previewSource = source
+        }
+        exportPreviewFullImageView.image = NSImage(cgImage: previewSource, size: NSSize(width: previewSource.width, height: previewSource.height))
+        let cropSize = max(32, min(previewSource.width, previewSource.height) / 3)
+        if let zoomed = Self.centerCrop(of: previewSource, size: cropSize) {
+            exportPreviewZoomImageView.image = NSImage(cgImage: zoomed, size: NSSize(width: zoomed.width, height: zoomed.height))
+        } else {
+            exportPreviewZoomImageView.image = exportPreviewFullImageView.image
+        }
+    }
+
+    private static func inMemoryPreviewEncode(_ image: CGImage, format: ImageExportFormat, quality: Double) -> CGImage? {
+        guard let utType = format.utType else { return nil }
+        let mutableData = NSMutableData()
+        guard let destination = CGImageDestinationCreateWithData(mutableData, utType.identifier as CFString, 1, nil) else { return nil }
+        CGImageDestinationAddImage(destination, image, [kCGImageDestinationLossyCompressionQuality: quality] as CFDictionary)
+        guard CGImageDestinationFinalize(destination) else { return nil }
+        guard let source = CGImageSourceCreateWithData(mutableData, nil) else { return nil }
+        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+    }
+
+    private static func centerCrop(of image: CGImage, size: Int) -> CGImage? {
+        let cropWidth = min(size, image.width)
+        let cropHeight = min(size, image.height)
+        let originX = (image.width - cropWidth) / 2
+        let originY = (image.height - cropHeight) / 2
+        return image.cropping(to: CGRect(x: originX, y: originY, width: cropWidth, height: cropHeight))
+    }
+
+    @objc private func exportCancelled() {
+        closeExportWindow()
+    }
+
+    private func closeExportWindow() {
+        guard let window = exportWindow else { return }
+        if let parent = view.window, parent.attachedSheet === window {
+            parent.endSheet(window)
+        }
+        window.orderOut(nil)
+    }
+
+    @objc private func exportConfirmed() {
+        guard let source = exportSourceImage, let folder = exportFolderURL else {
+            updateStatus("保存先を選択してください")
+            return
+        }
+        var filename = exportFilenameField.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !filename.isEmpty else {
+            updateStatus("ファイル名を入力してください")
+            return
+        }
+        let format = selectedExportFormat()
+        for other in ImageExportFormat.allCases where filename.hasSuffix("." + other.fileExtension) {
+            filename = String(filename.dropLast(other.fileExtension.count + 1))
+        }
+        let url = folder.appendingPathComponent(filename).appendingPathExtension(format.fileExtension)
+        let options = currentExportOptions()
+
+        var imageToWrite = source
+        if !options.preserveTransparency, let flattened = Self.flattenOverWhite(source) {
+            imageToWrite = flattened
+        }
+
+        do {
+            try ImageExporter.export(
+                image: imageToWrite,
+                originalImage: exportOriginalImage,
+                format: format,
+                options: options,
+                to: url
+            )
+            closeExportWindow()
+            finalizeExport(image: imageToWrite, url: url)
+        } catch {
+            showError(error)
+        }
+    }
+
+    private static func flattenOverWhite(_ image: CGImage) -> CGImage? {
+        guard let context = CGContext(
+            data: nil,
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue
+        ) else { return nil }
+        context.setFillColor(NSColor.white.cgColor)
+        context.fill(CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        context.draw(image, in: CGRect(x: 0, y: 0, width: image.width, height: image.height))
+        return context.makeImage()
     }
 }
 
