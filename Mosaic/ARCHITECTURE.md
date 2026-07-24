@@ -161,7 +161,7 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 
 - ファイル＞設定＞「保存」/「読込」は `AppSettings.exportSnapshot()`/`importSnapshot(_:)` で全設定値（モザイクスタイル・レイアウト・検出設定・ライブラリ表示・アイコンサイズ等の `AppSettings` に保存されているすべてのキー）をJSONファイル（`.nmcf`, newMosaic Config の略。Win/Mac対応の4文字拡張子。旧`.newmosaicproj`は冗長のためBuild 66で短縮）として書き出し/読み込みする。読込後は `refreshAllUIFromSettings()` で画面上の全コントロールを再同期する。
 - 「プロジェクト」サブメニューは最近保存/読込したプロジェクトを最大10件（同一パスは重複排除）表示し、`NSMenuDelegate.menuNeedsUpdate` でメニューを開く直前に再構築する。
-- 「初期化」は確認ダイアログの上で `AppSettings.resetAll()`（全設定値を空にして次回起動時の既定値に戻す）を実行し、その場でUIへ反映する。ライブラリの画像・ROI（`LibraryEngine` 管理下）は対象外。
+- 「初期化」は確認ダイアログの上で `AppSettings.resetAll()`（全設定値を空にして次回起動時の既定値に戻す）を実行し、その場でUIへ反映する。ライブラリの画像・ROI（`LibraryEngine` 管理下）は対象外。UI反映を行う `refreshAllUIFromSettings()`（「読込」からも共通で呼ばれる）は、分割位置の復元に `applyInitialLayoutIfNeeded()` を使う（Build 70〜。旧実装は `restoreSplitPositions()` を直接呼んでおり、保存値が無い場合に分割位置が変更前のまま残ってしまい「レイアウトも既定値に戻る」という説明と食い違っていた）。
 - 「詳細設定」ウィンドウはアイコンサイズ（小/中/大）とテキストサイズ（小/中/大）を持つ（Build 66〜）。ツールバーアイコンはSF Symbolsの `SymbolConfiguration(pointSize:)` とボタンの幅/高さ制約を動的に差し替えて見た目サイズを変更する（既定=中。小=18pt/40pt枠、中=23pt/48pt枠、大=28pt/58pt枠。Build 66で全体を一段階拡大し、既定値も大→中へ変更）。テキストサイズは `MosaicWindowController.textScale()`（小=0.8倍・中=1.0倍・大=1.25倍。Build 69で既定「中」を基準に再調整）を介して画面内のラベル・キャンバス描画テキストのフォントサイズへ反映する。静的コントロールは生成時に `applyScaledFont(_:size:weight:)` でフォント適用とレジストリ（`scaledTextControls`）登録を同時に行い、`textSizeChanged()` がレジストリを走査して全登録コントロールへ即時再適用する（Build 69〜、インスペクタ/レイヤ/ライブラリ両パネル・下部ステータス/ヘルプバー・詳細設定/画像出力ウィンドウ等を網羅）。ライブラリのテーブル/コレクションビューはセル再利用時（`NSTableView`/`NSCollectionView` の `makeView`/アイテム再利用）にもフォントを再適用するようにし、旧来の「静的な見出し等は次回起動時に反映」という制限を撤廃した。OSネイティブのツールチップ（`NSButton.toolTip`）はmacOSにフォント変更の公開APIが無いため対象外（アプリ独自のホバーヘルプ表示 `HoverHelpRelay`→ステータスバーは対象内、Build 66〜）。
 
 ## 5.13 フォルダ一括登録（リンク）と一括処理

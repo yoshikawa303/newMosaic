@@ -4476,7 +4476,12 @@ extension MosaicWindowController {
         loadMosaicStyleSettings()
         loadLibraryViewPreferences()
         applyPanelAssignments()
-        _ = restoreSplitPositions()
+        // restoreSplitPositions()を直接呼ぶだけだと、保存値が無い場合（初期化直後や、
+        // レイアウト情報を含まない古いプロジェクトファイルの読込時）に分割位置が
+        // 「変更前のまま」残ってしまい、「レイアウトも既定値に戻る」という初期化の説明と
+        // 食い違う不具合があった。applyInitialLayoutIfNeeded()を使い、保存値が無ければ
+        // 工場既定レイアウト（右パネル=ライブラリ2列幅 等）へ確実に戻す。
+        applyInitialLayoutIfNeeded()
         applyIconSizeToAllToolbarButtons()
         iconSizeControl.selectedSegment = Self.currentIconSizeSetting()
         textSizeControl.selectedSegment = Self.currentTextSizeSetting()

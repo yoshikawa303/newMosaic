@@ -1480,3 +1480,27 @@
   検証は `swift build` / `swift test` 73/73 PASS / `agent_governance_guard.sh` PASS / `local_quality_gate.sh` PASS、Build 69で再パッケージ。依頼6点すべて実装完了。GUI上の見え方の最終確認はユーザー側で実施をお願いします。
 
 - 作業時間: 約90分
+
+### 2026-07-24 22:10 JST - Claude Code - 種別: 依頼内容 - 「初期化」後のレイアウト表示について確認
+
+- 内容:
+
+  ```text
+  ★設定初期化後、下記添付表示になる。正しい？
+  ```
+
+  （添付: 「すべての設定を初期化しました」表示後、キャンバスが左端の細い帯に圧縮され、インスペクタパネルがウィンドウのほとんどを占めているスクリーンショット）
+
+### 2026-07-24 22:25 JST - Claude Code - 種別: 作業結果 - 「初期化」後にレイアウトが既定値へ戻らないバグを修正（Build 70）
+
+- 内容:
+
+  ユーザー添付画像を確認したところ、右パネル幅が異常に広くキャンバスが圧迫されており、不具合と判断。
+
+  **原因**: 「初期化」「読込」の両方から呼ばれる `refreshAllUIFromSettings()` が、分割位置の復元に `restoreSplitPositions()` を直接呼んでいた。この関数は保存済みの分割位置（`Layout.leftPaneWidth`/`rightPaneWidth`等）がある場合のみ位置を設定し、保存値が無い場合は何もしない。「初期化」実行時は `AppSettings.resetAll()` により該当キーが消えるため、分割位置は初期化前の状態（例: ユーザーが以前手動で右パネルを大きく広げていた状態）がそのまま画面に残っていた。これは確認ダイアログの「レイアウトも既定値に戻ります」という説明と食い違う不具合だった。
+
+  **修正**: `refreshAllUIFromSettings()` 内の `_ = restoreSplitPositions()` を `applyInitialLayoutIfNeeded()` へ置き換え。この関数は保存値があれば復元し、無ければBuild 69で整備した工場既定レイアウト（右パネル=ライブラリ2列幅など）へフォールバックするため、「初期化」時も「レイアウト情報を含まない古いプロジェクトファイルの読込」時も、常に既定レイアウトへ確実に戻るようになった。
+
+  検証は `swift build` / `swift test` 73/73 PASS / `agent_governance_guard.sh` PASS / `local_quality_gate.sh` PASS、Build 70で再パッケージ。
+
+- 作業時間: 約20分
