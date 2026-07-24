@@ -126,6 +126,29 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+/// ツールバーボタンのホバー時にヘルプ文をステータスバーへ表示するための追跡中継。
+@MainActor
+private final class HoverHelpRelay: NSResponder {
+    private let text: String
+    private let onHover: (String?) -> Void
+
+    init(text: String, onHover: @escaping (String?) -> Void) {
+        self.text = text
+        self.onHover = onHover
+        super.init()
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override func mouseEntered(with event: NSEvent) {
+        onHover(text)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        onHover(nil)
+    }
+}
+
 /// NSScrollView内で内容を上寄せ表示するための反転ドキュメントビュー。
 /// 非flippedのままだと内容が短いときに下寄せ表示になる（サイドパネル移動時の不要な空間の原因）。
 private final class FlippedDocumentView: NSView {
@@ -652,6 +675,10 @@ final class MosaicWindowController: NSObject {
     private var isRestoringSplitPositions = false
     // 一括処理の進捗UI
     private var isBatchProcessing = false
+    // 下部ステータス兼ヘルプバー
+    private let statsLabel = NSTextField(labelWithString: "")
+    private var hoverRelays: [HoverHelpRelay] = []
+    private var lastStatusText = ""
     private var batchCancelRequested = false
     private var batchPanel: NSPanel?
     private let batchProgressBar = NSProgressIndicator()
@@ -712,7 +739,7 @@ final class MosaicWindowController: NSObject {
             detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
             saveButton, reloadLibraryButton, revealButton,
-            statusLabel, makeToolbarSeparator(), zoomOutButton, zoomFitButton, zoomInButton, zoomLabel
+            NSView(), makeToolbarSeparator(), zoomOutButton, zoomFitButton, zoomInButton, zoomLabel
         ])
         toolbar.orientation = .horizontal
         toolbar.alignment = .centerY
@@ -791,8 +818,39 @@ final class MosaicWindowController: NSObject {
         leftPane.delegate = self
         rightPane.delegate = self
         applyPanelAssignments()
+        // 下部ステータス兼ヘルプバー（左=状態/ホバーヘルプ、右=選択数・解像度・ROI数）
+        let statusBar = NSView()
+        statusBar.translatesAutoresizingMaskIntoConstraints = false
+        statusBar.wantsLayer = true
+        statusBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+        let statusSeparator = NSBox()
+        statusSeparator.boxType = .separator
+        statusSeparator.translatesAutoresizingMaskIntoConstraints = false
+        statusLabel.font = .systemFont(ofSize: 11)
+        statusLabel.translatesAutoresizingMaskIntoConstraints = false
+        statsLabel.font = .monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        statsLabel.textColor = .secondaryLabelColor
+        statsLabel.alignment = .right
+        statsLabel.lineBreakMode = .byTruncatingHead
+        statsLabel.translatesAutoresizingMaskIntoConstraints = false
+        statsLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        statusBar.addSubview(statusSeparator)
+        statusBar.addSubview(statusLabel)
+        statusBar.addSubview(statsLabel)
+        NSLayoutConstraint.activate([
+            statusSeparator.topAnchor.constraint(equalTo: statusBar.topAnchor),
+            statusSeparator.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor),
+            statusSeparator.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor),
+            statusLabel.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 10),
+            statusLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            statsLabel.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -10),
+            statsLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: statsLabel.leadingAnchor, constant: -16)
+        ])
+
         root.addSubview(toolbar)
         root.addSubview(splitView)
+        root.addSubview(statusBar)
 
         NSLayoutConstraint.activate([
             toolbar.topAnchor.constraint(equalTo: root.topAnchor),
@@ -801,7 +859,11 @@ final class MosaicWindowController: NSObject {
             splitView.topAnchor.constraint(equalTo: toolbar.bottomAnchor),
             splitView.leadingAnchor.constraint(equalTo: root.leadingAnchor),
             splitView.trailingAnchor.constraint(equalTo: root.trailingAnchor),
-            splitView.bottomAnchor.constraint(equalTo: root.bottomAnchor)
+            statusBar.topAnchor.constraint(equalTo: splitView.bottomAnchor),
+            statusBar.leadingAnchor.constraint(equalTo: root.leadingAnchor),
+            statusBar.trailingAnchor.constraint(equalTo: root.trailingAnchor),
+            statusBar.heightAnchor.constraint(equalToConstant: 26),
+            statusBar.bottomAnchor.constraint(equalTo: root.bottomAnchor)
         ])
 
         self.view = root
@@ -840,6 +902,7 @@ final class MosaicWindowController: NSObject {
             guard let self else { return }
             self.updateStatus("ROI \(rois.count)件")
             self.refreshROIListIfNeeded()
+            self.updateStatsBar()
         }
         canvas.onCategoryChangeRequest = { [weak self] roiID, category in
             guard let self,
@@ -1120,6 +1183,17 @@ final class MosaicWindowController: NSObject {
         button.bezelStyle = .texturedRounded
         button.controlSize = .large
         button.toolTip = help
+        // ホバー中は下部ステータスバーへヘルプ文を表示する
+        let relay = HoverHelpRelay(text: help) { [weak self] text in
+            self?.showHoverHelp(text)
+        }
+        hoverRelays.append(relay)
+        button.addTrackingArea(NSTrackingArea(
+            rect: .zero,
+            options: [.mouseEnteredAndExited, .activeInActiveApp, .inVisibleRect],
+            owner: relay,
+            userInfo: nil
+        ))
         button.setAccessibilityLabel(help)
         button.target = self
         button.action = action
@@ -2715,6 +2789,7 @@ final class MosaicWindowController: NSObject {
             pruneThumbnailCache()
             tableView.reloadData()
             collectionView.reloadData()
+            updateStatsBar()
         } catch {
             showError(error)
         }
@@ -2744,7 +2819,26 @@ final class MosaicWindowController: NSObject {
         thumbnailSizeSlider.translatesAutoresizingMaskIntoConstraints = false
         thumbnailSizeSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
 
-        let modeRow = NSStackView(views: [viewModeControl, thumbnailSizeSlider])
+        // サムネイルの拡大縮小は虫めがねボタンで段階調整（スライダーは内部の値保持として維持）
+        let thumbSmallerButton = NSButton(
+            image: NSImage(systemSymbolName: "minus.magnifyingglass", accessibilityDescription: "サムネイルを縮小")
+                ?? NSImage(),
+            target: self,
+            action: #selector(thumbnailSizeStepDown)
+        )
+        let thumbLargerButton = NSButton(
+            image: NSImage(systemSymbolName: "plus.magnifyingglass", accessibilityDescription: "サムネイルを拡大")
+                ?? NSImage(),
+            target: self,
+            action: #selector(thumbnailSizeStepUp)
+        )
+        for button in [thumbSmallerButton, thumbLargerButton] {
+            button.bezelStyle = .texturedRounded
+            button.setButtonType(.momentaryPushIn)
+        }
+        thumbSmallerButton.toolTip = "サムネイルを縮小"
+        thumbLargerButton.toolTip = "サムネイルを拡大"
+        let modeRow = NSStackView(views: [viewModeControl, thumbSmallerButton, thumbLargerButton])
         modeRow.orientation = .horizontal
         modeRow.spacing = 8
         modeRow.translatesAutoresizingMaskIntoConstraints = false
@@ -2853,6 +2947,17 @@ final class MosaicWindowController: NSObject {
         libraryViewMode = mode
         AppSettings.shared.set(mode.rawValue, forKey: "LibraryView.mode")
         updateLibraryModeVisibility()
+    }
+
+    /// 虫めがねボタンによるサムネイルサイズの段階調整（±24px、64〜220の範囲）。
+    @objc private func thumbnailSizeStepDown() {
+        thumbnailSizeSlider.doubleValue = max(64, thumbnailSizeSlider.doubleValue - 24)
+        thumbnailSizeChanged()
+    }
+
+    @objc private func thumbnailSizeStepUp() {
+        thumbnailSizeSlider.doubleValue = min(220, thumbnailSizeSlider.doubleValue + 24)
+        thumbnailSizeChanged()
     }
 
     @objc private func thumbnailSizeChanged() {
@@ -3288,7 +3393,31 @@ final class MosaicWindowController: NSObject {
     }
 
     private func updateStatus(_ message: String) {
+        lastStatusText = message
         statusLabel.stringValue = message
+        updateStatsBar()
+    }
+
+    /// ツールバーホバー時のヘルプ表示（離れたら直前のステータスへ戻す）。
+    private func showHoverHelp(_ text: String?) {
+        statusLabel.stringValue = text ?? lastStatusText
+    }
+
+    /// ステータスバー右端の統計（選択数/全画像数・解像度・色ビット数・ROI数）を更新する。
+    private func updateStatsBar() {
+        let total = libraryItems.count
+        let selected: Int
+        if libraryViewMode == .thumbnailGrid {
+            selected = collectionView.selectionIndexPaths.count
+        } else {
+            selected = tableView.selectedRowIndexes.count
+        }
+        var parts = ["画像 \(selected)/\(total)"]
+        if let image = loadedImage?.cgImage {
+            parts.append("\(image.width)×\(image.height)  \(image.bitsPerPixel)bit")
+        }
+        parts.append("ROI \(canvas.rois.count)")
+        statsLabel.stringValue = parts.joined(separator: "   |   ")
     }
 
     private func showError(_ error: Error) {
@@ -3411,6 +3540,7 @@ extension MosaicWindowController: NSCollectionViewDataSource, NSCollectionViewDe
         MainActor.assumeIsolated {
             guard let indexPath = indexPaths.first, indexPath.item < libraryItems.count else { return }
             selectedLibraryItemID = libraryItems[indexPath.item].id
+            updateStatsBar()
         }
     }
 }
