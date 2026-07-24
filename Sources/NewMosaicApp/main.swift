@@ -41,6 +41,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
+        controller.installNumpadShortcutMonitor()
         DispatchQueue.main.async { [controller] in
             controller.applyInitialLayoutIfNeeded()
         }
@@ -75,11 +76,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let fileItem = NSMenuItem()
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "ファイル")
-        fileMenu.addItem(menuItem("画像を開く…", action: "openImage", key: "o", target: target))
-        fileMenu.addItem(menuItem("クリップボードから読み込む", action: "pasteImage", key: "v", target: target))
+        fileMenu.addItem(shortcutMenuItem("openImage", titleSuffix: "…", target: target))
+        fileMenu.addItem(shortcutMenuItem("pasteImage", target: target))
         fileMenu.addItem(.separator())
-        fileMenu.addItem(menuItem("画像出力…", action: "exportImage", key: "s", target: target))
-        fileMenu.addItem(menuItem("ライブラリをFinderで表示", action: "revealLibrary", key: "", target: target))
+        fileMenu.addItem(shortcutMenuItem("exportImage", titleSuffix: "…", target: target))
+        fileMenu.addItem(shortcutMenuItem("revealLibrary", target: target))
         fileMenu.addItem(.separator())
 
         let settingsItem = NSMenuItem(title: "設定", action: nil, keyEquivalent: "")
@@ -102,27 +103,25 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let editItem = NSMenuItem()
         mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "編集")
-        editMenu.addItem(menuItem("元に戻す", action: "performUndo", key: "z", target: target))
-        let redo = menuItem("やり直す", action: "performRedo", key: "z", target: target)
-        redo.keyEquivalentModifierMask = [.command, .shift]
-        editMenu.addItem(redo)
+        editMenu.addItem(shortcutMenuItem("performUndo", target: target))
+        editMenu.addItem(shortcutMenuItem("performRedo", target: target))
         editMenu.addItem(.separator())
-        editMenu.addItem(menuItem("選択範囲をすべて消去", action: "clearROIs", key: "", target: target))
+        editMenu.addItem(shortcutMenuItem("clearROIs", target: target))
         editItem.submenu = editMenu
 
         let processItem = NSMenuItem()
         mainMenu.addItem(processItem)
         let processMenu = NSMenu(title: "処理")
-        processMenu.addItem(menuItem("候補を生成", action: "generateCandidates", key: "g", target: target))
-        processMenu.addItem(menuItem("モザイクを適用", action: "applyMosaic", key: "\r", target: target))
+        processMenu.addItem(shortcutMenuItem("generateCandidates", target: target))
+        processMenu.addItem(shortcutMenuItem("applyMosaic", target: target))
         processItem.submenu = processMenu
 
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "表示")
-        viewMenu.addItem(menuItem("拡大", action: "zoomIn", key: "+", target: target))
-        viewMenu.addItem(menuItem("縮小", action: "zoomOut", key: "-", target: target))
-        viewMenu.addItem(menuItem("ウィンドウに合わせる", action: "zoomToFit", key: "0", target: target))
+        viewMenu.addItem(shortcutMenuItem("zoomIn", target: target))
+        viewMenu.addItem(shortcutMenuItem("zoomOut", target: target))
+        viewMenu.addItem(shortcutMenuItem("zoomToFit", target: target))
         viewItem.submenu = viewMenu
 
         let windowItem = NSMenuItem()
@@ -133,11 +132,31 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         windowItem.submenu = windowMenu
         NSApp.windowsMenu = windowMenu
 
+        let helpItem = NSMenuItem()
+        mainMenu.addItem(helpItem)
+        let helpMenu = NSMenu(title: "ヘルプ")
+        helpMenu.addItem(menuItem("ショートカット一覧…", action: "showShortcutsWindow", key: "", target: target))
+        helpItem.submenu = helpMenu
+        NSApp.helpMenu = helpMenu
+
         NSApp.mainMenu = mainMenu
     }
 
     private func menuItem(_ title: String, action: String, key: String, target: AnyObject) -> NSMenuItem {
         let item = NSMenuItem(title: title, action: Selector((action)), keyEquivalent: key)
+        item.target = target
+        return item
+    }
+
+    /// `AppShortcut` レジストリを参照してメニュー項目を構築する。タイトル・キー等価文字・
+    /// 修飾キー・アクションのすべてを登録データから取得するため、メニュー表示と実際の
+    /// 動作が食い違うことがない（手入力の重複によるバグを構造的に防ぐ）。
+    private func shortcutMenuItem(_ id: String, titleSuffix: String = "", target: AnyObject) -> NSMenuItem {
+        guard let shortcut = MosaicWindowController.shortcut(id: id) else {
+            return NSMenuItem(title: id, action: nil, keyEquivalent: "")
+        }
+        let item = NSMenuItem(title: shortcut.title + titleSuffix, action: shortcut.action, keyEquivalent: shortcut.key)
+        item.keyEquivalentModifierMask = shortcut.modifiers
         item.target = target
         return item
     }
@@ -170,6 +189,40 @@ private final class HoverHelpRelay: NSResponder {
 /// 非flippedのままだと内容が短いときに下寄せ表示になる（サイドパネル移動時の不要な空間の原因）。
 private final class FlippedDocumentView: NSView {
     override var isFlipped: Bool { true }
+}
+
+/// アプリのショートカット可能な操作を表す。メニュー・ツールバーのツールチップ・
+/// ヘルプ＞ショートカット一覧・詳細設定＞テンキー割当のすべてがこの一覧を参照することで、
+/// 表示（メニューやツールチップの文言）と実際の動作（keyEquivalent/action）が食い違う
+/// バグを構造的に防ぐ（表示用文字列は key/modifiers から自動生成し、手入力しない）。
+struct AppShortcut {
+    let id: String
+    let category: String
+    let title: String
+    /// キー等価文字（""=デフォルトのキーボードショートカットなし。テンキー割当のみで使うことも可）
+    let key: String
+    let modifiers: NSEvent.ModifierFlags
+    /// ヘルプ画面「よく使うおすすめショートカット」に先頭表示するか
+    let isRecommended: Bool
+    let action: Selector
+
+    /// メニュー・ツールチップ・ヘルプ画面へ表示する文字列（例: "⌘O"、"⇧⌘Z"）。keyが空なら空文字。
+    var displayString: String {
+        guard !key.isEmpty else { return "" }
+        var text = ""
+        if modifiers.contains(.control) { text += "⌃" }
+        if modifiers.contains(.option) { text += "⌥" }
+        if modifiers.contains(.shift) { text += "⇧" }
+        if modifiers.contains(.command) { text += "⌘" }
+        switch key {
+        case "\r": text += "⏎"
+        case "\u{1b}": text += "⎋"
+        case "+": text += "+"
+        case "-": text += "-"
+        default: text += key.uppercased()
+        }
+        return text
+    }
 }
 
 private enum LibraryViewMode: Int {
@@ -740,6 +793,62 @@ final class MosaicWindowController: NSObject {
     private static let recentProjectsDefaultsKey = "RecentProjects"
     // Win/Mac両対応の4文字拡張子（newMosaic Config の略）。旧 "newmosaicproj" は冗長なため短縮。
     private static let projectFileExtension = "nmcf"
+
+    // MARK: テンキー割当（詳細設定）・ショートカット一覧（ヘルプ）
+    private static let numpadAssignmentsDefaultsKey = "AdvancedSettings.numpadAssignments"
+    private var numpadEventMonitor: Any?
+    private var shortcutsWindow: NSWindow?
+    private var numpadAssignmentWindow: NSWindow?
+
+    /// アプリ内の全ショートカット対応操作の一覧（唯一の情報源）。
+    /// メニュー構築・ツールバーのツールチップ・ヘルプ＞ショートカット一覧・
+    /// 詳細設定＞テンキー割当のすべてがここを参照する。
+    static let appShortcuts: [AppShortcut] = [
+        AppShortcut(id: "openImage", category: "ファイル", title: "画像を開く",
+                    key: "o", modifiers: [.command], isRecommended: true, action: #selector(openImage)),
+        AppShortcut(id: "pasteImage", category: "ファイル", title: "クリップボードから読み込む",
+                    key: "v", modifiers: [.command], isRecommended: false, action: #selector(pasteImage)),
+        AppShortcut(id: "exportImage", category: "ファイル", title: "画像出力",
+                    key: "s", modifiers: [.command], isRecommended: true, action: #selector(exportImage)),
+        AppShortcut(id: "revealLibrary", category: "ファイル", title: "ライブラリをFinderで表示",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(revealLibrary)),
+        AppShortcut(id: "performUndo", category: "編集", title: "元に戻す",
+                    key: "z", modifiers: [.command], isRecommended: true, action: #selector(performUndo)),
+        AppShortcut(id: "performRedo", category: "編集", title: "やり直す",
+                    key: "z", modifiers: [.command, .shift], isRecommended: true, action: #selector(performRedo)),
+        AppShortcut(id: "clearROIs", category: "編集", title: "選択範囲をすべて消去",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(clearROIs)),
+        AppShortcut(id: "generateCandidates", category: "処理", title: "候補を生成",
+                    key: "g", modifiers: [.command], isRecommended: true, action: #selector(generateCandidates)),
+        AppShortcut(id: "applyMosaic", category: "処理", title: "モザイクを適用",
+                    key: "\r", modifiers: [.command], isRecommended: true, action: #selector(applyMosaic)),
+        AppShortcut(id: "zoomIn", category: "表示", title: "拡大",
+                    key: "+", modifiers: [.command], isRecommended: false, action: #selector(zoomIn)),
+        AppShortcut(id: "zoomOut", category: "表示", title: "縮小",
+                    key: "-", modifiers: [.command], isRecommended: false, action: #selector(zoomOut)),
+        AppShortcut(id: "zoomToFit", category: "表示", title: "ウィンドウに合わせる",
+                    key: "0", modifiers: [.command], isRecommended: false, action: #selector(zoomToFit)),
+        AppShortcut(id: "openSelectedLibraryOriginal", category: "ライブラリ", title: "元画像を開く",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryOriginal)),
+        AppShortcut(id: "openSelectedLibraryProcessed", category: "ライブラリ", title: "加工後画像を開く",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryProcessed)),
+        AppShortcut(id: "deleteSelectedLibraryItems", category: "ライブラリ", title: "選択画像を削除",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(deleteSelectedLibraryItems)),
+        AppShortcut(id: "reloadLibraryFromButton", category: "ライブラリ", title: "ライブラリを更新",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(reloadLibraryFromButton)),
+        AppShortcut(id: "exportTrainingDataset", category: "ライブラリ", title: "学習用データセットを書き出す",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(exportTrainingDataset)),
+        AppShortcut(id: "registerFolderAsLinks", category: "一括処理", title: "フォルダを一括登録（リンク）",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(registerFolderAsLinks)),
+        AppShortcut(id: "repairBrokenLinksAction", category: "一括処理", title: "リンク切れを修正",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(repairBrokenLinksAction)),
+        AppShortcut(id: "batchProcessAll", category: "一括処理", title: "一括処理",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(batchProcessAll))
+    ]
+
+    static func shortcut(id: String) -> AppShortcut? {
+        appShortcuts.first { $0.id == id }
+    }
     private var lastStatusText = ""
     private var batchCancelRequested = false
     private var batchPanel: NSPanel?
@@ -766,26 +875,30 @@ final class MosaicWindowController: NSObject {
         root.wantsLayer = true
         root.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
-        let openButton = makeToolbarButton(symbol: "folder", help: "画像を開く (⌘O)", action: #selector(openImage))
-        let pasteButton = makeToolbarButton(symbol: "doc.on.clipboard", help: "画像を貼り付け (⌘V)", action: #selector(pasteImage))
-        let detectButton = makeToolbarButton(symbol: "wand.and.stars", help: "候補を生成 (⌘G)", action: #selector(generateCandidates))
-        let applyButton = makeToolbarButton(symbol: "checkerboard.rectangle", help: "モザイクを適用", action: #selector(applyMosaic))
-        let clearButton = makeToolbarButton(symbol: "trash", help: "選択範囲をすべて消去", action: #selector(clearROIs))
-        configureToolbarButton(undoButton, symbol: "arrow.uturn.backward", help: "元に戻す (⌘Z)", action: #selector(performUndo))
-        configureToolbarButton(redoButton, symbol: "arrow.uturn.forward", help: "やり直す (⇧⌘Z)", action: #selector(performRedo))
+        let openButton = shortcutToolbarButton("openImage", symbol: "folder")
+        let pasteButton = shortcutToolbarButton("pasteImage", symbol: "doc.on.clipboard")
+        let detectButton = shortcutToolbarButton("generateCandidates", symbol: "wand.and.stars")
+        let applyButton = shortcutToolbarButton("applyMosaic", symbol: "checkerboard.rectangle")
+        let clearButton = shortcutToolbarButton("clearROIs", symbol: "trash")
+        configureShortcutToolbarButton(undoButton, id: "performUndo", symbol: "arrow.uturn.backward")
+        configureShortcutToolbarButton(redoButton, id: "performRedo", symbol: "arrow.uturn.forward")
         undoButton.keyEquivalent = "z"
         undoButton.keyEquivalentModifierMask = [.command]
         redoButton.keyEquivalent = "z"
         redoButton.keyEquivalentModifierMask = [.command, .shift]
-        let saveButton = makeToolbarButton(symbol: "square.and.arrow.down", help: "画像出力 (⌘S)", action: #selector(exportImage))
-        let linkFolderButton = makeToolbarButton(symbol: "folder.badge.plus", help: "フォルダを一括登録（リンク）", action: #selector(registerFolderAsLinks))
-        let repairLinksButton = makeToolbarButton(symbol: "link.badge.plus", help: "リンク切れを修正", action: #selector(repairBrokenLinksAction))
-        let batchButton = makeToolbarButton(symbol: "bolt.circle", help: "一括処理（未加工の画像を候補生成→適用→保存）", action: #selector(batchProcessAll))
-        let reloadLibraryButton = makeToolbarButton(symbol: "arrow.clockwise", help: "ライブラリを更新", action: #selector(reloadLibraryFromButton))
-        let revealButton = makeToolbarButton(symbol: "finder", help: "ライブラリをFinderで表示", action: #selector(revealLibrary))
-        let zoomOutButton = makeToolbarButton(symbol: "minus.magnifyingglass", help: "縮小 (⌘-)", action: #selector(zoomOut))
-        let zoomFitButton = makeToolbarButton(symbol: "arrow.up.left.and.arrow.down.right", help: "ウィンドウに合わせる (⌘0)", action: #selector(zoomToFit))
-        let zoomInButton = makeToolbarButton(symbol: "plus.magnifyingglass", help: "拡大 (⌘+)", action: #selector(zoomIn))
+        let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
+        let linkFolderButton = shortcutToolbarButton("registerFolderAsLinks", symbol: "folder.badge.plus")
+        let repairLinksButton = shortcutToolbarButton("repairBrokenLinksAction", symbol: "link.badge.plus")
+        let batchButton = shortcutToolbarButton(
+            "batchProcessAll",
+            symbol: "bolt.circle",
+            helpOverride: "一括処理（未加工の画像を候補生成→適用→保存）"
+        )
+        let reloadLibraryButton = shortcutToolbarButton("reloadLibraryFromButton", symbol: "arrow.clockwise")
+        let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
+        let zoomOutButton = shortcutToolbarButton("zoomOut", symbol: "minus.magnifyingglass")
+        let zoomFitButton = shortcutToolbarButton("zoomToFit", symbol: "arrow.up.left.and.arrow.down.right")
+        let zoomInButton = shortcutToolbarButton("zoomIn", symbol: "plus.magnifyingglass")
 
         // ステータスは余白に収め、長文時は末尾省略（幅がウィンドウを超えて制約が破綻しないようにする）
         statusLabel.lineBreakMode = .byTruncatingTail
@@ -1248,6 +1361,25 @@ final class MosaicWindowController: NSObject {
         let button = NSButton()
         configureToolbarButton(button, symbol: symbol, help: help, action: action)
         return button
+    }
+
+    /// `AppShortcut` レジストリのidからツールバーボタンを構築する。ツールチップの
+    /// ショートカット表示（例:「画像を開く (⌘O)」）は登録データのdisplayStringから自動生成するため、
+    /// メニュー・レジストリと食い違うことがない。
+    private func shortcutToolbarButton(_ id: String, symbol: String, helpOverride: String? = nil) -> NSButton {
+        let button = NSButton()
+        configureShortcutToolbarButton(button, id: id, symbol: symbol, helpOverride: helpOverride)
+        return button
+    }
+
+    private func configureShortcutToolbarButton(_ button: NSButton, id: String, symbol: String, helpOverride: String? = nil) {
+        guard let shortcut = MosaicWindowController.shortcut(id: id) else {
+            configureToolbarButton(button, symbol: symbol, help: helpOverride ?? id, action: Selector(id))
+            return
+        }
+        let display = shortcut.displayString
+        let help = (helpOverride ?? shortcut.title) + (display.isEmpty ? "" : " (\(display))")
+        configureToolbarButton(button, symbol: symbol, help: help, action: shortcut.action)
     }
 
     private func configureToolbarButton(_ button: NSButton, symbol: String, help: String, action: Selector) {
@@ -3023,10 +3155,10 @@ final class MosaicWindowController: NSObject {
         configureCollectionView()
         libraryScrollView.documentView = libraryViewMode == .thumbnailGrid ? collectionView : tableView
 
-        let openOriginalButton = makeToolbarButton(symbol: "photo", help: "元画像を開く", action: #selector(openSelectedLibraryOriginal))
-        let openProcessedButton = makeToolbarButton(symbol: "photo.badge.checkmark", help: "加工後画像を開く", action: #selector(openSelectedLibraryProcessed))
-        let deleteButton = makeToolbarButton(symbol: "trash", help: "選択画像を削除", action: #selector(deleteSelectedLibraryItems))
-        let exportButton = makeToolbarButton(symbol: "shippingbox", help: "学習用データセットを書き出す", action: #selector(exportTrainingDataset))
+        let openOriginalButton = shortcutToolbarButton("openSelectedLibraryOriginal", symbol: "photo")
+        let openProcessedButton = shortcutToolbarButton("openSelectedLibraryProcessed", symbol: "photo.badge.checkmark")
+        let deleteButton = shortcutToolbarButton("deleteSelectedLibraryItems", symbol: "trash")
+        let exportButton = shortcutToolbarButton("exportTrainingDataset", symbol: "shippingbox")
         let buttons = NSStackView(views: [openOriginalButton, openProcessedButton, deleteButton, exportButton])
         buttons.orientation = .horizontal
         buttons.spacing = 4
@@ -4107,7 +4239,10 @@ extension MosaicWindowController {
         settingsPathValueLabel.widthAnchor.constraint(lessThanOrEqualToConstant: 300).isActive = true
         let settingsPathRow = inspectorRow("設定ファイル", control: settingsPathValueLabel)
 
-        let content = NSStackView(views: [iconSizeRow, textSizeRow, settingsPathRow])
+        let numpadButton = NSButton(title: "テンキー割当…", target: self, action: #selector(showNumpadAssignmentWindow))
+        let numpadRow = inspectorRow("機能割当", control: numpadButton)
+
+        let content = NSStackView(views: [iconSizeRow, textSizeRow, numpadRow, settingsPathRow])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 14
@@ -4115,7 +4250,7 @@ extension MosaicWindowController {
         content.translatesAutoresizingMaskIntoConstraints = false
 
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 460, height: 180),
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 220),
             styleMask: [.titled, .closable],
             backing: .buffered,
             defer: false
@@ -4138,6 +4273,239 @@ extension MosaicWindowController {
     @objc private func iconSizeChanged() {
         AppSettings.shared.set(iconSizeControl.selectedSegment, forKey: Self.iconSizeDefaultsKey)
         applyIconSizeToAllToolbarButtons()
+    }
+}
+
+// MARK: - テンキー割当
+
+/// macOS仮想キーコードのテンキー一覧（トップ行の数字キーとは別の物理キー）。
+/// NSMenuItem.keyEquivalentは文字ベースの一致のためテンキー/トップ行を区別できず、
+/// テンキー専用の割当を実現するにはキーコードで判定するイベント監視が必要になる。
+private enum NumpadKey: Int, CaseIterable {
+    case n0 = 82, n1 = 83, n2 = 84, n3 = 85, n4 = 86
+    case n5 = 87, n6 = 88, n7 = 89, n8 = 91, n9 = 92
+    case decimal = 65, multiply = 67, plus = 69, divide = 75, enter = 76, minus = 78, equals = 81
+
+    var displayLabel: String {
+        switch self {
+        case .n0: return "テンキー 0"
+        case .n1: return "テンキー 1"
+        case .n2: return "テンキー 2"
+        case .n3: return "テンキー 3"
+        case .n4: return "テンキー 4"
+        case .n5: return "テンキー 5"
+        case .n6: return "テンキー 6"
+        case .n7: return "テンキー 7"
+        case .n8: return "テンキー 8"
+        case .n9: return "テンキー 9"
+        case .decimal: return "テンキー ."
+        case .multiply: return "テンキー *"
+        case .plus: return "テンキー +"
+        case .divide: return "テンキー /"
+        case .enter: return "テンキー Enter"
+        case .minus: return "テンキー -"
+        case .equals: return "テンキー ="
+        }
+    }
+}
+
+extension MosaicWindowController {
+    /// テンキー割当（キーコード文字列→ショートカットID）を読み込む。
+    private static func numpadAssignments() -> [String: String] {
+        (AppSettings.shared.object(forKey: numpadAssignmentsDefaultsKey) as? [String: String]) ?? [:]
+    }
+
+    private static func setNumpadAssignments(_ assignments: [String: String]) {
+        AppSettings.shared.set(assignments, forKey: numpadAssignmentsDefaultsKey)
+    }
+
+    /// アプリ起動時に一度だけ呼び出し、テンキー押下を監視してショートカットへディスパッチする。
+    /// メニューのkeyEquivalentでは（文字一致のため）テンキーとトップ行の数字キーを区別できないため、
+    /// ローカルイベント監視でキーコードから直接判定する。
+    func installNumpadShortcutMonitor() {
+        numpadEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, let numpadKey = NumpadKey(rawValue: Int(event.keyCode)) else { return event }
+            let assignments = Self.numpadAssignments()
+            guard let shortcutID = assignments[String(numpadKey.rawValue)],
+                  let shortcut = Self.shortcut(id: shortcutID) else { return event }
+            _ = self.perform(shortcut.action)
+            return nil
+        }
+    }
+
+    /// 詳細設定「テンキー割当…」ウィンドウを表示する。各ショートカットへテンキーを割り当てられる
+    /// （同じテンキーへの再割当は元の割当を自動的に解除する）。
+    @objc func showNumpadAssignmentWindow() {
+        if let window = numpadAssignmentWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        let rows = MosaicWindowController.appShortcuts.map { shortcut -> NSStackView in
+            let titleLabel = NSTextField(labelWithString: shortcut.title)
+            titleLabel.translatesAutoresizingMaskIntoConstraints = false
+            titleLabel.widthAnchor.constraint(equalToConstant: 220).isActive = true
+            let categoryLabel = NSTextField(labelWithString: shortcut.category)
+            categoryLabel.textColor = .secondaryLabelColor
+            categoryLabel.font = MosaicWindowController.scaledFont(10)
+            categoryLabel.translatesAutoresizingMaskIntoConstraints = false
+            categoryLabel.widthAnchor.constraint(equalToConstant: 70).isActive = true
+            let popup = NSPopUpButton(title: "", target: self, action: #selector(numpadAssignmentChanged(_:)))
+            popup.identifier = NSUserInterfaceItemIdentifier(shortcut.id)
+            popup.addItem(withTitle: "未割当")
+            popup.item(at: 0)?.representedObject = ""
+            for key in NumpadKey.allCases {
+                popup.addItem(withTitle: key.displayLabel)
+                popup.lastItem?.representedObject = String(key.rawValue)
+            }
+            let currentAssignments = MosaicWindowController.numpadAssignments()
+            if let assignedKey = currentAssignments.first(where: { $0.value == shortcut.id })?.key,
+               let index = popup.itemArray.firstIndex(where: { ($0.representedObject as? String) == assignedKey }) {
+                popup.selectItem(at: index)
+            }
+            let row = NSStackView(views: [titleLabel, categoryLabel, popup])
+            row.orientation = .horizontal
+            row.spacing = 10
+            return row
+        }
+        let content = NSStackView(views: rows)
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 6
+        content.edgeInsets = NSEdgeInsets(top: 16, left: 16, bottom: 16, right: 16)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.documentView = document
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            content.topAnchor.constraint(equalTo: document.topAnchor),
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor)
+        ])
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 480, height: 420),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "テンキー割当"
+        window.minSize = NSSize(width: 380, height: 240)
+        window.contentView = scroll
+        window.center()
+        numpadAssignmentWindow = window
+        window.makeKeyAndOrderFront(nil)
+    }
+
+    @objc private func numpadAssignmentChanged(_ sender: NSPopUpButton) {
+        guard let shortcutID = sender.identifier?.rawValue,
+              let selectedKey = sender.selectedItem?.representedObject as? String else { return }
+        var assignments = MosaicWindowController.numpadAssignments()
+        assignments = assignments.filter { $0.value != shortcutID }
+        if !selectedKey.isEmpty {
+            assignments[selectedKey] = shortcutID
+        }
+        MosaicWindowController.setNumpadAssignments(assignments)
+        updateStatus(selectedKey.isEmpty ? "テンキー割当を解除しました" : "テンキーを割り当てました")
+    }
+}
+
+// MARK: - ヘルプ＞ショートカット一覧
+
+extension MosaicWindowController {
+    /// ヘルプ＞ショートカット一覧を表示する。先頭に「よく使うおすすめショートカット」、
+    /// 続けて機能分類ごとにグループ表示する。表示内容は `AppShortcut` レジストリを直接参照するため、
+    /// 実際のメニュー・ツールバーの動作と常に一致する。
+    @objc func showShortcutsWindow() {
+        if let window = shortcutsWindow {
+            window.makeKeyAndOrderFront(nil)
+            return
+        }
+        var sections: [NSView] = []
+
+        func makeSection(title: String, shortcuts: [AppShortcut]) -> NSView {
+            let heading = NSTextField(labelWithString: title)
+            heading.font = MosaicWindowController.scaledFont(13, weight: .semibold)
+            var rows: [NSView] = [heading]
+            for shortcut in shortcuts {
+                let titleLabel = NSTextField(labelWithString: shortcut.title)
+                titleLabel.translatesAutoresizingMaskIntoConstraints = false
+                titleLabel.widthAnchor.constraint(equalToConstant: 260).isActive = true
+                let keyLabel = NSTextField(labelWithString: shortcut.displayString.isEmpty ? "—" : shortcut.displayString)
+                keyLabel.font = MosaicWindowController.scaledMonospacedDigitFont(12, weight: .medium)
+                keyLabel.textColor = .secondaryLabelColor
+                let numpadAssignments = MosaicWindowController.numpadAssignments()
+                if let key = numpadAssignments.first(where: { $0.value == shortcut.id })?.key,
+                   let numpadKey = NumpadKey(rawValue: Int(key) ?? -1) {
+                    keyLabel.stringValue += "  /  " + numpadKey.displayLabel
+                }
+                let row = NSStackView(views: [titleLabel, keyLabel])
+                row.orientation = .horizontal
+                row.spacing = 10
+                rows.append(row)
+            }
+            let section = NSStackView(views: rows)
+            section.orientation = .vertical
+            section.alignment = .leading
+            section.spacing = 6
+            return section
+        }
+
+        let recommended = MosaicWindowController.appShortcuts.filter(\.isRecommended)
+        sections.append(makeSection(title: "よく使うおすすめショートカット", shortcuts: recommended))
+
+        let categories = Array(NSOrderedSet(array: MosaicWindowController.appShortcuts.map(\.category))) as? [String] ?? []
+        for category in categories {
+            let shortcuts = MosaicWindowController.appShortcuts.filter { $0.category == category }
+            sections.append(makeSection(title: category, shortcuts: shortcuts))
+        }
+
+        let content = NSStackView(views: sections)
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 18
+        content.edgeInsets = NSEdgeInsets(top: 18, left: 18, bottom: 18, right: 18)
+        content.translatesAutoresizingMaskIntoConstraints = false
+
+        let document = FlippedDocumentView()
+        document.translatesAutoresizingMaskIntoConstraints = false
+        document.addSubview(content)
+        let scroll = NSScrollView()
+        scroll.hasVerticalScroller = true
+        scroll.documentView = document
+        scroll.translatesAutoresizingMaskIntoConstraints = false
+        NSLayoutConstraint.activate([
+            document.leadingAnchor.constraint(equalTo: scroll.contentView.leadingAnchor),
+            document.trailingAnchor.constraint(equalTo: scroll.contentView.trailingAnchor),
+            document.topAnchor.constraint(equalTo: scroll.contentView.topAnchor),
+            document.widthAnchor.constraint(equalTo: scroll.contentView.widthAnchor),
+            content.topAnchor.constraint(equalTo: document.topAnchor),
+            content.leadingAnchor.constraint(equalTo: document.leadingAnchor),
+            content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
+            content.bottomAnchor.constraint(equalTo: document.bottomAnchor)
+        ])
+
+        let window = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 460, height: 560),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "ショートカット一覧"
+        window.minSize = NSSize(width: 360, height: 300)
+        window.contentView = scroll
+        window.center()
+        shortcutsWindow = window
+        window.makeKeyAndOrderFront(nil)
     }
 }
 
