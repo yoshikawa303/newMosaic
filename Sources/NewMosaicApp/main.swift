@@ -1135,7 +1135,11 @@ final class MosaicWindowController: NSObject {
     /// 保存された配置（Layout.panelSide.*）に従って各ウィンドウを左右のサイドパネルへ配置する。
     /// 空になったサイドパネルは非表示にする（最小幅制約も無効化して幅0で畳む）。
     private func applyPanelAssignments() {
-        guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView else { return }
+        guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView,
+              let mainSplit = mainSplitView else { return }
+        let wasLeftHidden = leftPane.isHidden
+        let wasRightHidden = rightPane.isHidden
+
         for pane in [leftPane, rightPane] {
             for view in pane.arrangedSubviews {
                 pane.removeArrangedSubview(view)
@@ -1151,7 +1155,21 @@ final class MosaicWindowController: NSObject {
         let rightEmpty = rightPane.arrangedSubviews.isEmpty
         leftPane.isHidden = leftEmpty
         rightPane.isHidden = rightEmpty
-        mainSplitView?.adjustSubviews()
+        mainSplit.adjustSubviews()
+
+        // NSSplitViewは非表示→表示への切替時に幅を自動で確保しないため
+        // （adjustSubviewsは既存フレーム比率を維持するだけで、幅0のまま残ることがある）、
+        // 隠れていたペインが新たに表示された場合は明示的に既定幅を与える
+        // （「サイドパネルを左へ移動すると表示されなくなる」バグの修正）。
+        mainSplit.layoutSubtreeIfNeeded()
+        let defaultPaneWidth: CGFloat = 280
+        if wasLeftHidden && !leftEmpty {
+            mainSplit.setPosition(defaultPaneWidth, ofDividerAt: 0)
+        }
+        if wasRightHidden && !rightEmpty {
+            let target = mainSplit.bounds.width - mainSplit.dividerThickness - defaultPaneWidth
+            mainSplit.setPosition(max(defaultPaneWidth, target), ofDividerAt: mainSplit.arrangedSubviews.count - 2)
+        }
     }
 
     /// 分割位置の適用。保存済みの位置（ポータブル設定）があれば復元し、なければ初回既定レイアウト
@@ -2029,25 +2047,31 @@ final class MosaicWindowController: NSObject {
         layerOutlineView.scrollRowToVisible(row)
     }
 
+    /// 選択中のレイヤをグループ化する。選択行は「未グループのレイヤ」だけでなく、
+    /// 既存グループの内側にある子レイヤ（人物検出/骨格検出など）も対象にでき、
+    /// 元の場所（未グループ配列・元グループ）から取り除いた上で新しいグループへまとめる
+    /// （元グループが空になった場合はそのグループごと削除する）。
     @objc private func groupSelectedLayers() {
         var leavesToGroup: [LayerLeaf] = []
         for index in layerOutlineView.selectedRowIndexes {
-            if let leaf = layerOutlineView.item(atRow: index) as? LayerLeaf,
-               ungroupedLayers.contains(where: { $0 === leaf }) {
-                leavesToGroup.append(leaf)
-            }
+            guard let leaf = layerOutlineView.item(atRow: index) as? LayerLeaf else { continue }
+            leavesToGroup.append(leaf)
         }
         guard leavesToGroup.count >= 2 else {
             updateStatus("グループ化するレイヤを2つ以上選択してください")
             return
         }
         ungroupedLayers.removeAll { leaf in leavesToGroup.contains { $0 === leaf } }
+        for group in layerGroups {
+            group.children.removeAll { leaf in leavesToGroup.contains { $0 === leaf } }
+        }
+        layerGroups.removeAll { $0.children.isEmpty }
         layerGroupCounter += 1
         let group = LayerGroup(name: "グループ\(layerGroupCounter)", children: leavesToGroup)
         layerGroups.append(group)
         editorRevision += 1
         reloadLayerList()
-        updateStatus("\(group.name) を作成しました")
+        updateStatus("\(group.name) を作成しました（\(leavesToGroup.count)件）")
     }
 
     @objc private func ungroupSelectedGroup() {
