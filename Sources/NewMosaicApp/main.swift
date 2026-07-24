@@ -1358,16 +1358,37 @@ final class MosaicWindowController: NSObject {
 
     /// 指定サイドのペイン幅をmainSplit上へ即時反映し、次回起動時の復元用に設定へも保存する。
     private func applyPaneWidth(_ width: CGFloat, side: String) {
-        guard let mainSplit = mainSplitView else { return }
+        guard let mainSplit = mainSplitView, let rightPane = rightPaneSplitView else { return }
         mainSplit.layoutSubtreeIfNeeded()
         if side == "left" {
             mainSplit.setPosition(width, ofDividerAt: 0)
             AppSettings.shared.set(Double(width), forKey: "Layout.leftPaneWidth")
         } else {
-            let dividerCount = mainSplit.arrangedSubviews.count - 1
-            let target = mainSplit.bounds.width - mainSplit.dividerThickness - width
-            mainSplit.setPosition(max(200, target), ofDividerAt: dividerCount - 1)
+            setMainSplitRightPaneWidth(width, mainSplit: mainSplit, rightPane: rightPane)
             AppSettings.shared.set(Double(width), forKey: "Layout.rightPaneWidth")
+        }
+    }
+
+    /// mainSplit上で右ペインの幅を指定値へ設定する。
+    ///
+    /// 左ペインが非表示（既定状態）のとき、Appleの公式ドキュメントによれば
+    /// 「非表示のarrangedSubviewはdivider dragging上で存在しないものとして扱われ、
+    /// 対応するdividerも消える」とされており、`setPosition(_:ofDividerAt:)` に渡すべき
+    /// インデックスが「非表示ペインを詰めて数え直した実効インデックス」になる可能性がある。
+    /// これがOS/バージョンにより`arrangedSubviews.count - 2`（詰めない場合の本来の右ペイン境界）
+    /// と食い違い、狙った位置に反映されない不具合が繰り返し発生していた。
+    /// 挙動の詳細に依存せず確実に反映するため、候補インデックスを順に試し、
+    /// 実際の幅を測定して一致した時点で確定する。
+    private func setMainSplitRightPaneWidth(_ width: CGFloat, mainSplit: NSSplitView, rightPane: NSView) {
+        mainSplit.layoutSubtreeIfNeeded()
+        let target = max(200, mainSplit.bounds.width - mainSplit.dividerThickness - width)
+        let lastIndex = mainSplit.arrangedSubviews.count - 2
+        var candidates = [lastIndex]
+        if !candidates.contains(0) { candidates.append(0) }
+        for index in candidates where index >= 0 {
+            mainSplit.setPosition(target, ofDividerAt: index)
+            mainSplit.layoutSubtreeIfNeeded()
+            if abs(rightPane.frame.width - width) < 30 { return }
         }
     }
 
@@ -1426,8 +1447,7 @@ final class MosaicWindowController: NSObject {
             mainSplit.setPosition(defaultLeftPaneWidth, ofDividerAt: 0)
         }
         if wasRightHidden && !rightEmpty {
-            let target = mainSplit.bounds.width - mainSplit.dividerThickness - defaultRightPaneWidth
-            mainSplit.setPosition(max(defaultRightPaneWidth, target), ofDividerAt: mainSplit.arrangedSubviews.count - 2)
+            setMainSplitRightPaneWidth(defaultRightPaneWidth, mainSplit: mainSplit, rightPane: rightPane)
         }
     }
 
@@ -1450,9 +1470,14 @@ final class MosaicWindowController: NSObject {
             mainSplit.setPosition(280, ofDividerAt: 0)
         }
         if !rightPane.isHidden && rightPane.frame.width < 50 {
-            let dividerCount = mainSplit.arrangedSubviews.count - 1
-            let target = mainSplit.bounds.width - mainSplit.dividerThickness - libraryTwoColumnPaneWidth()
-            mainSplit.setPosition(max(libraryTwoColumnPaneWidth(), target), ofDividerAt: dividerCount - 1)
+            setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
+        }
+
+        // 右ペイン幅の既定化（工場既定レイアウト）は、右ペイン「内部」のライブラリ/レイヤ/
+        // インスペクタの高さ配分（下記、ウィンドウの縦幅に依存）とは独立した話のため、
+        // 縦幅が足りない場合に早期returnするガードの影響を受けないようここで確定させる。
+        if !restored && !rightPane.isHidden {
+            setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
         }
 
         if restored { return }
@@ -1463,15 +1488,6 @@ final class MosaicWindowController: NSObject {
         let layerHeight = max(170, min(230, total * 0.30))
         rightPane.setPosition(libraryHeight, ofDividerAt: 0)
         rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
-        let rightWidth = libraryTwoColumnPaneWidth()
-        // 右ペインの境界は「左ペイン/キャンバス/右ペイン」3ビュー中の最後のdivider
-        // （arrangedSubviews.count - 2）。固定の0を使うと、既定で非表示の左ペインと
-        // キャンバスの境界（無効化される）を動かすだけで右ペイン幅に反映されず、
-        // 「初期化してもレイアウトが変わらない」不具合の原因になっていた。
-        mainSplit.setPosition(
-            mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth,
-            ofDividerAt: mainSplit.arrangedSubviews.count - 2
-        )
     }
 
     /// 保存済みの分割位置（左右サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
@@ -1484,19 +1500,15 @@ final class MosaicWindowController: NSObject {
         isRestoringSplitPositions = true
         defer { isRestoringSplitPositions = false }
 
-        // メイン分割: 左ペイン幅（divider 0）と右ペイン幅（最終divider）
-        let dividerCount = mainSplit.arrangedSubviews.count - 1
+        // メイン分割: 左ペイン幅（divider 0）と右ペイン幅
         if !leftPane.isHidden,
            let leftWidth = settings.object(forKey: "Layout.leftPaneWidth") as? Double, leftWidth > 50 {
             mainSplit.setPosition(leftWidth, ofDividerAt: 0)
             restored = true
         }
-        if !rightPane.isHidden, dividerCount >= 1,
+        if !rightPane.isHidden,
            let rightWidth = settings.object(forKey: "Layout.rightPaneWidth") as? Double, rightWidth > 50 {
-            mainSplit.setPosition(
-                max(200, mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth),
-                ofDividerAt: dividerCount - 1
-            )
+            setMainSplitRightPaneWidth(rightWidth, mainSplit: mainSplit, rightPane: rightPane)
             restored = true
         }
 
