@@ -859,6 +859,9 @@ final class MosaicWindowController: NSObject {
         target: nil,
         action: nil
     )
+    /// `applyScaledFont(_:size:weight:)` で登録された静的コントロール。テキストサイズ変更時に
+    /// このリストを走査してフォントを再適用する。
+    private var scaledTextControls: [(control: NSControl, baseSize: CGFloat, weight: NSFont.Weight)] = []
     private static let recentProjectsDefaultsKey = "RecentProjects"
     // Win/Mac両対応の4文字拡張子（newMosaic Config の略）。旧 "newmosaicproj" は冗長なため短縮。
     private static let projectFileExtension = "nmcf"
@@ -992,18 +995,36 @@ final class MosaicWindowController: NSObject {
 
         shapeControl.selectedSegment = 1
         shapeControl.toolTip = "新規または選択中のモザイク範囲の形状"
+        applyScaledFont(shapeControl, size: 12)
         segmentEngineControl.removeAllItems()
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
         segmentEngineControl.selectItem(at: 0)
         segmentEngineControl.toolTip = "選択範囲から実際の処理マスクを生成する方式"
+        applyScaledFont(segmentEngineControl, size: 13)
 
         // 画像種別（自動判定の誤りを手動で上書きできるようにする）
         domainModeControl.removeAllItems()
         domainModeControl.addItems(withTitles: ["自動判定", "実写", "イラスト・漫画"])
         domainModeControl.toolTip = "人物・部位検出に使用する画像種別"
+        applyScaledFont(domainModeControl, size: 13)
         let savedDomainMode = AppSettings.shared.integer(forKey: Self.domainModeDefaultsKey)
         domainModeControl.selectItem(at: (0...2).contains(savedDomainMode) ? savedDomainMode : 0)
         loadLibraryViewPreferences()
+        for (_, button) in categoryFilterChecks {
+            applyScaledFont(button, size: 12)
+        }
+        applyScaledFont(generatePersonCheckbox, size: 12)
+        applyScaledFont(generatePoseCheckbox, size: 12)
+        applyScaledFont(mosaicPreviewCheckbox, size: 12)
+        applyScaledFont(autoGenerateCheckbox, size: 12)
+        applyScaledFont(autoSaveCheckbox, size: 12)
+        applyScaledFont(applyStyleToAllButton, size: 12)
+        applyScaledFont(styleTintCheckbox, size: 12)
+        applyScaledFont(styleCloudToneCheckbox, size: 12)
+        applyScaledFont(stylePatternImageButton, size: 12)
+        applyScaledFont(stylePatternPopUp, size: 13)
+        applyScaledFont(undoButton, size: 12)
+        applyScaledFont(redoButton, size: 12)
 
         toolbar.setHuggingPriority(.required, for: .vertical)
 
@@ -1068,7 +1089,7 @@ final class MosaicWindowController: NSObject {
         let statusSeparator = NSBox()
         statusSeparator.boxType = .separator
         statusSeparator.translatesAutoresizingMaskIntoConstraints = false
-        statusLabel.font = Self.scaledFont(11)
+        applyScaledFont(statusLabel, size: 11)
         statusLabel.translatesAutoresizingMaskIntoConstraints = false
         statsLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
         statsLabel.textColor = .secondaryLabelColor
@@ -1278,7 +1299,7 @@ final class MosaicWindowController: NSObject {
         let rightButton = NSButton(title: "▶", target: self, action: #selector(movePanelToRight(_:)))
         for button in [leftButton, rightButton] {
             button.isBordered = false
-            button.font = Self.scaledFont(9)
+            applyScaledFont(button, size: 9)
             button.contentTintColor = .secondaryLabelColor
             button.translatesAutoresizingMaskIntoConstraints = false
             button.identifier = NSUserInterfaceItemIdentifier(kind.rawValue)
@@ -1309,9 +1330,51 @@ final class MosaicWindowController: NSObject {
     private func movePanel(from sender: NSButton, to side: String) {
         guard let raw = sender.identifier?.rawValue,
               let kind = SidePanelKind(rawValue: raw) else { return }
+        let currentSide = AppSettings.shared.string(forKey: "Layout.panelSide.\(kind.rawValue)") ?? "right"
+        // 移動先サイドに他のパネルが既にあれば、その幅を維持すべきなので幅の引き継ぎは行わない。
+        let destinationOccupied = SidePanelKind.allCases.contains { other in
+            guard other != kind else { return false }
+            let otherSide = AppSettings.shared.string(forKey: "Layout.panelSide.\(other.rawValue)") ?? "right"
+            return otherSide == side
+        }
+        let inheritedWidth: CGFloat? = {
+            guard !destinationOccupied, currentSide != side else { return nil }
+            let width = currentSide == "left" ? leftPaneSplitView?.frame.width : rightPaneSplitView?.frame.width
+            guard let width, width > 50 else { return nil }
+            return width
+        }()
         AppSettings.shared.set(side, forKey: "Layout.panelSide.\(kind.rawValue)")
         applyPanelAssignments()
+        if let inheritedWidth {
+            applyPaneWidth(inheritedWidth, side: side)
+        }
         updateStatus("\(panelDisplayName(kind))を\(side == "left" ? "左" : "右")サイドパネルへ移動しました")
+    }
+
+    /// 指定サイドのペイン幅をmainSplit上へ即時反映し、次回起動時の復元用に設定へも保存する。
+    private func applyPaneWidth(_ width: CGFloat, side: String) {
+        guard let mainSplit = mainSplitView else { return }
+        mainSplit.layoutSubtreeIfNeeded()
+        if side == "left" {
+            mainSplit.setPosition(width, ofDividerAt: 0)
+            AppSettings.shared.set(Double(width), forKey: "Layout.leftPaneWidth")
+        } else {
+            let dividerCount = mainSplit.arrangedSubviews.count - 1
+            let target = mainSplit.bounds.width - mainSplit.dividerThickness - width
+            mainSplit.setPosition(max(200, target), ofDividerAt: dividerCount - 1)
+            AppSettings.shared.set(Double(width), forKey: "Layout.rightPaneWidth")
+        }
+    }
+
+    /// ライブラリのグリッド表示（サムネイル既定サイズ120pt）がちょうど2列になる幅。
+    /// サイドパネルの「工場初期値」として使う（右パネルは既定でライブラリが配置されるため）。
+    private func libraryTwoColumnPaneWidth() -> CGFloat {
+        let itemWidth: CGFloat = 120 // thumbnailSizeSliderの既定値
+        let interitem: CGFloat = 5
+        let sectionInset: CGFloat = 5 * 2
+        let scrollbarReserve: CGFloat = 16
+        let panelPadding: CGFloat = 8 * 2
+        return itemWidth * 2 + interitem + sectionInset + scrollbarReserve + panelPadding
     }
 
     private func panelDisplayName(_ kind: SidePanelKind) -> String {
@@ -1352,23 +1415,42 @@ final class MosaicWindowController: NSObject {
         // 隠れていたペインが新たに表示された場合は明示的に既定幅を与える
         // （「サイドパネルを左へ移動すると表示されなくなる」バグの修正）。
         mainSplit.layoutSubtreeIfNeeded()
-        let defaultPaneWidth: CGFloat = 280
+        let defaultLeftPaneWidth: CGFloat = 280
+        let defaultRightPaneWidth = libraryTwoColumnPaneWidth()
         if wasLeftHidden && !leftEmpty {
-            mainSplit.setPosition(defaultPaneWidth, ofDividerAt: 0)
+            mainSplit.setPosition(defaultLeftPaneWidth, ofDividerAt: 0)
         }
         if wasRightHidden && !rightEmpty {
-            let target = mainSplit.bounds.width - mainSplit.dividerThickness - defaultPaneWidth
-            mainSplit.setPosition(max(defaultPaneWidth, target), ofDividerAt: mainSplit.arrangedSubviews.count - 2)
+            let target = mainSplit.bounds.width - mainSplit.dividerThickness - defaultRightPaneWidth
+            mainSplit.setPosition(max(defaultRightPaneWidth, target), ofDividerAt: mainSplit.arrangedSubviews.count - 2)
         }
     }
 
     /// 分割位置の適用。保存済みの位置（ポータブル設定）があれば復元し、なければ初回既定レイアウト
     /// （レイヤパネル=人物4人分相当）を適用する。以後のドラッグ調整は `splitViewDidResizeSubviews` で保存される。
     func applyInitialLayoutIfNeeded() {
-        guard let rightPane = rightPaneSplitView, let mainSplit = mainSplitView else { return }
+        guard let rightPane = rightPaneSplitView, let leftPane = leftPaneSplitView,
+              let mainSplit = mainSplitView else { return }
         rightPane.layoutSubtreeIfNeeded()
         mainSplit.layoutSubtreeIfNeeded()
-        if restoreSplitPositions() { return }
+        let restored = restoreSplitPositions()
+
+        // 保険: 表示状態（isHidden=false）のペインが実際にはほぼ幅0のまま残ることがある。
+        // 一度もドラッグ保存されていない（Layout.leftPaneWidth等が未保存の）ペインを
+        // 別ペインの復元成功によりrestoreSplitPositions()がtrueを返す状況で通過してしまうと
+        // 幅0のまま気づかれず、「再起動するとサイドパネルが表示されない」不具合につながるため、
+        // 復元結果によらず常に最終チェックとして既定幅を強制する。
+        mainSplit.layoutSubtreeIfNeeded()
+        if !leftPane.isHidden && leftPane.frame.width < 50 {
+            mainSplit.setPosition(280, ofDividerAt: 0)
+        }
+        if !rightPane.isHidden && rightPane.frame.width < 50 {
+            let dividerCount = mainSplit.arrangedSubviews.count - 1
+            let target = mainSplit.bounds.width - mainSplit.dividerThickness - libraryTwoColumnPaneWidth()
+            mainSplit.setPosition(max(libraryTwoColumnPaneWidth(), target), ofDividerAt: dividerCount - 1)
+        }
+
+        if restored { return }
         let total = rightPane.bounds.height
         guard total > 520 else { return }
         let divider = rightPane.dividerThickness
@@ -1376,7 +1458,7 @@ final class MosaicWindowController: NSObject {
         let layerHeight = max(170, min(230, total * 0.30))
         rightPane.setPosition(libraryHeight, ofDividerAt: 0)
         rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
-        let rightWidth = max(320, min(390, mainSplit.bounds.width * 0.34))
+        let rightWidth = libraryTwoColumnPaneWidth()
         mainSplit.setPosition(mainSplit.bounds.width - mainSplit.dividerThickness - rightWidth, ofDividerAt: 0)
     }
 
@@ -1455,7 +1537,12 @@ final class MosaicWindowController: NSObject {
         button.title = ""
         button.identifier = NSUserInterfaceItemIdentifier(symbol)
         button.imagePosition = .imageOnly
-        button.bezelStyle = .texturedRounded
+        // .texturedRoundedは低め(20〜24pt)の旧来ツールバー用ハイライト画像を内蔵しており、
+        // アイコンサイズ拡大（Build 66）後の正方形フレーム（40〜58pt）へ引き伸ばすと
+        // ハイライトが横長に潰れて表示される不具合があった。.shadowlessSquareは
+        // ボタンの実フレームいっぱいに矩形ハイライトを描くため、どのサイズでも正しく追従する。
+        button.bezelStyle = .shadowlessSquare
+        button.isBordered = true
         button.toolTip = help
         // ホバー中は下部ステータスバーへヘルプ文を表示する
         let relay = HoverHelpRelay(text: help) { [weak self] text in
@@ -1516,11 +1603,12 @@ final class MosaicWindowController: NSObject {
         return value
     }
 
-    /// 「テキストサイズ」設定（小/中/大）による倍率。既定（中）は等倍。
+    /// 「テキストサイズ」設定（小/中/大）による倍率。既定（中＝現在のデフォルトサイズ）を
+    /// 基準（等倍）に据え、小・大をそこから調整する。
     static func textScale() -> CGFloat {
         switch currentTextSizeSetting() {
-        case 0: return 0.85
-        case 2: return 1.2
+        case 0: return 0.8
+        case 2: return 1.25
         default: return 1.0
         }
     }
@@ -1535,16 +1623,41 @@ final class MosaicWindowController: NSObject {
         .monospacedDigitSystemFont(ofSize: size * textScale(), weight: weight)
     }
 
-    /// テキストサイズ変更時、動的に再生成されるUI（レイヤ一覧・ライブラリ一覧・キャンバス描画・
-    /// ステータスバー）へ即座に反映する。ウィンドウ起動時にのみ組み立てる静的な見出し等は
-    /// 次回起動時に反映される（テキストサイズ変更のたびにウィンドウ全体を再構築するリスクを避けるため）。
+    /// 起動時に一度だけ組み立てる静的コントロール（ラベル・ボタン・チェックボックス・
+    /// セグメントコントロール・ポップアップ）へスケール後のフォントを適用しつつ、
+    /// テキストサイズ変更時に再適用できるよう基準サイズを記録する。
+    /// レイヤ行・ライブラリセル・キャンバス描画テキストなど毎回作り直される表示は
+    /// 呼び出し側で直接 `Self.scaledFont` を使うため、この登録は不要。
+    @discardableResult
+    private func applyScaledFont(_ control: NSControl, size: CGFloat, weight: NSFont.Weight = .regular) -> NSControl {
+        control.font = Self.scaledFont(size, weight: weight)
+        scaledTextControls.append((control, size, weight))
+        return control
+    }
+
+    /// テキストサイズ変更を全画面へ即座に反映する。静的コントロールは登録済みフォントの
+    /// 再適用で、動的に再構築される表示（レイヤ一覧・ライブラリ一覧・キャンバス描画・
+    /// ステータスバー）は再読込/再描画で反映する。
     @objc private func textSizeChanged() {
         AppSettings.shared.set(textSizeControl.selectedSegment, forKey: Self.textSizeDefaultsKey)
+        for entry in scaledTextControls {
+            entry.control.font = Self.scaledFont(entry.baseSize, weight: entry.weight)
+        }
+        statsLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
+        zoomLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
+        for label in [styleOpacityValueLabel, styleBlockScaleValueLabel, styleFeatherValueLabel,
+                      styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleCloudDensityValueLabel,
+                      groinPositionValueLabel] {
+            label.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
+        }
+        stylePatternImageLabel.font = Self.scaledFont(11)
+        selectedLayerStyleLabel.font = Self.scaledFont(11, weight: .medium)
         reloadLayerList()
         reloadLibrary()
         canvas.needsDisplay = true
         updateStatsBar()
-        updateStatus("テキストサイズを変更しました（一部の表示は次回起動時に反映されます）")
+        view.window?.layoutIfNeeded()
+        updateStatus("テキストサイズを変更しました")
     }
 
     /// 詳細設定でアイコンサイズが変更されたとき、既存の全ツールバーボタンへ即座に反映する。
@@ -1622,7 +1735,7 @@ final class MosaicWindowController: NSObject {
         panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "インスペクタ")
-        title.font = Self.scaledFont(15, weight: .semibold)
+        applyScaledFont(title, size: 15, weight: .semibold)
 
         let shapeRow = inspectorRow("追加形状", control: shapeControl)
         let maskRow = inspectorRow("マスク生成", control: segmentEngineControl)
@@ -1709,13 +1822,14 @@ final class MosaicWindowController: NSObject {
 
     private func inspectorHeading(_ text: String) -> NSTextField {
         let label = NSTextField(labelWithString: text)
-        label.font = Self.scaledFont(12, weight: .semibold)
+        applyScaledFont(label, size: 12, weight: .semibold)
         label.textColor = .labelColor
         return label
     }
 
     private func inspectorRow(_ title: String, control: NSView, trailing: NSView? = nil) -> NSStackView {
         let label = NSTextField(labelWithString: title)
+        applyScaledFont(label, size: 13)
         label.textColor = .secondaryLabelColor
         // 固定幅（旧: equalToConstant）だと、幅より長いラベル文字列が隣接コントロールへ
         // はみ出して重なって見える不具合があったため、最小幅のみを指定して伸縮可能にする。
@@ -2185,12 +2299,16 @@ final class MosaicWindowController: NSObject {
         panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "レイヤ")
-        title.font = Self.scaledFont(15, weight: .semibold)
+        applyScaledFont(title, size: 15, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         // レイヤ表示トグル（ツールバーから移設: 人物検出レイヤ・骨格検出レイヤ・ROIレイヤの一括ON/OFF）
         let togglesLabel = NSTextField(labelWithString: "表示:")
+        applyScaledFont(togglesLabel, size: 13)
         togglesLabel.textColor = .secondaryLabelColor
+        applyScaledFont(personLayerCheckbox, size: 13)
+        applyScaledFont(poseLayerCheckbox, size: 13)
+        applyScaledFont(roiLayerCheckbox, size: 13)
         let togglesRow = NSStackView(views: [togglesLabel, personLayerCheckbox, poseLayerCheckbox, roiLayerCheckbox])
         togglesRow.orientation = .horizontal
         togglesRow.alignment = .centerY
@@ -2218,6 +2336,8 @@ final class MosaicWindowController: NSObject {
         groupButton.action = #selector(groupSelectedLayers)
         ungroupButton.target = self
         ungroupButton.action = #selector(ungroupSelectedGroup)
+        applyScaledFont(groupButton, size: 12)
+        applyScaledFont(ungroupButton, size: 12)
         let buttons = NSStackView(views: [groupButton, ungroupButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
@@ -3169,13 +3289,14 @@ final class MosaicWindowController: NSObject {
         panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
 
         let title = NSTextField(labelWithString: "ライブラリ")
-        title.font = Self.scaledFont(15, weight: .semibold)
+        applyScaledFont(title, size: 15, weight: .semibold)
         title.translatesAutoresizingMaskIntoConstraints = false
 
         viewModeControl.selectedSegment = libraryViewMode.rawValue
         viewModeControl.target = self
         viewModeControl.action = #selector(viewModeChanged)
         viewModeControl.translatesAutoresizingMaskIntoConstraints = false
+        applyScaledFont(viewModeControl, size: 12)
 
         thumbnailSizeSlider.target = self
         thumbnailSizeSlider.action = #selector(thumbnailSizeChanged)
@@ -3211,11 +3332,13 @@ final class MosaicWindowController: NSObject {
         libraryProcessedFilterControl.target = self
         libraryProcessedFilterControl.action = #selector(libraryFilterChanged)
         libraryProcessedFilterControl.toolTip = "処理済みフラグで絞り込む"
+        applyScaledFont(libraryProcessedFilterControl, size: 11)
         librarySearchField.placeholderString = "ファイル名で検索"
         librarySearchField.target = self
         librarySearchField.action = #selector(librarySearchChanged)
         librarySearchField.translatesAutoresizingMaskIntoConstraints = false
         librarySearchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        applyScaledFont(librarySearchField, size: 12)
         let filterRow = NSStackView(views: [libraryProcessedFilterControl, librarySearchField])
         filterRow.orientation = .horizontal
         filterRow.spacing = 8
@@ -3906,6 +4029,12 @@ extension MosaicWindowController {
         exportFormatPopUp.addItems(withTitles: ImageExportFormat.allCases.map(\.displayName))
         exportFormatPopUp.target = self
         exportFormatPopUp.action = #selector(exportFormatChanged)
+        applyScaledFont(exportFormatPopUp, size: 13)
+        applyScaledFont(exportFilenameField, size: 13)
+        applyScaledFont(exportDPIField, size: 13)
+        applyScaledFont(exportIncludeOriginalLayerCheckbox, size: 12)
+        applyScaledFont(exportPreserveTransparencyCheckbox, size: 12)
+        applyScaledFont(exportQualityValueLabel, size: 12)
 
         exportQualitySlider.target = self
         exportQualitySlider.action = #selector(exportQualityChanged)
@@ -3931,8 +4060,9 @@ extension MosaicWindowController {
         exportFilenameField.widthAnchor.constraint(equalToConstant: 420).isActive = true
 
         let chooseFolderButton = NSButton(title: "保存先を変更…", target: self, action: #selector(exportChooseFolder))
+        applyScaledFont(chooseFolderButton, size: 12)
 
-        exportFormatNoteLabel.font = Self.scaledFont(10)
+        applyScaledFont(exportFormatNoteLabel, size: 10)
         exportFormatNoteLabel.textColor = .secondaryLabelColor
         exportFormatNoteLabel.maximumNumberOfLines = 3
         exportFormatNoteLabel.lineBreakMode = .byWordWrapping
@@ -3971,9 +4101,9 @@ extension MosaicWindowController {
         exportPreviewZoomImageView.heightAnchor.constraint(equalToConstant: 220).isActive = true
 
         let fullLabel = NSTextField(labelWithString: "全体プレビュー")
-        fullLabel.font = Self.scaledFont(11, weight: .medium)
+        applyScaledFont(fullLabel, size: 11, weight: .medium)
         let zoomLabel = NSTextField(labelWithString: "拡大プレビュー（中央部）")
-        zoomLabel.font = Self.scaledFont(11, weight: .medium)
+        applyScaledFont(zoomLabel, size: 11, weight: .medium)
 
         let previewColumn = NSStackView(views: [
             fullLabel, exportPreviewFullImageView, zoomLabel, exportPreviewZoomImageView
@@ -3991,10 +4121,12 @@ extension MosaicWindowController {
 
         let cancelButton = NSButton(title: "キャンセル", target: self, action: #selector(exportCancelled))
         cancelButton.keyEquivalent = "\u{1b}"
+        applyScaledFont(cancelButton, size: 13)
         let exportButton = NSButton(title: "画像出力", target: self, action: #selector(exportConfirmed))
         exportButton.keyEquivalent = "\r"
         exportButton.bezelStyle = .rounded
         exportButton.hasDestructiveAction = false
+        applyScaledFont(exportButton, size: 13)
         let buttonRow = NSStackView(views: [NSView(), cancelButton, exportButton])
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 10
@@ -4362,11 +4494,13 @@ extension MosaicWindowController {
         iconSizeControl.target = self
         iconSizeControl.action = #selector(iconSizeChanged)
         iconSizeControl.toolTip = "ツールバーアイコンの表示サイズ"
+        applyScaledFont(iconSizeControl, size: 12)
 
         textSizeControl.selectedSegment = Self.currentTextSizeSetting()
         textSizeControl.target = self
         textSizeControl.action = #selector(textSizeChanged)
-        textSizeControl.toolTip = "画面内のテキストサイズ（一部の表示は次回起動時に反映されます）"
+        textSizeControl.toolTip = "画面内のテキストサイズ（変更すると即座に反映されます）"
+        applyScaledFont(textSizeControl, size: 12)
 
         let iconSizeRow = inspectorRow("アイコンサイズ", control: iconSizeControl)
         let textSizeRow = inspectorRow("テキストサイズ", control: textSizeControl)
@@ -4374,6 +4508,7 @@ extension MosaicWindowController {
         // 「設定ファイル」行もinspectorRowで統一し、アイコンサイズ等のラベルと
         // 左寄せ位置・テキストサイズを揃える（旧実装は別スタイルのラベルで揃っていなかった）。
         let settingsPathValueLabel = NSTextField(labelWithString: AppSettings.shared.settingsFileLocation.path)
+        applyScaledFont(settingsPathValueLabel, size: 11)
         settingsPathValueLabel.textColor = .secondaryLabelColor
         settingsPathValueLabel.lineBreakMode = .byTruncatingMiddle
         settingsPathValueLabel.maximumNumberOfLines = 2
@@ -4382,6 +4517,7 @@ extension MosaicWindowController {
         let settingsPathRow = inspectorRow("設定ファイル", control: settingsPathValueLabel)
 
         let numpadButton = NSButton(title: "テンキー割当…", target: self, action: #selector(showNumpadAssignmentWindow))
+        applyScaledFont(numpadButton, size: 12)
         let numpadRow = inspectorRow("機能割当", control: numpadButton)
 
         let content = NSStackView(views: [iconSizeRow, textSizeRow, numpadRow, settingsPathRow])
@@ -4691,7 +4827,6 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
                 let cell = NSTableCellView()
                 let label = NSTextField(labelWithString: "")
                 label.lineBreakMode = .byTruncatingMiddle
-                label.font = Self.scaledFont(11)
                 label.translatesAutoresizingMaskIntoConstraints = false
                 cell.addSubview(label)
                 NSLayoutConstraint.activate([
@@ -4704,6 +4839,8 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
             }()
             cell.identifier = identifier
             guard let label = cell.textField else { return cell }
+            // makeView によるセル再利用時もフォントを毎回再適用し、テキストサイズ変更を即反映する。
+            label.font = Self.scaledFont(11)
 
             let isBroken = libraryEngine.isLinkBroken(item)
             switch columnID {
@@ -4956,6 +5093,8 @@ final class LibraryGridItem: NSCollectionViewItem {
     func configure(image: NSImage?, caption: String) {
         thumbnailView.image = image
         captionField.stringValue = caption
+        // NSCollectionView によるアイテム再利用時もフォントを毎回再適用し、テキストサイズ変更を即反映する。
+        captionField.font = MosaicWindowController.scaledFont(11)
     }
 }
 
