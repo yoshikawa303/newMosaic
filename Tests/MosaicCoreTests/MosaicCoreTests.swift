@@ -473,6 +473,75 @@ import Testing
     }
 }
 
+/// テスト専用: ROI形状には正しく制限しつつ、内部を意図的に「まだら」な半透明マスクにして返す
+/// セグメントエンジン。Visionベースのマスク（人物セグメンテーション等）が前髪等の細部で
+/// 部分的な半透明値になり、モザイクが均一に適用されず色調がまだらになる状況を模したスタブ。
+private final class PatchyStubSegmentEngine: Segmenting {
+    func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        try rois.map { roi in
+            // ROI形状で正しく制限した上で、内部を40%グレー（部分的な半透明）にする
+            // （実際のVision人物セグメンテーションが ShapeSegmentEngine.restrict で
+            //   形状制限すること自体は正しく行っている点を反映しつつ、内部の値が
+            //   完全不透明ではなくまだらになりうる状況を再現する）
+            let full = ShapeSegmentEngine.shapeMask(for: roi, extent: extent)
+            let dimmed = full.applyingFilter("CIColorMatrix", parameters: [
+                "inputRVector": CIVector(x: 0.4, y: 0, z: 0, w: 0),
+                "inputGVector": CIVector(x: 0, y: 0.4, z: 0, w: 0),
+                "inputBVector": CIVector(x: 0, y: 0, z: 0.4, w: 0)
+            ])
+            return dimmed
+        }
+    }
+}
+
+@Test func eyesAndLowerFaceCategoriesAlwaysUseShapeMaskRegardlessOfSegmentEngine() throws {
+    // 「目元」「眼窩下〜あご」ROIは、選択中のマスク生成方式に関わらず図形ベースマスクを使う
+    // （Vision/顕著性ベースのマスクは前髪等の細部でまだらな半透明値になりやすく、
+    //   モザイクが均一に適用されず色調異常に見える不具合を招くため除外する）。
+    // 検証: PatchyStubSegmentEngine（意図的に40%の半透明マスクを返す）を渡しても、
+    // 目元カテゴリの実際のマスクは図形ベース（完全不透明=白255）へ差し替わり、
+    // otherカテゴリはスタブの半透明マスク（約40%）がそのまま使われることを確認する。
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let image = try makeSolidImage(width: 100, height: 100, color: .systemBlue)
+    let eyesROI = MosaicROI(
+        rect: NormalizedRect(x: 0.2, y: 0.2, width: 0.3, height: 0.2),
+        confidence: 1,
+        source: "face-region",
+        shape: .rectangle,
+        category: .eyes
+    )
+    let otherROI = MosaicROI(
+        rect: NormalizedRect(x: 0.6, y: 0.6, width: 0.3, height: 0.2),
+        confidence: 1,
+        source: "manual",
+        shape: .rectangle,
+        category: .other
+    )
+
+    let masks = try MosaicEngine.createMasks(
+        for: [eyesROI, otherROI],
+        in: image,
+        extent: extent,
+        segmentEngine: PatchyStubSegmentEngine()
+    )
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func maskLuminance(_ mask: CIImage, x: Int, y: Int) -> Double {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            mask, toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Double(pixel[0]) / 255
+    }
+
+    // 目元ROI中心（CI座標 x=35, y=70）: 図形ベースへ強制され完全不透明（白）になる
+    #expect(maskLuminance(masks[0], x: 35, y: 70) > 0.95)
+    // otherROI中心（CI座標 x=75, y=30）: スタブの40%半透明マスクがそのまま使われる
+    let otherLuminance = maskLuminance(masks[1], x: 75, y: 30)
+    #expect(otherLuminance > 0.3 && otherLuminance < 0.7, "otherLuminance=\(otherLuminance)")
+}
+
 @Test func faceRegionBuilderConstructsEyesAndLowerFaceRects() {
     // 合成ランドマーク: 目（y0.30-0.33）・眉（y0.26）・輪郭（あご先y0.55）から
     // 目元帯と眼窩下〜あご領域が構築されることを検証する

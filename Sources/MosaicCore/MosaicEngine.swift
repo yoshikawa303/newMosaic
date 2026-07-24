@@ -192,7 +192,7 @@ public final class MosaicEngine {
         let original = output
         var layerCache: [MosaicROIStyle: (fill: CIImage, stripeAlpha: CIImage?)] = [:]
 
-        let masks = try segmentEngine.createMasks(for: rois, in: image, extent: extent)
+        let masks = try Self.createMasks(for: rois, in: image, extent: extent, segmentEngine: segmentEngine)
         for (roi, baseMask) in zip(rois, masks) {
             let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
             guard rect.width > 1, rect.height > 1 else { continue }
@@ -318,6 +318,54 @@ public final class MosaicEngine {
             ])
         }
         return image.composited(over: background).cropped(to: extent)
+    }
+
+    /// ROIごとにマスクを生成する。カテゴリが「目元」「眼窩下〜あご」のROIは、選択中の
+    /// マスク生成方式（Vision人物セグメンテーション/前景オブジェクト/対象の形状）に関わらず、
+    /// 常に図形ベース（矩形/楕円/多角形）の幾何学的マスクを使う。
+    ///
+    /// 理由: これらは顔にメガネ・マスク等のアクセサリを重ねる/隠す用途のROIであり、
+    /// 前髪など細部にまたがる被写体の内容ベースマスク（Vision人物セグメンテーション等）は
+    /// 髪の生え際で部分的な半透明値になりやすく、モザイクが「まだら」に適用されて
+    /// 指定外の色調（地の肌色や毛髪色）が透けて見える不具合を招く（ユーザー報告により判明）。
+    /// 対象の形状（顕著性マップ由来）も、目元のような質感の乏しい小領域では
+    /// クリーンな輪郭を得られずノイズ状のマスクになりやすいため同様に除外する。
+    static func createMasks(
+        for rois: [MosaicROI],
+        in image: CGImage,
+        extent: CGRect,
+        segmentEngine: Segmenting
+    ) throws -> [CIImage] {
+        let forcedShapeCategories: Set<MosaicTargetCategory> = [.eyes, .lowerFace]
+        guard rois.contains(where: { forcedShapeCategories.contains($0.category) }) else {
+            return try segmentEngine.createMasks(for: rois, in: image, extent: extent)
+        }
+
+        var shapeIndices: [Int] = []
+        var otherIndices: [Int] = []
+        for (index, roi) in rois.enumerated() {
+            if forcedShapeCategories.contains(roi.category) {
+                shapeIndices.append(index)
+            } else {
+                otherIndices.append(index)
+            }
+        }
+
+        let shapeROIs = shapeIndices.map { rois[$0] }
+        let otherROIs = otherIndices.map { rois[$0] }
+        let shapeMasks = try ShapeSegmentEngine().createMasks(for: shapeROIs, in: image, extent: extent)
+        let otherMasks = otherROIs.isEmpty
+            ? []
+            : try segmentEngine.createMasks(for: otherROIs, in: image, extent: extent)
+
+        var masks = [CIImage?](repeating: nil, count: rois.count)
+        for (position, roiIndex) in shapeIndices.enumerated() {
+            masks[roiIndex] = shapeMasks[position]
+        }
+        for (position, roiIndex) in otherIndices.enumerated() {
+            masks[roiIndex] = otherMasks[position]
+        }
+        return masks.compactMap { $0 }
     }
 
     // MARK: - 塗りつぶしレイヤ生成
