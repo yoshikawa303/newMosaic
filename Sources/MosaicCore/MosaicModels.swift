@@ -164,11 +164,15 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
     public var stripeRandom: Bool
     /// ボーダー: 帯を網点（漫画トーン風）で塗るか。
     public var stripeTone: Bool
+    /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い。
+    public var stripeWobble: Double
     public var cloudDensity: Double
     public var cloudTone: Bool
     /// フラッシュ（集中線）: 放射の中心位置（ROIのローカル正規化座標、0〜1・左上原点）。
     /// nilはROI中心を使う。
     public var flashCenter: NormalizedPoint?
+    /// フラッシュ: 種別（false=集中線（黒線）、true=ベタフラッシュ（黒地に白））。
+    public var flashBeta: Bool
     /// Application Support内に保存した任意パターン画像の識別子。
     public var patternImageIdentifier: String?
 
@@ -183,9 +187,11 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         stripeVertical: Bool = true,
         stripeRandom: Bool = false,
         stripeTone: Bool = false,
+        stripeWobble: Double = 0,
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
         flashCenter: NormalizedPoint? = nil,
+        flashBeta: Bool = false,
         patternImageIdentifier: String? = nil
     ) {
         self.pattern = pattern
@@ -198,16 +204,18 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         self.stripeVertical = stripeVertical
         self.stripeRandom = stripeRandom
         self.stripeTone = stripeTone
+        self.stripeWobble = stripeWobble
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
         self.flashCenter = flashCenter
+        self.flashBeta = flashBeta
         self.patternImageIdentifier = patternImageIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
         case pattern, opacity, tint, blockScale, edgeFeather, stripeWidth, stripeSpacing,
-             stripeVertical, stripeRandom, stripeTone, cloudDensity, cloudTone, flashCenter,
-             patternImageIdentifier
+             stripeVertical, stripeRandom, stripeTone, stripeWobble, cloudDensity, cloudTone,
+             flashCenter, flashBeta, patternImageIdentifier
     }
 
     /// 旧バージョン（ボーダー縦/横/ランダムを別パターンとして保持していた時代）に保存された
@@ -224,7 +232,9 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         stripeSpacing = try container.decode(Double.self, forKey: .stripeSpacing)
         cloudDensity = try container.decode(Double.self, forKey: .cloudDensity)
         cloudTone = try container.decode(Bool.self, forKey: .cloudTone)
+        stripeWobble = try container.decodeIfPresent(Double.self, forKey: .stripeWobble) ?? 0
         flashCenter = try container.decodeIfPresent(NormalizedPoint.self, forKey: .flashCenter)
+        flashBeta = try container.decodeIfPresent(Bool.self, forKey: .flashBeta) ?? false
         patternImageIdentifier = try container.decodeIfPresent(String.self, forKey: .patternImageIdentifier)
 
         switch rawPattern {

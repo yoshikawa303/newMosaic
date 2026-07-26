@@ -80,12 +80,16 @@ public struct MosaicStyle: @unchecked Sendable {
     public var stripeRandom: Bool
     /// ボーダー: 帯を網点（漫画トーン風）で塗るか
     public var stripeTone: Bool
-    /// 雲（トーン）: 密度（0〜1。大きいほど塗り部分が多い）
+    /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い（ランダムON時）
+    public var stripeWobble: Double
+    /// 雲（トーン）: 密度（0〜1。大きいほど塗り部分が多い）。フラッシュでは放射線の密度を兼ねる
     public var cloudDensity: Double
-    /// 雲（トーン）: 漫画のトーンパターン化（網点変換）ON/OFF
+    /// 雲（トーン）: 漫画のトーンパターン化（網点変換）ON/OFF。フラッシュのトーン化も兼ねる
     public var cloudTone: Bool
     /// フラッシュ: 放射の中心位置（ROIのローカル正規化座標、0〜1・左上原点）。nilはROI中心。
     public var flashCenter: NormalizedPoint?
+    /// フラッシュ: 種別（false=集中線（白地に黒線）、true=ベタフラッシュ（黒地に白））
+    public var flashBeta: Bool
     /// 任意パターン画像（customImage時。タイル状に敷き詰める）
     public var patternImage: CGImage?
     /// 永続化された任意パターン画像を解決するための識別子。
@@ -102,9 +106,11 @@ public struct MosaicStyle: @unchecked Sendable {
         stripeVertical: Bool = true,
         stripeRandom: Bool = false,
         stripeTone: Bool = false,
+        stripeWobble: Double = 0,
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
         flashCenter: NormalizedPoint? = nil,
+        flashBeta: Bool = false,
         patternImage: CGImage? = nil,
         patternImageIdentifier: String? = nil
     ) {
@@ -118,9 +124,11 @@ public struct MosaicStyle: @unchecked Sendable {
         self.stripeVertical = stripeVertical
         self.stripeRandom = stripeRandom
         self.stripeTone = stripeTone
+        self.stripeWobble = stripeWobble
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
         self.flashCenter = flashCenter
+        self.flashBeta = flashBeta
         self.patternImage = patternImage
         self.patternImageIdentifier = patternImageIdentifier
     }
@@ -138,9 +146,11 @@ public struct MosaicStyle: @unchecked Sendable {
             stripeVertical: stripeVertical,
             stripeRandom: stripeRandom,
             stripeTone: stripeTone,
+            stripeWobble: stripeWobble,
             cloudDensity: cloudDensity,
             cloudTone: cloudTone,
             flashCenter: flashCenter,
+            flashBeta: flashBeta,
             patternImageIdentifier: patternImageIdentifier
         )
     }
@@ -159,9 +169,11 @@ public struct MosaicStyle: @unchecked Sendable {
             stripeVertical: roiStyle.stripeVertical,
             stripeRandom: roiStyle.stripeRandom,
             stripeTone: roiStyle.stripeTone,
+            stripeWobble: roiStyle.stripeWobble,
             cloudDensity: roiStyle.cloudDensity,
             cloudTone: roiStyle.cloudTone,
             flashCenter: roiStyle.flashCenter,
+            flashBeta: roiStyle.flashBeta,
             patternImage: patternImage,
             patternImageIdentifier: roiStyle.patternImageIdentifier
         )
@@ -544,47 +556,68 @@ public final class MosaicEngine {
             .cropped(to: extent)
     }
 
-    /// ボーダーランダム: 帯幅・間隔を±40%揺らした帯パターンを斜め回転で敷き詰め、
-    /// ノイズ変位で角度にも揺れを出す。シード固定で再レンダリングしても同じ模様になる。
+    /// ボーダーランダム: 「方向」設定（縦/横）に従った帯を、太さ・間隔を±40%揺らして描く。
+    /// 「並行揺れ」（`stripeWobble`）が0より大きい場合、各線を線の中央を軸にランダムで左右へ傾ける
+    /// （値が大きいほど傾きも大きい）。シード固定で再レンダリングしても同じ模様になる。
+    /// 旧実装の斜め固定回転+ノイズ変位は廃止した（ランダム時も方向設定を維持する仕様変更）。
     private static func randomStripeMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
         let band = max(1.0, style.stripeWidth)
         let gap = max(0.0, style.stripeSpacing)
         var rng = SeededRandomGenerator(seed: 0x6D6F_7A61)
+        let vertical = style.stripeVertical
+        let width = max(1, Int(extent.width))
+        let height = max(1, Int(extent.height))
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
 
-        let length = 512
-        var buffer = [UInt8](repeating: 0, count: length)
-        var pos = 0
-        while pos < length {
-            let bandLen = max(1, Int((band * Double.random(in: 0.6...1.4, using: &rng)).rounded()))
-            let gapLen = max(0, Int((gap * Double.random(in: 0.6...1.4, using: &rng)).rounded()))
-            for index in pos..<min(length, pos + bandLen) { buffer[index] = 255 }
-            pos += max(1, bandLen + gapLen)
+        // 帯を並べる方向の長さ（縦帯なら横方向へ並ぶ）と、各線の長さ
+        let acrossLength = vertical ? extent.width : extent.height
+        let lineLength = vertical ? extent.height : extent.width
+        let maxTiltRadians = min(max(style.stripeWobble, 0), 1) * 25 * .pi / 180
+        var pos: CGFloat = 0
+        while pos < acrossLength {
+            let bandLen = max(1, band * CGFloat(Double.random(in: 0.6...1.4, using: &rng)))
+            let gapLen = max(0, gap * CGFloat(Double.random(in: 0.6...1.4, using: &rng)))
+            let tilt = maxTiltRadians > 0 ? CGFloat(Double.random(in: -1...1, using: &rng)) * maxTiltRadians : 0
+            let centerAcross = pos + bandLen / 2
+            // 線の中央を軸に傾ける。傾けても端が欠けないよう線を上下（左右）に25%ずつ延長する
+            let center = vertical
+                ? CGPoint(x: centerAcross, y: extent.height / 2)
+                : CGPoint(x: extent.width / 2, y: centerAcross)
+            context.saveGState()
+            context.translateBy(x: center.x, y: center.y)
+            context.rotate(by: tilt)
+            context.translateBy(x: -center.x, y: -center.y)
+            if vertical {
+                context.fill(CGRect(
+                    x: centerAcross - bandLen / 2,
+                    y: -lineLength * 0.25,
+                    width: bandLen,
+                    height: lineLength * 1.5
+                ))
+            } else {
+                context.fill(CGRect(
+                    x: -lineLength * 0.25,
+                    y: centerAcross - bandLen / 2,
+                    width: lineLength * 1.5,
+                    height: bandLen
+                ))
+            }
+            context.restoreGState()
+            pos += bandLen + gapLen
         }
-        guard let tile = makeGrayTile(buffer: buffer, width: length, height: 1) else { return nil }
-
-        // 斜め回転（約20°±9°）で敷き詰める
-        let angle = 0.35 + Double.random(in: -0.15...0.15, using: &rng)
-        let rotation = NSAffineTransform()
-        rotation.rotate(byRadians: CGFloat(angle))
-        var mask = CIImage(cgImage: tile)
-            .applyingFilter("CIAffineTile", parameters: ["inputTransform": rotation])
-            .cropped(to: extent)
-
-        // なめらかなノイズで帯を変位させ、間隔・角度の揺れを出す
-        let wobbleScale = max(8, band * 4)
-        let wobble = (CIFilter(name: "CIRandomGenerator")?.outputImage ?? CIImage(color: .gray))
-            .transformed(by: CGAffineTransform(scaleX: wobbleScale, y: wobbleScale))
-            .clampedToExtent()
-            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: wobbleScale / 2])
-            .cropped(to: extent)
-        mask = mask
-            .clampedToExtent()
-            .applyingFilter("CIDisplacementDistortion", parameters: [
-                "inputDisplacementImage": wobble,
-                kCIInputScaleKey: band * 0.8
-            ])
-            .cropped(to: extent)
-        return mask
+        guard let image = context.makeImage() else { return nil }
+        return CIImage(cgImage: image).cropped(to: extent)
     }
 
     /// 雲パターン: 白ノイズを拡大+ぼかしした2オクターブ合成でPhotoshopの雲フィルタ風テクスチャを作る。
@@ -642,10 +675,12 @@ public final class MosaicEngine {
         return clouds
     }
 
-    /// フラッシュ（集中線）パターン: 指定した中心点から放射状に線を描く（漫画の集中線風）。
-    /// 中心位置はROIのローカル正規化座標（0〜1、左上原点。`style.flashCenter`）で保持し、
-    /// 未指定時はROI中心を使う。線の本数・太さは固定シードの乱数で決めるため、
-    /// 再レンダリングしても同じ模様になる（ボーダーランダムと同じ考え方）。
+    /// フラッシュパターン: 指定した中心点から放射状の線（先細りの三角形）を描く。
+    /// - 種別: `flashBeta` false=集中線（白地に黒線）、true=ベタフラッシュ（黒地に白）。
+    /// - 密度: `cloudDensity`（トーンの密度スライダーを兼用）で放射線の本数を調整。
+    /// - トーン: `cloudTone` ONで結果を網点（漫画トーン風）へ変換する。
+    /// - 乱数シードはROIのIDから導出し、レイヤ（ROI）ごとに異なる形の集中線になる
+    ///   （同一ROIの再レンダリングでは同じ形を保つ）。
     static func flashLayer(style: MosaicStyle, roi: MosaicROI, extent: CGRect) -> CIImage {
         let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
         let local = style.flashCenter ?? NormalizedPoint(x: 0.5, y: 0.5)
@@ -654,6 +689,9 @@ public final class MosaicEngine {
             x: rect.minX + local.x * rect.width,
             y: rect.minY + (1 - local.y) * rect.height
         )
+        let background = CGColor(gray: style.flashBeta ? 0 : 1, alpha: 1)
+        let lineColor = CGColor(gray: style.flashBeta ? 1 : 0, alpha: 1)
+        let fallback = CIImage(color: CIColor(cgColor: background)).cropped(to: extent)
         let width = max(1, Int(extent.width))
         let height = max(1, Int(extent.height))
         guard let context = CGContext(
@@ -664,32 +702,53 @@ public final class MosaicEngine {
             bytesPerRow: 0,
             space: CGColorSpaceCreateDeviceGray(),
             bitmapInfo: CGImageAlphaInfo.none.rawValue
-        ) else { return CIImage(color: .white).cropped(to: extent) }
+        ) else { return fallback }
 
-        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.setFillColor(background)
         context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
-        context.setStrokeColor(CGColor(gray: 0, alpha: 1))
+        context.setFillColor(lineColor)
 
-        var rng = SeededRandomGenerator(seed: 0x466C_6173)
-        let lineCount = 96
+        // ROIごとに異なる（かつ再レンダリングで安定した）シードをIDから導出する
+        var seed: UInt64 = 0x466C_6173
+        withUnsafeBytes(of: roi.id.uuid) { bytes in
+            for byte in bytes { seed = (seed &* 31) &+ UInt64(byte) }
+        }
+        var rng = SeededRandomGenerator(seed: seed)
+        let density = min(max(style.cloudDensity, 0.05), 1.0)
+        let lineCount = Int(32 + density * 200)
         let maxRadius = hypot(extent.width, extent.height)
+        // 各放射線は外周側が太く中心へ向かって尖る三角形（漫画の集中線らしい先細り）
+        let baseHalfWidth = max(0.8, style.blockScale / 8)
         for index in 0..<lineCount {
             let baseAngle = (Double(index) / Double(lineCount)) * 2 * .pi
-            let angle = baseAngle + Double.random(in: -0.035...0.035, using: &rng)
-            let lineWidth = max(0.6, style.blockScale / 22 * Double.random(in: 0.55...1.3, using: &rng))
-            let innerRadius = maxRadius * Double.random(in: 0.01...0.05, using: &rng)
-            let dx = cos(angle)
-            let dy = sin(angle)
-            let start = CGPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius)
-            let end = CGPoint(x: center.x + dx * maxRadius, y: center.y + dy * maxRadius)
-            context.setLineWidth(CGFloat(lineWidth))
+            let angle = baseAngle + Double.random(in: -0.5...0.5, using: &rng) * (2 * .pi / Double(lineCount))
+            let halfWidth = baseHalfWidth * Double.random(in: 0.35...1.3, using: &rng)
+            let innerRadius = maxRadius * Double.random(in: 0.02...0.08, using: &rng)
+            let dx = CGFloat(cos(angle))
+            let dy = CGFloat(sin(angle))
+            let apex = CGPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius)
+            let baseCenter = CGPoint(x: center.x + dx * maxRadius, y: center.y + dy * maxRadius)
+            let perpX = -dy * CGFloat(halfWidth)
+            let perpY = dx * CGFloat(halfWidth)
             context.beginPath()
-            context.move(to: start)
-            context.addLine(to: end)
-            context.strokePath()
+            context.move(to: apex)
+            context.addLine(to: CGPoint(x: baseCenter.x + perpX, y: baseCenter.y + perpY))
+            context.addLine(to: CGPoint(x: baseCenter.x - perpX, y: baseCenter.y - perpY))
+            context.closePath()
+            context.fillPath()
         }
-        guard let image = context.makeImage() else { return CIImage(color: .white).cropped(to: extent) }
-        return CIImage(cgImage: image).cropped(to: extent)
+        guard let image = context.makeImage() else { return fallback }
+        var result = CIImage(cgImage: image).cropped(to: extent)
+        // トーンON: 集中線を網点（漫画トーン風）へ変換する（雲パターンのトーン化と同じ方式）
+        if style.cloudTone {
+            result = result.applyingFilter("CIDotScreen", parameters: [
+                kCIInputCenterKey: CIVector(x: extent.midX, y: extent.midY),
+                kCIInputAngleKey: 0.3,
+                kCIInputWidthKey: max(3, style.blockScale / 4),
+                kCIInputSharpnessKey: 0.7
+            ]).cropped(to: extent)
+        }
+        return result
     }
 
     /// 8bitグレースケールのタイルCGImageを生成する（縞・帯パターン用）。

@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.0.00080 - 2026-07-26
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: レイヤ一覧のレイヤ名が右寄せ表示になるデグレを再修正した（AppKitの設定順の癖でalignment指定が無効化されていたため、表示のたびに左寄せを強制する方式へ変更）。
+- バグ修正: 乳首検出時に斜めの誤ROIが2箇所残る不具合を再修正した。部位検出モデルが乳首を1つでも検出できた場合、精度の低い骨格由来の推定乳首ROIを全て取り除くようにした（検出できなかった画像でのみフォールバックとして残す）。
+- バグ修正: ツールバー「レイヤ削除」で人物・骨格レイヤが削除されない不具合を修正し、全レイヤを削除するようにした。
+- バグ修正: 編集/範囲選択モードのツールバーアイコンが逆だったのを修正した（編集=矩形破線、範囲選択=カーソル）。画像上のカーソルもモードに応じて切替わる（編集=＋、範囲選択=矢印。Option(⌥)キーの一時切替にも即座に追従）。
+- バグ修正: 編集モード時、画像上の人物・骨格レイヤをダブルクリックしてもレイヤ削除できない問題を修正した（モザイク範囲のダブルクリック削除と操作を統一）。
+- 改善: ボーダーの「種別」を「方向」に改名。ランダムON時は斜めではなく「方向」設定（縦/横）に従い、帯の太さ・間隔のみをランダム化するようにした。「並行揺れ」スライダーを追加し、各線を線の中央を軸にランダムで傾けられるようにした。
+- 改善: フラッシュに「種別」（集中線=黒線 / ベタフラッシュ=黒地に白）と「密度」（放射線の本数）を追加し、「トーン」ONで網点（漫画トーン風）処理が効くようにした。集中線の形はレイヤ毎に異なるランダム形状になる（同一レイヤの再表示では同じ形を保つ）。
+- バグ修正: モザイクパターンの詳細設定は、パターン切替時に関連する項目のみ表示するようにした（「トーン」等の同名設定が複数並んで見える問題も解消）。
+- バグ修正: インスペクタのスライダーと設定値の間の不要なマージンを解消した（設定値を左寄せに変更）。
+
+■更新履歴
+
+- `LayerRowView.configure`でNSAttributedString（段落スタイルで左寄せ・末尾省略を明示）を使用し、`lineBreakMode`設定によるalignmentリセットの影響を排除。
+- 候補生成に`dropPoseChestPriors(from:ifDetectorFound:)`を追加し、検出器の乳首検出があれば`source == "pose-chest"`のROIを除去（アニメ/実写両経路）。
+- `clearROIs()`が人物/骨格レイヤ（canvasの表示配列・レイヤ一覧）も含めて削除するよう拡張。
+- `canvasModeControl`のアイコンを入替。`ImageCanvasView.applyHoverCursor`でモード（Option一時反転含む）に応じたカーソル（crosshair/arrow）を設定し、`flagsChanged`のローカルモニタで即時追従。
+- `ImageCanvasView.detectionLayerHit(at:imageRect:)`と`onDetectionLayerDeleteRequest`を追加し、ダブルクリックで`deleteDetectionLayer(_:)`（レイヤ一覧からの除去+表示オフ）を実行。
+- `MosaicStyle`/`MosaicROIStyle`へ`stripeWobble`/`flashBeta`を追加（Codableは`decodeIfPresent`で後方互換）。`randomStripeMask`をCGContext直接描画へ書き換え（方向対応・帯毎の傾き）、`flashLayer`をROI IDから導出したシード+先細り三角形+ベタフラッシュ+密度+CIDotScreenトーンへ書き換え。
+- `styleGridView`参照と`updateStyleGridRowVisibility(pattern:)`でNSGridViewの行をパターン毎に表示/非表示。スライダー値ラベルを右寄せ→左寄せへ変更。
+
 ## v0.0.00079 - 2026-07-26
 
 ■更新履歴（Readme / ChangeLog 用）

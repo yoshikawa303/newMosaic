@@ -265,6 +265,18 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **フラッシュ（集中線）パターンの追加**: `MosaicFillPattern.flash`を新設。`MosaicEngine.flashLayer(style:roi:extent:)`が固定シードの乱数で放射状の線をCGContextに描画する（`SeededRandomGenerator`で再現性を確保、ボーダーランダムと同じ考え方）。中心位置は`MosaicStyle.flashCenter`（ROIローカル正規化座標、nilはROI中心）で保持し、`ImageCanvasView`上に十字マーク付きの黄色いハンドルを表示してドラッグで指定できる（`FlashCenterDragState`、回転ROIでも逆回転してローカル座標を計算）。フラッシュは中心位置がROIごとに異なるため、他パターンと違い`MosaicEngine`の`layerCache`（`MosaicROIStyle`をキーとする共有フィルキャッシュ）の対象から除外し、ROIごとに毎回生成する。
 - **パターン表示名の変更**: 「雲」→「トーン」（`MosaicFillPattern.clouds.displayName`）、「トーン化（漫画トーン）」→「トーン」（`styleCloudToneCheckbox`のタイトル）。ボーダーの「トーン」チェックボックス（`styleBorderToneCheckbox`）も同名だが、雲パターンのトーン化とは別の実装（帯の塗りを元画像の網点変換にする）で、UI上は文脈（表示中のパターンの詳細設定）で区別される。
 
+## 5.26 検出誤ROI抑制・モード切替UI調整・ボーダー/フラッシュ拡張（2026-07-26 v0.0.00080〜）
+
+- **レイヤ名右寄せデグレの恒久対策**: `NSTextField`は`lineBreakMode`の設定がalignmentを既定へ戻すことがあるため、`LayerRowView.configure`で段落スタイル（左寄せ+末尾省略）を明示したNSAttributedStringを毎回設定する方式へ変更。
+- **骨格由来乳首ROIの抑制**: v0.0.00079の位置修正でも、骨格推定による乳首ROI（source "pose-chest"、常に左右2個生成）は体勢によって位置・個数が実際と合わず誤ROIとして残った。部位検出モデル（AnimeCensorDetector/PhotoCensorDetector）が乳首を1つでも検出できた場合は骨格由来ROIを全て取り除き、検出器が見つけられなかった画像でのみフォールバックとして残す方針へ変更（`dropPoseChestPriors`）。
+- **「レイヤ削除」の全レイヤ化**: `clearROIs()`がROIに加えて人物/骨格レイヤ（canvasの`personLayerRects`等の表示配列と、レイヤ一覧の`LayerLeaf`）も削除するよう拡張。人物・骨格レイヤはEditorState（アンドゥ）に含まれないため「元に戻す対象外」である旨をステータスに表示する。
+- **モード切替アイコンとカーソル**: 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル、に入替。画像上のカーソルは編集=crosshair（＋）、範囲選択=arrow で、Option(⌥)一時反転にも追従する。`flagsChanged`はファーストレスポンダにしか届かないためローカルイベントモニタで受け、`applyHoverCursor`（ROI上はopenHand優先）で統一的に設定する。
+- **人物/骨格レイヤのダブルクリック削除**: `ImageCanvasView.detectionLayerHit`（骨格優先のヒットテスト）と`onDetectionLayerDeleteRequest`を追加し、ROIと同じダブルクリック操作でレイヤ一覧から該当レイヤを取り除く（表示配列はインデックス維持のため該当のみfalse化）。
+- **ボーダーランダムの仕様変更**: 旧実装（斜め固定回転+ノイズ変位）を廃止し、「方向」設定（縦/横）に従った帯の太さ・間隔のみをランダム化する方式へ。新設の「並行揺れ」（`stripeWobble` 0〜1、最大±25度）は各線を線の中央を軸にランダムで傾ける。CGContextへの直接描画（帯毎に回転）で実装し、シード固定で再現性を保つ。
+- **フラッシュの拡張**: `flashBeta`（集中線=白地に黒 / ベタフラッシュ=黒地に白）を追加。放射線は先細りの三角形で描き、本数は「密度」（`cloudDensity`をトーンと兼用）で調整、「トーン」（`cloudTone`兼用）ONで`CIDotScreen`の網点変換を適用。乱数シードをROIのIDから導出し、レイヤ毎に異なる形（同一ROIでは再現性あり）にした。
+- **パターン詳細設定の行表示制御**: `styleGridView`への参照を保持し、`updateStyleGridRowVisibility(pattern:)`がNSGridViewの行（`row(at:).isHidden`）をパターン毎に切替える。共通行（透明度・塗りつぶし色・細かさ・輪郭ぼかし）以外は該当パターンでのみ表示され、「トーン」等の同名行が複数並ぶ問題も解消。
+- **スライダー値ラベルの左寄せ**: 右寄せ+固定幅48ptでは数値が短いときスライダーとの間に不要な空白が見えるため左寄せへ変更（固定幅はドラッグ中のレイアウト揺れ防止のため維持）。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

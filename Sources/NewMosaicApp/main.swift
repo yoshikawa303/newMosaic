@@ -419,6 +419,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     let detected = try detector.detect(in: input.image)
                     animeDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
+                    rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                 } catch {
                     detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
                 }
@@ -430,6 +431,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     let detected = try detector.detect(in: input.image, personBounds: snapshot.personBounds)
                     photoDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
+                    rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                 } catch {
                     detectorFailures.append("実写部位検出: \(error.localizedDescription)")
                 }
@@ -457,6 +459,16 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
             result.append(roi)
         }
         return result
+    }
+
+    /// 直接検出器（部位検出モデル）が乳首を1つでも検出できた場合、骨格由来の推定乳首ROI
+    /// （source "pose-chest"）は全て取り除く。骨格推定の乳首位置は肩関節からの幾何プライアで
+    /// 精度が低く、体が傾いていると位置・個数（常に左右2個生成）ともに実際と合わず、
+    /// 検出器の正しいROIとIoUが重ならないため重複除去をすり抜けて誤ROIとして残っていた
+    /// （GUI報告で確定）。検出器が乳首を見つけられなかった画像でのみフォールバックとして残す。
+    private static func dropPoseChestPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
+        guard detected.contains(where: { $0.category == .nipple }) else { return rois }
+        return rois.filter { $0.source != "pose-chest" }
     }
 }
 
@@ -561,8 +573,11 @@ private final class LayerRowView: NSTableCellView {
         checkbox.action = #selector(handleToggle)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = MosaicWindowController.scaledFont(12)
-        label.alignment = .left
+        // lineBreakModeの設定がalignmentを既定（末尾寄せ表示）へ戻してしまうAppKitの癖があるため、
+        // alignmentはlineBreakModeの後に設定し、さらにconfigure()でも毎回再設定する
+        // （「レイヤ名が右寄せになる」デグレの恒久対策）。
         label.lineBreakMode = .byTruncatingTail
+        label.alignment = .left
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(checkbox)
         addSubview(label)
@@ -581,7 +596,16 @@ private final class LayerRowView: NSTableCellView {
         allowsMixed: Bool,
         showsCheckbox: Bool = true
     ) {
-        label.stringValue = title
+        // stringValue更新後にも左寄せを強制する（属性付き文字列で段落スタイルまで明示し、
+        // フォント・lineBreakMode変更によるalignmentリセットの影響を受けないようにする）。
+        let paragraph = NSMutableParagraphStyle()
+        paragraph.alignment = .left
+        paragraph.lineBreakMode = .byTruncatingTail
+        label.attributedStringValue = NSAttributedString(string: title, attributes: [
+            .font: MosaicWindowController.scaledFont(12),
+            .foregroundColor: NSColor.labelColor,
+            .paragraphStyle: paragraph
+        ])
         checkbox.allowsMixedState = allowsMixed
         checkbox.state = state
         checkbox.isHidden = !showsCheckbox
@@ -727,17 +751,26 @@ final class MosaicWindowController: NSObject {
     private let styleStripeWidthValueLabel = NSTextField(labelWithString: "12px")
     private let styleStripeSpacingSlider = NSSlider(value: 12, minValue: 0, maxValue: 60, target: nil, action: nil)
     private let styleStripeSpacingValueLabel = NSTextField(labelWithString: "12px")
-    /// ボーダー: 種別（縦/横）。「ランダム」ON時は無効化される（斜め固定のため）。
+    /// ボーダー: 方向（縦/横）。ランダムON時も方向設定は有効（太さ・間隔のみランダム化される）。
     private let styleBorderDirectionControl = NSSegmentedControl(
         labels: ["縦", "横"], trackingMode: .selectOne, target: nil, action: nil
     )
     private let styleBorderRandomCheckbox = NSButton(checkboxWithTitle: "ランダム", target: nil, action: nil)
     private let styleBorderToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
+    /// ボーダー: 並行揺れ（各線を中央軸にランダムで傾ける度合い。ランダムON時のみ有効）
+    private let styleStripeWobbleSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let styleStripeWobbleValueLabel = NSTextField(labelWithString: "0 %")
+    /// フラッシュ: 種別（集中線=白地に黒線 / ベタフラッシュ=黒地に白）
+    private let styleFlashKindControl = NSSegmentedControl(
+        labels: ["集中線", "ベタフラッシュ"], trackingMode: .selectOne, target: nil, action: nil
+    )
     private let styleCloudDensitySlider = NSSlider(value: 0.5, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
     private let styleCloudDensityValueLabel = NSTextField(labelWithString: "50%")
     private let styleCloudToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
     /// フラッシュ: 中心位置は画像上のハンドルをドラッグして指定する（既定はROI中心）。
     private let styleFlashResetButton = NSButton(title: "中心をリセット", target: nil, action: nil)
+    /// モザイク詳細設定のグリッド（パターン切替時に関連する設定行だけを表示するための参照）。
+    private var styleGridView: NSGridView?
     private let stylePatternImageButton = NSButton(title: "画像選択...", target: nil, action: nil)
     private let stylePatternImageLabel = NSTextField(labelWithString: "未選択")
     private var customPatternImage: CGImage?
@@ -1049,8 +1082,9 @@ final class MosaicWindowController: NSObject {
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
         canvasModeControl.segmentStyle = .texturedRounded
-        canvasModeControl.setImage(NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: "編集モード"), forSegment: 0)
-        canvasModeControl.setImage(NSImage(systemSymbolName: "rectangle.dashed", accessibilityDescription: "範囲選択モード"), forSegment: 1)
+        // 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル（選択するモード）。
+        canvasModeControl.setImage(NSImage(systemSymbolName: "rectangle.dashed", accessibilityDescription: "編集モード"), forSegment: 0)
+        canvasModeControl.setImage(NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: "範囲選択モード"), forSegment: 1)
         canvasModeControl.setToolTip("編集モード（ドラッグでROIを新規作成。従来通り）", forSegment: 0)
         canvasModeControl.setToolTip("範囲選択モード（ドラッグで複数ROIを一括選択。Option(⌥)キーで一時的に編集モードへ切替）", forSegment: 1)
         canvasModeControl.selectedSegment = 0
@@ -1272,6 +1306,9 @@ final class MosaicWindowController: NSObject {
         }
         canvas.onROIGroupSelectionByMarquee = { [weak self] ids in
             self?.syncROIListSelectionFromCanvasGroup(ids)
+        }
+        canvas.onDetectionLayerDeleteRequest = { [weak self] kind in
+            self?.deleteDetectionLayer(kind)
         }
         canvas.onZoomChanged = { [weak self] zoom in
             self?.zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"
@@ -1811,7 +1848,7 @@ final class MosaicWindowController: NSObject {
         stylePatternPopUp.action = #selector(mosaicStyleChanged)
         stylePatternPopUp.toolTip = "選択レイヤの塗りつぶしパターン"
         stylePatternPopUp.isHidden = true
-        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider, groinPositionSlider] {
+        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleStripeWobbleSlider, styleCloudDensitySlider, groinPositionSlider] {
             slider.target = self
             slider.translatesAutoresizingMaskIntoConstraints = false
             // 固定幅にするとサイドパネルを狭められないため、希望幅160(低優先)+最小80で圧縮可能にする。
@@ -1823,15 +1860,17 @@ final class MosaicWindowController: NSObject {
             slider.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
             slider.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
         }
-        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleCloudDensitySlider] {
+        for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleStripeWobbleSlider, styleCloudDensitySlider] {
             slider.action = #selector(mosaicStyleChanged)
         }
-        // 設定値ラベルは固定幅+等幅数字+右寄せ（ドラッグ中に幅が変わってスライダーが左右にずれるのを防ぐ）
+        // 設定値ラベルは固定幅+等幅数字+左寄せ。右寄せだと数値が短い場合にスライダーとの間へ
+        // 不要な空白が見えるため、スライダー直後から数値が始まる左寄せへ変更（GUI報告による）。
+        // 固定幅は維持し、ドラッグ中に幅が変わってレイアウトが揺れるのを防ぐ。
         for label in [styleOpacityValueLabel, styleBlockScaleValueLabel, styleFeatherValueLabel,
-                      styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleCloudDensityValueLabel,
-                      groinPositionValueLabel] {
+                      styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleStripeWobbleValueLabel,
+                      styleCloudDensityValueLabel, groinPositionValueLabel] {
             label.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
-            label.alignment = .right
+            label.alignment = .left
             label.translatesAutoresizingMaskIntoConstraints = false
             label.widthAnchor.constraint(equalToConstant: 48).isActive = true
         }
@@ -1845,19 +1884,24 @@ final class MosaicWindowController: NSObject {
         styleBorderDirectionControl.target = self
         styleBorderDirectionControl.action = #selector(mosaicStyleChanged)
         styleBorderDirectionControl.selectedSegment = 0
-        styleBorderDirectionControl.toolTip = "ボーダーの向き（縦/横）"
+        styleBorderDirectionControl.toolTip = "ボーダーの方向（縦/横）"
         styleBorderRandomCheckbox.target = self
         styleBorderRandomCheckbox.action = #selector(mosaicStyleChanged)
-        styleBorderRandomCheckbox.toolTip = "帯幅・間隔を揺らした斜めランダムボーダーにする"
+        styleBorderRandomCheckbox.toolTip = "帯の太さ・間隔をランダムに揺らす（方向は「方向」設定に従う）"
         styleBorderToneCheckbox.target = self
         styleBorderToneCheckbox.action = #selector(mosaicStyleChanged)
         styleBorderToneCheckbox.toolTip = "帯を網点（漫画トーン風）で塗る"
+        styleFlashKindControl.target = self
+        styleFlashKindControl.action = #selector(mosaicStyleChanged)
+        styleFlashKindControl.selectedSegment = 0
+        styleFlashKindControl.toolTip = "フラッシュの種別（集中線=黒線 / ベタフラッシュ=黒地に白）"
         styleFlashResetButton.target = self
         styleFlashResetButton.action = #selector(resetFlashCenter)
         styleFlashResetButton.toolTip = "フラッシュの中心を選択範囲の中央に戻す（中心位置は画像上のハンドルをドラッグして指定できます）"
         applyScaledFont(styleBorderDirectionControl, size: 11)
         applyScaledFont(styleBorderRandomCheckbox, size: 12)
         applyScaledFont(styleBorderToneCheckbox, size: 12)
+        applyScaledFont(styleFlashKindControl, size: 11)
         applyScaledFont(styleFlashResetButton, size: 11)
         styleTintColorWell.target = self
         styleTintColorWell.action = #selector(mosaicStyleChanged)
@@ -1983,13 +2027,16 @@ final class MosaicWindowController: NSObject {
             [styleRowLabel("輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
             [styleRowLabel("帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
             [styleRowLabel("帯の間隔"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
-            [styleRowLabel("種別"), styleBorderDirectionControl, NSGridCell.emptyContentView],
+            [styleRowLabel("方向"), styleBorderDirectionControl, NSGridCell.emptyContentView],
             [styleRowLabel("ボーダー"), styleBorderRandomCheckbox, styleBorderToneCheckbox],
+            [styleRowLabel("並行揺れ"), styleStripeWobbleSlider, styleStripeWobbleValueLabel],
+            [styleRowLabel("種別"), styleFlashKindControl, NSGridCell.emptyContentView],
             [styleRowLabel("密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
             [styleRowLabel("トーン"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
             [styleRowLabel("フラッシュ"), styleFlashResetButton, NSGridCell.emptyContentView],
             [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
         ])
+        styleGridView = styleGrid
         styleGrid.rowSpacing = 7
         styleGrid.columnSpacing = 8
         styleGrid.translatesAutoresizingMaskIntoConstraints = false
@@ -2193,9 +2240,11 @@ final class MosaicWindowController: NSObject {
         style.stripeVertical = styleBorderDirectionControl.selectedSegment == 0
         style.stripeRandom = styleBorderRandomCheckbox.state == .on
         style.stripeTone = styleBorderToneCheckbox.state == .on
+        style.stripeWobble = styleStripeWobbleSlider.doubleValue
         style.cloudDensity = styleCloudDensitySlider.doubleValue
         style.cloudTone = styleCloudToneCheckbox.state == .on
         style.flashCenter = pendingFlashCenter
+        style.flashBeta = styleFlashKindControl.selectedSegment == 1
         style.patternImage = customPatternImage
         style.patternImageIdentifier = customPatternImageIdentifier
         return style
@@ -2275,9 +2324,11 @@ final class MosaicWindowController: NSObject {
         styleBorderDirectionControl.selectedSegment = style.stripeVertical ? 0 : 1
         styleBorderRandomCheckbox.state = style.stripeRandom ? .on : .off
         styleBorderToneCheckbox.state = style.stripeTone ? .on : .off
+        styleStripeWobbleSlider.doubleValue = style.stripeWobble
         styleCloudDensitySlider.doubleValue = style.cloudDensity
         styleCloudToneCheckbox.state = style.cloudTone ? .on : .off
         pendingFlashCenter = style.flashCenter
+        styleFlashKindControl.selectedSegment = style.flashBeta ? 1 : 0
         customPatternImageIdentifier = style.patternImageIdentifier
         customPatternImage = style.patternImageIdentifier.flatMap { patternImage(for: $0) } ?? style.patternImage
         updateCustomPatternPreview(customPatternImage)
@@ -2299,10 +2350,13 @@ final class MosaicWindowController: NSObject {
         styleStripeSpacingSlider.isEnabled = pattern.isStripes
         styleBorderRandomCheckbox.isEnabled = pattern.isStripes
         styleBorderToneCheckbox.isEnabled = pattern.isStripes
-        // ランダムON時は斜め固定になるため、種別（縦/横）は無効化する
-        styleBorderDirectionControl.isEnabled = pattern.isStripes && styleBorderRandomCheckbox.state == .off
-        styleCloudDensitySlider.isEnabled = pattern == .clouds
-        styleCloudToneCheckbox.isEnabled = pattern == .clouds
+        // ランダム時も方向設定は有効（太さ・間隔のみランダム化される仕様へ変更）
+        styleBorderDirectionControl.isEnabled = pattern.isStripes
+        // 並行揺れはランダムON時のみ意味を持つ
+        styleStripeWobbleSlider.isEnabled = pattern.isStripes && styleBorderRandomCheckbox.state == .on
+        styleCloudDensitySlider.isEnabled = pattern == .clouds || pattern == .flash
+        styleCloudToneCheckbox.isEnabled = pattern == .clouds || pattern == .flash
+        styleFlashKindControl.isEnabled = pattern == .flash
         styleFlashResetButton.isEnabled = pattern == .flash && canvas.selectedROIID != nil
         stylePatternImageButton.isEnabled = pattern.requiresPatternImage
         styleCloudDensityValueLabel.stringValue = "\(Int(styleCloudDensitySlider.doubleValue * 100)) %"
@@ -2311,7 +2365,40 @@ final class MosaicWindowController: NSObject {
         styleFeatherValueLabel.stringValue = "\(Int(styleFeatherSlider.doubleValue)) px"
         styleStripeWidthValueLabel.stringValue = "\(Int(styleStripeWidthSlider.doubleValue)) px"
         styleStripeSpacingValueLabel.stringValue = "\(Int(styleStripeSpacingSlider.doubleValue)) px"
+        styleStripeWobbleValueLabel.stringValue = "\(Int(styleStripeWobbleSlider.doubleValue * 100)) %"
+        updateStyleGridRowVisibility(pattern: pattern)
         updateFlashHandle(pattern: pattern)
+    }
+
+    /// パターン切替時、関連する設定行だけを表示する（無関係な行は非表示。
+    /// 「トーン」等の同名行が複数パターン分並んで見える問題の解消も兼ねる）。
+    private func updateStyleGridRowVisibility(pattern: MosaicFillPattern) {
+        guard let grid = styleGridView else { return }
+        let isBorder = pattern.isStripes
+        let isFlash = pattern == .flash
+        let isClouds = pattern == .clouds
+        let usesBlockScale = pattern != .border && pattern != .overlayImage
+        // 行番号: 0=パターン 1=透明度 2=塗りつぶし色 3=細かさ 4=輪郭ぼかし 5=帯の太さ
+        // 6=帯の間隔 7=方向 8=ボーダー 9=並行揺れ 10=種別(フラッシュ) 11=密度 12=トーン
+        // 13=フラッシュ 14=画像選択
+        let visibility: [Int: Bool] = [
+            2: pattern != .overlayImage,
+            3: usesBlockScale,
+            4: pattern != .overlayImage,
+            5: isBorder,
+            6: isBorder,
+            7: isBorder,
+            8: isBorder,
+            9: isBorder,
+            10: isFlash,
+            11: isClouds || isFlash,
+            12: isClouds || isFlash,
+            13: isFlash,
+            14: pattern.requiresPatternImage
+        ]
+        for (rowIndex, visible) in visibility where rowIndex < grid.numberOfRows {
+            grid.row(at: rowIndex).isHidden = !visible
+        }
     }
 
     /// キャンバス上のフラッシュ中心ハンドル表示を、現在のパターン・ROI選択状態へ同期する。
@@ -2488,8 +2575,10 @@ final class MosaicWindowController: NSObject {
         defaults.set(styleBorderDirectionControl.selectedSegment == 0, forKey: prefix + "stripeVertical")
         defaults.set(styleBorderRandomCheckbox.state == .on, forKey: prefix + "stripeRandom")
         defaults.set(styleBorderToneCheckbox.state == .on, forKey: prefix + "stripeTone")
+        defaults.set(styleStripeWobbleSlider.doubleValue, forKey: prefix + "stripeWobble")
         defaults.set(styleCloudDensitySlider.doubleValue, forKey: prefix + "cloudDensity")
         defaults.set(styleCloudToneCheckbox.state == .on, forKey: prefix + "cloudTone")
+        defaults.set(styleFlashKindControl.selectedSegment == 1, forKey: prefix + "flashBeta")
         defaults.set(customPatternImageIdentifier, forKey: prefix + "patternImageIdentifier")
     }
 
@@ -2541,6 +2630,9 @@ final class MosaicWindowController: NSObject {
             ? defaults.bool(forKey: prefix + "stripeVertical") : fallback.stripeVertical) ? 0 : 1
         styleBorderRandomCheckbox.state = defaults.bool(forKey: prefix + "stripeRandom") ? .on : .off
         styleBorderToneCheckbox.state = defaults.bool(forKey: prefix + "stripeTone") ? .on : .off
+        styleStripeWobbleSlider.doubleValue = defaults.object(forKey: prefix + "stripeWobble") != nil
+            ? defaults.double(forKey: prefix + "stripeWobble") : fallback.stripeWobble
+        styleFlashKindControl.selectedSegment = defaults.bool(forKey: prefix + "flashBeta") ? 1 : 0
         pendingFlashCenter = nil
         styleCloudDensitySlider.doubleValue = defaults.object(forKey: prefix + "cloudDensity") != nil
             ? defaults.double(forKey: prefix + "cloudDensity") : fallback.cloudDensity
@@ -3020,6 +3112,24 @@ final class MosaicWindowController: NSObject {
 
     private func allLayerLeaves() -> [LayerLeaf] {
         ungroupedLayers + layerGroups.flatMap(\.children)
+    }
+
+    /// 画像上のダブルクリックによる人物/骨格レイヤの削除。レイヤ一覧から該当レイヤを取り除き、
+    /// 画像上の表示も消す（配列インデックスを保つため、表示配列は該当だけfalseにする）。
+    private func deleteDetectionLayer(_ kind: LayerKind) {
+        ungroupedLayers.removeAll { $0.kind == kind }
+        for group in layerGroups {
+            group.children.removeAll { $0.kind == kind }
+        }
+        layerGroups.removeAll { $0.children.isEmpty }
+        if canvas.selectedDetectionLayer == kind {
+            canvas.selectedDetectionLayer = nil
+        }
+        editorRevision += 1
+        applyLayerVisibility()
+        syncLegacyLayerCheckboxes()
+        reloadLayerList()
+        updateStatus("\(kind.title) レイヤを削除しました")
     }
 
     /// 輪郭表示のON/OFFを全レイヤへ一括適用する（旧: レイヤ行毎の個別設定から変更）。
@@ -3705,13 +3815,26 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    /// ツールバー「レイヤ削除」: ROIだけでなく人物/骨格検出レイヤも含めた全レイヤを削除する
+    /// （従来はROIのみクリアで「すべてのレイヤが削除されない」と報告があった）。
     @objc private func clearROIs() {
-        guard !canvas.rois.isEmpty else { return }
+        let hasDetectionLayers = !canvas.personLayerRects.isEmpty || !canvas.poseLayerRects.isEmpty
+        guard !canvas.rois.isEmpty || hasDetectionLayers else { return }
         pushUndoSnapshot(currentEditorState())
         suspendMosaicPreview()
         canvas.rois = []
+        canvas.selectedROIID = nil
+        canvas.selectedROIGroupIDs = []
+        canvas.selectedDetectionLayer = nil
+        canvas.personLayerRects = []
+        canvas.poseLayerRects = []
+        canvas.personLayerMasks = []
+        canvas.poseLayerBones = []
+        canvas.poseLayerJointPoints = []
+        rebuildDetectionLayers(personCount: 0, poseAvailability: [])
+        applyLayerVisibility()
         resumeMosaicPreviewIfNeeded()
-        updateStatus("ROIをクリアしました")
+        updateStatus("すべてのレイヤを削除しました（人物・骨格レイヤは元に戻す対象外）")
     }
 
     @objc private func performUndo() {
@@ -5865,7 +5988,9 @@ final class ImageCanvasView: NSView {
     /// 作成する（従来通り）。範囲選択モードでは同じ操作が既存ROIのラバーバンド一括選択になる。
     /// Option(⌥)キーを押しながら開始したドラッグは、そのドラッグ限定で一時的に逆モードになる。
     enum InteractionMode { case edit, marqueeSelect }
-    var interactionMode: InteractionMode = .edit
+    var interactionMode: InteractionMode = .edit {
+        didSet { refreshHoverCursor() }
+    }
     /// 範囲選択モードで複数ROIをラバーバンド選択したとき、レイヤ一覧側の選択にも反映するための通知。
     var onROIGroupSelectionByMarquee: ((Set<UUID>) -> Void)?
     private var dragIsMarqueeSelect = false
@@ -5895,6 +6020,21 @@ final class ImageCanvasView: NSView {
     var onZoomChanged: ((CGFloat) -> Void)?
     /// ROI右クリックメニューからのカテゴリ変更要求（ツールバーのカテゴリポップアップ廃止に伴う置き換え）
     var onCategoryChangeRequest: ((UUID, MosaicTargetCategory) -> Void)?
+    /// 画像上の人物/骨格レイヤのダブルクリック削除要求（ROIのダブルクリック削除と操作を統一）
+    fileprivate var onDetectionLayerDeleteRequest: ((LayerKind) -> Void)?
+
+    /// 表示中の人物/骨格レイヤのヒットテスト（骨格優先）。ダブルクリック削除の対象判定に使う。
+    fileprivate func detectionLayerHit(at point: NSPoint, imageRect: NSRect) -> LayerKind? {
+        for (index, rect) in poseLayerRects.enumerated()
+        where index < poseLayerVisibility.count && poseLayerVisibility[index] {
+            if viewRect(from: rect, imageRect: imageRect).contains(point) { return .pose(index) }
+        }
+        for (index, rect) in personLayerRects.enumerated()
+        where index < personLayerVisibility.count && personLayerVisibility[index] {
+            if viewRect(from: rect, imageRect: imageRect).contains(point) { return .person(index) }
+        }
+        return nil
+    }
 
     private var lastSize: [ROIShape: NSSize] = [:]
     private var image: NSImage?
@@ -5976,19 +6116,49 @@ final class ImageCanvasView: NSView {
 
     override func mouseMoved(with event: NSEvent) {
         guard image != nil, rightPanState == nil, moveState == nil, resizeState == nil else { return }
-        let point = convert(event.locationInWindow, from: nil)
+        applyHoverCursor(at: convert(event.locationInWindow, from: nil), modifiers: event.modifierFlags)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        NSCursor.arrow.set()
+    }
+
+    /// 現在の操作モード（Option押下による一時反転を含む）に応じたカーソルを設定する。
+    /// 編集モード=＋（crosshair、ドラッグでROIを描く）、範囲選択モード=矢印（ドラッグで一括選択）。
+    private func applyHoverCursor(at point: NSPoint, modifiers: NSEvent.ModifierFlags) {
         let imageRect = imageDrawRect()
+        let marquee = modifiers.contains(.option)
+            ? interactionMode == .edit
+            : interactionMode == .marqueeSelect
         if roiHit(at: point, imageRect: imageRect) != nil {
             NSCursor.openHand.set()
         } else if imageRect.contains(point) {
-            NSCursor.crosshair.set()
+            (marquee ? NSCursor.arrow : NSCursor.crosshair).set()
         } else {
             NSCursor.arrow.set()
         }
     }
 
-    override func mouseExited(with event: NSEvent) {
-        NSCursor.arrow.set()
+    /// マウスを動かさなくても、Optionキーの押下/解放やモード切替の瞬間にカーソルを更新する。
+    func refreshHoverCursor(modifiers: NSEvent.ModifierFlags = NSEvent.modifierFlags) {
+        guard let window, image != nil, rightPanState == nil, moveState == nil, resizeState == nil else { return }
+        let point = convert(window.mouseLocationOutsideOfEventStream, from: nil)
+        guard bounds.contains(point) else { return }
+        applyHoverCursor(at: point, modifiers: modifiers)
+    }
+
+    private var flagsChangedMonitor: Any?
+
+    override func viewDidMoveToWindow() {
+        super.viewDidMoveToWindow()
+        // flagsChangedはファーストレスポンダにしか届かないため、ローカルモニタで受けて
+        // Optionキーの一時モード切替に合わせてカーソル表示を即座に切り替える。
+        if window != nil, flagsChangedMonitor == nil {
+            flagsChangedMonitor = NSEvent.addLocalMonitorForEvents(matching: .flagsChanged) { [weak self] event in
+                self?.refreshHoverCursor(modifiers: event.modifierFlags)
+                return event
+            }
+        }
     }
 
     func setImage(_ cgImage: CGImage) {
@@ -6375,6 +6545,13 @@ final class ImageCanvasView: NSView {
                 if selectedROIID == hit.id { selectedROIID = nil }
                 rois.removeAll { $0.id == hit.id }
                 onManualEditDidEnd?()
+                return
+            }
+            // ROIに当たらない場合、表示中の人物/骨格レイヤのダブルクリックでもレイヤを削除できる
+            // （モザイク範囲のダブルクリック削除と操作を統一）。骨格を先に判定する
+            // （骨格の表示領域は対応する人物領域と重なるため、内側にある方を優先）。
+            if let kind = detectionLayerHit(at: point, imageRect: imageRect) {
+                onDetectionLayerDeleteRequest?(kind)
                 return
             }
         }
