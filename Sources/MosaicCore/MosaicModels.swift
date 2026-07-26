@@ -98,7 +98,7 @@ public enum ROIShape: String, Codable, Sendable {
 
 /// 多角形ROIの頂点。ROIの矩形（rect）に対するローカル正規化座標（0〜1、左上原点）。
 /// 矩形の移動・リサイズに追従して多角形全体が拡縮される。
-public struct NormalizedPoint: Codable, Equatable, Sendable {
+public struct NormalizedPoint: Codable, Equatable, Hashable, Sendable {
     public var x: Double
     public var y: Double
 
@@ -158,8 +158,17 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
     public var edgeFeather: Double
     public var stripeWidth: Double
     public var stripeSpacing: Double
+    /// ボーダー: 縦帯/横帯（`stripeRandom`がtrueのときは無視される）。
+    public var stripeVertical: Bool
+    /// ボーダー: 帯幅・間隔を揺らしたランダム斜めボーダーにするか。
+    public var stripeRandom: Bool
+    /// ボーダー: 帯を網点（漫画トーン風）で塗るか。
+    public var stripeTone: Bool
     public var cloudDensity: Double
     public var cloudTone: Bool
+    /// フラッシュ（集中線）: 放射の中心位置（ROIのローカル正規化座標、0〜1・左上原点）。
+    /// nilはROI中心を使う。
+    public var flashCenter: NormalizedPoint?
     /// Application Support内に保存した任意パターン画像の識別子。
     public var patternImageIdentifier: String?
 
@@ -171,8 +180,12 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         edgeFeather: Double = 0,
         stripeWidth: Double = 12,
         stripeSpacing: Double = 12,
+        stripeVertical: Bool = true,
+        stripeRandom: Bool = false,
+        stripeTone: Bool = false,
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
+        flashCenter: NormalizedPoint? = nil,
         patternImageIdentifier: String? = nil
     ) {
         self.pattern = pattern
@@ -182,9 +195,57 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         self.edgeFeather = edgeFeather
         self.stripeWidth = stripeWidth
         self.stripeSpacing = stripeSpacing
+        self.stripeVertical = stripeVertical
+        self.stripeRandom = stripeRandom
+        self.stripeTone = stripeTone
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
+        self.flashCenter = flashCenter
         self.patternImageIdentifier = patternImageIdentifier
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case pattern, opacity, tint, blockScale, edgeFeather, stripeWidth, stripeSpacing,
+             stripeVertical, stripeRandom, stripeTone, cloudDensity, cloudTone, flashCenter,
+             patternImageIdentifier
+    }
+
+    /// 旧バージョン（ボーダー縦/横/ランダムを別パターンとして保持していた時代）に保存された
+    /// ライブラリ/プロジェクトのJSONを読み込めるよう、`pattern`の生値を先に読み、
+    /// 該当する旧パターン名なら`.border`＋`stripeVertical`/`stripeRandom`へ変換する。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let rawPattern = try container.decode(String.self, forKey: .pattern)
+        opacity = try container.decode(Double.self, forKey: .opacity)
+        tint = try container.decodeIfPresent(Tint.self, forKey: .tint)
+        blockScale = try container.decode(Double.self, forKey: .blockScale)
+        edgeFeather = try container.decode(Double.self, forKey: .edgeFeather)
+        stripeWidth = try container.decode(Double.self, forKey: .stripeWidth)
+        stripeSpacing = try container.decode(Double.self, forKey: .stripeSpacing)
+        cloudDensity = try container.decode(Double.self, forKey: .cloudDensity)
+        cloudTone = try container.decode(Bool.self, forKey: .cloudTone)
+        flashCenter = try container.decodeIfPresent(NormalizedPoint.self, forKey: .flashCenter)
+        patternImageIdentifier = try container.decodeIfPresent(String.self, forKey: .patternImageIdentifier)
+
+        switch rawPattern {
+        case "stripesVertical":
+            pattern = .border
+            stripeVertical = true
+            stripeRandom = false
+        case "stripesHorizontal":
+            pattern = .border
+            stripeVertical = false
+            stripeRandom = false
+        case "stripesRandom":
+            pattern = .border
+            stripeVertical = true
+            stripeRandom = true
+        default:
+            pattern = MosaicFillPattern(rawValue: rawPattern) ?? .pixelate
+            stripeVertical = try container.decodeIfPresent(Bool.self, forKey: .stripeVertical) ?? true
+            stripeRandom = try container.decodeIfPresent(Bool.self, forKey: .stripeRandom) ?? false
+        }
+        stripeTone = try container.decodeIfPresent(Bool.self, forKey: .stripeTone) ?? false
     }
 }
 

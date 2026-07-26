@@ -230,7 +230,13 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         imageSize: CGSize,
         extent: CGRect
     ) -> CIImage? {
-        let expanded = roi.rect.expanded(scale: 1.15).clamped()
+        // ROIが回転している場合、無回転のroi.rectだけでクロップすると実際の（回転した）選択範囲と
+        // クロップ位置がずれ、対象物がクロップ外へ出てVisionが検知できないことがあった
+        // （GUI報告により判明）。回転後の外接矩形を基準にクロップすることで、回転した選択範囲でも
+        // 対象物を確実にクロップへ含める。
+        let baseRectPixels = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
+        let rotatedBoundsPixels = Self.rotatedBoundingBox(of: baseRectPixels, rotationDegrees: roi.rotation)
+        let expanded = NormalizedRect(rotatedBoundsPixels, imageSize: imageSize).expanded(scale: 1.15).clamped()
         let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
         guard cropRect.width >= 16, cropRect.height >= 16,
               let crop = image.cropping(to: cropRect) else { return nil }
@@ -254,6 +260,23 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         let black = CIImage(color: .black).cropped(to: extent)
         // 前景マスクをROIの形状範囲（矩形/楕円+回転）に制限して返す（ROI外へモザイクが漏れないようにする）
         return ShapeSegmentEngine.restrict(mask.composited(over: black), to: roi, extent: extent)
+    }
+
+    /// 矩形を中心周りに回転させた場合の軸並行外接矩形。ROIのクロップ範囲が回転後の
+    /// 選択範囲を確実に含むようにするために使う（回転していない場合は元の矩形のまま）。
+    private static func rotatedBoundingBox(of rect: CGRect, rotationDegrees: Double) -> CGRect {
+        guard abs(rotationDegrees) > 0.01 else { return rect }
+        let radians = rotationDegrees * .pi / 180
+        let cosA = abs(cos(radians))
+        let sinA = abs(sin(radians))
+        let newWidth = rect.width * cosA + rect.height * sinA
+        let newHeight = rect.width * sinA + rect.height * cosA
+        return CGRect(
+            x: rect.midX - newWidth / 2,
+            y: rect.midY - newHeight / 2,
+            width: newWidth,
+            height: newHeight
+        )
     }
 
     /// クロップ画像の前景マスク（クロップ画素座標系）。

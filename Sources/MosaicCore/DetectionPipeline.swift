@@ -803,20 +803,21 @@ public final class SensitiveROIGenerator: ROIGenerating {
         let nippleY = shoulderY + torsoHeight * min(max(chestPositionRatio, 0.1), 0.9)
         let size = max(0.015, shoulderWidth * 0.14)
         let confidence = Double(min(left.confidence, right.confidence))
-        // 体が傾いている（横臥・斜め姿勢）場合、肩のラインが水平でなくなるため、
-        // ROIも同じ角度へ回転させ左右の中心オフセットも肩ライン方向へ沿わせる
-        // （認識範囲の向きに形状を合わせる）。
+        // 体が傾いている（横臥・斜め姿勢）場合、肩のラインが水平でなくなるため、ROIの見た目の
+        // 向きを肩の傾きへ回転させる（`rotation`のみ）。
+        // 中心位置は従来通り水平オフセットのみで算出する（回転方向への投影オフセットを加えると、
+        // 肩関節の推定角度が僅かにずれただけで中心が実際の乳首位置から外れやすく、直接検出器
+        // （AnimeCensorDetector等）の正しい検出とIoUベースの重複除去でマッチしなくなり、斜めに
+        // ずれた誤ROIが正しいROIと並んで残ってしまう不具合があった。実画像フィードバックで
+        // 調整済みの水平オフセット位置は変更しない）。
         let shoulderAngle = Self.tiltAngleDegrees(
             from: CGPoint(x: left.x, y: left.y),
             to: CGPoint(x: right.x, y: right.y)
         )
-        let offsetUnit = Self.unitVector(from: CGPoint(x: left.x, y: left.y), to: CGPoint(x: right.x, y: right.y))
         return [-1.0, 1.0].map { side in
-            let offset = shoulderWidth * 0.22 * side
-            let centerXOffset = centerX + offset * offsetUnit.x
-            let centerYOffset = nippleY + offset * offsetUnit.y
+            let centerXOffset = centerX + shoulderWidth * 0.22 * side
             return MosaicROI(
-                rect: NormalizedRect(x: centerXOffset - size / 2, y: centerYOffset - size / 2, width: size, height: size),
+                rect: NormalizedRect(x: centerXOffset - size / 2, y: nippleY - size / 2, width: size, height: size),
                 confidence: confidence,
                 source: "pose-chest",
                 shape: .ellipse,
@@ -873,15 +874,6 @@ public final class SensitiveROIGenerator: ROIGenerating {
     /// 認識範囲（体の向き）に沿った形状にするために使う。
     private static func tiltAngleDegrees(from a: CGPoint, to b: CGPoint) -> Double {
         Double(atan2(b.y - a.y, b.x - a.x)) * 180 / .pi
-    }
-
-    /// 2点を結ぶ単位ベクトル（長さがほぼ0の場合は水平（1, 0)を返す）。
-    private static func unitVector(from a: CGPoint, to b: CGPoint) -> CGPoint {
-        let dx = b.x - a.x
-        let dy = b.y - a.y
-        let length = hypot(dx, dy)
-        guard length > 0.0001 else { return CGPoint(x: 1, y: 0) }
-        return CGPoint(x: dx / length, y: dy / length)
     }
 }
 

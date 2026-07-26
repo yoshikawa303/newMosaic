@@ -24,10 +24,10 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
     case blur
     case edgeBlur
     case unsharpEdges
-    case stripesVertical
-    case stripesHorizontal
-    case stripesRandom
+    /// ボーダー（縦/横/ランダムを`MosaicStyle.stripeVertical`/`stripeRandom`で切替える統合パターン）。
+    case border
     case clouds
+    case flash
     case customImage
     case overlayImage
 
@@ -38,10 +38,9 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
         case .blur: return "ボケ"
         case .edgeBlur: return "線・エッジぼかし"
         case .unsharpEdges: return "アンシャープ（エッジ強調）"
-        case .stripesVertical: return "ボーダー（縦）"
-        case .stripesHorizontal: return "ボーダー（横）"
-        case .stripesRandom: return "ボーダーランダム"
-        case .clouds: return "雲"
+        case .border: return "ボーダー"
+        case .clouds: return "トーン"
+        case .flash: return "フラッシュ"
         case .customImage: return "パターン画像"
         case .overlayImage: return "マスク画像（マスク・メガネ等）"
         }
@@ -54,7 +53,7 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
 
     /// ボーダー系（帯太さ・間隔パラメータを使う）パターンか。
     public var isStripes: Bool {
-        self == .stripesVertical || self == .stripesHorizontal || self == .stripesRandom
+        self == .border
     }
 }
 
@@ -75,10 +74,18 @@ public struct MosaicStyle: @unchecked Sendable {
     public var stripeWidth: Double
     /// ボーダー: 帯の間隔（px。間隔部分は透明=元画像が見える）
     public var stripeSpacing: Double
-    /// 雲: 密度（0〜1。大きいほど雲=塗り部分が多い）
+    /// ボーダー: 縦帯/横帯（`stripeRandom`がtrueのときは無視される）
+    public var stripeVertical: Bool
+    /// ボーダー: 帯幅・間隔を揺らしたランダム斜めボーダーにするか
+    public var stripeRandom: Bool
+    /// ボーダー: 帯を網点（漫画トーン風）で塗るか
+    public var stripeTone: Bool
+    /// 雲（トーン）: 密度（0〜1。大きいほど塗り部分が多い）
     public var cloudDensity: Double
-    /// 雲: 漫画のトーンパターン化（網点変換）ON/OFF
+    /// 雲（トーン）: 漫画のトーンパターン化（網点変換）ON/OFF
     public var cloudTone: Bool
+    /// フラッシュ: 放射の中心位置（ROIのローカル正規化座標、0〜1・左上原点）。nilはROI中心。
+    public var flashCenter: NormalizedPoint?
     /// 任意パターン画像（customImage時。タイル状に敷き詰める）
     public var patternImage: CGImage?
     /// 永続化された任意パターン画像を解決するための識別子。
@@ -92,8 +99,12 @@ public struct MosaicStyle: @unchecked Sendable {
         edgeFeather: Double = 0,
         stripeWidth: Double = 12,
         stripeSpacing: Double = 12,
+        stripeVertical: Bool = true,
+        stripeRandom: Bool = false,
+        stripeTone: Bool = false,
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
+        flashCenter: NormalizedPoint? = nil,
         patternImage: CGImage? = nil,
         patternImageIdentifier: String? = nil
     ) {
@@ -104,8 +115,12 @@ public struct MosaicStyle: @unchecked Sendable {
         self.edgeFeather = edgeFeather
         self.stripeWidth = stripeWidth
         self.stripeSpacing = stripeSpacing
+        self.stripeVertical = stripeVertical
+        self.stripeRandom = stripeRandom
+        self.stripeTone = stripeTone
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
+        self.flashCenter = flashCenter
         self.patternImage = patternImage
         self.patternImageIdentifier = patternImageIdentifier
     }
@@ -120,8 +135,12 @@ public struct MosaicStyle: @unchecked Sendable {
             edgeFeather: edgeFeather,
             stripeWidth: stripeWidth,
             stripeSpacing: stripeSpacing,
+            stripeVertical: stripeVertical,
+            stripeRandom: stripeRandom,
+            stripeTone: stripeTone,
             cloudDensity: cloudDensity,
             cloudTone: cloudTone,
+            flashCenter: flashCenter,
             patternImageIdentifier: patternImageIdentifier
         )
     }
@@ -137,8 +156,12 @@ public struct MosaicStyle: @unchecked Sendable {
             edgeFeather: roiStyle.edgeFeather,
             stripeWidth: roiStyle.stripeWidth,
             stripeSpacing: roiStyle.stripeSpacing,
+            stripeVertical: roiStyle.stripeVertical,
+            stripeRandom: roiStyle.stripeRandom,
+            stripeTone: roiStyle.stripeTone,
             cloudDensity: roiStyle.cloudDensity,
             cloudTone: roiStyle.cloudTone,
+            flashCenter: roiStyle.flashCenter,
             patternImage: patternImage,
             patternImageIdentifier: roiStyle.patternImageIdentifier
         )
@@ -231,14 +254,19 @@ public final class MosaicEngine {
             }
             let styleKey = resolvedStyle.persistentStyle()
             let layers: (fill: CIImage, stripeAlpha: CIImage?)
-            if let cached = layerCache[styleKey] {
+            // フラッシュは中心位置がROIごとの矩形に依存するため、他パターンと違い
+            // スタイル内容だけでキャッシュを共有できない（同じスタイル設定でも
+            // ROIが異なれば中心の実座標が変わる）。ROI単位で毎回生成する。
+            if resolvedStyle.pattern != .flash, let cached = layerCache[styleKey] {
                 layers = cached
             } else {
                 layers = (
-                    Self.makeFillLayer(style: resolvedStyle, original: original, extent: extent),
+                    Self.makeFillLayer(style: resolvedStyle, original: original, extent: extent, roi: roi),
                     Self.stripePatternMask(style: resolvedStyle, extent: extent)
                 )
-                layerCache[styleKey] = layers
+                if resolvedStyle.pattern != .flash {
+                    layerCache[styleKey] = layers
+                }
             }
 
             var mask = baseMask
@@ -377,7 +405,7 @@ public final class MosaicEngine {
 
     // MARK: - 塗りつぶしレイヤ生成
 
-    static func makeFillLayer(style: MosaicStyle, original: CIImage, extent: CGRect) -> CIImage {
+    static func makeFillLayer(style: MosaicStyle, original: CIImage, extent: CGRect, roi: MosaicROI) -> CIImage {
         var fill: CIImage
         switch style.pattern {
         case .pixelate:
@@ -440,10 +468,27 @@ public final class MosaicEngine {
             ]).cropped(to: extent)
         case .clouds:
             fill = Self.cloudLayer(style: style, extent: extent)
-        case .stripesVertical, .stripesHorizontal, .stripesRandom:
-            // 帯の色（既定は黒。tintColor指定時はその色）。間隔の透明はマスク側で表現する。
-            let color = style.tintColor ?? (red: 0, green: 0, blue: 0)
-            fill = CIImage(color: CIColor(red: color.red, green: color.green, blue: color.blue)).cropped(to: extent)
+        case .flash:
+            fill = Self.flashLayer(style: style, roi: roi, extent: extent)
+        case .border:
+            if style.stripeTone {
+                // トーン: 帯の塗りを元画像の網点変換（漫画トーン風）にする
+                // （雲パターンのトーン化と同じCIDotScreenを、ノイズではなく元画像の輝度に適用）。
+                fill = original
+                    .clampedToExtent()
+                    .applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
+                    .applyingFilter("CIDotScreen", parameters: [
+                        kCIInputCenterKey: CIVector(x: extent.midX, y: extent.midY),
+                        kCIInputAngleKey: 0.3,
+                        kCIInputWidthKey: max(3, style.stripeWidth / 3),
+                        kCIInputSharpnessKey: 0.7
+                    ])
+                    .cropped(to: extent)
+            } else {
+                // 帯の色（既定は黒。tintColor指定時はその色）。間隔の透明はマスク側で表現する。
+                let color = style.tintColor ?? (red: 0, green: 0, blue: 0)
+                fill = CIImage(color: CIColor(red: color.red, green: color.green, blue: color.blue)).cropped(to: extent)
+            }
         case .customImage, .overlayImage:
             // overlayImageはapplyMosaic側で特別処理される（ここへ来るのは全面フォールバック時のみ）
             if let pattern = style.patternImage {
@@ -461,8 +506,10 @@ public final class MosaicEngine {
             }
         }
 
-        // 色付け（ボーダーは帯色として適用済みのため対象外）
-        if let tint = style.tintColor, !style.pattern.isStripes {
+        // 色付け（ボーダーは帯色として適用済みのため対象外。ただしトーンONは帯色を使わず
+        // 元画像の網点変換を使うため、通常パターンと同様に色付けを適用できるようにする）
+        let skipGenericTint = style.pattern.isStripes && !style.stripeTone
+        if let tint = style.tintColor, !skipGenericTint {
             fill = fill.applyingFilter("CIColorMonochrome", parameters: [
                 kCIInputColorKey: CIColor(red: tint.red, green: tint.green, blue: tint.blue),
                 kCIInputIntensityKey: 1.0
@@ -473,18 +520,14 @@ public final class MosaicEngine {
 
     /// ボーダー用の縞アルファマスク（帯=白、間隔=黒=透明）。ボーダー以外はnil。
     static func stripePatternMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
-        switch style.pattern {
-        case .stripesVertical, .stripesHorizontal:
-            return regularStripeMask(style: style, extent: extent)
-        case .stripesRandom:
-            return randomStripeMask(style: style, extent: extent)
-        default:
-            return nil
-        }
+        guard style.pattern == .border else { return nil }
+        return style.stripeRandom
+            ? randomStripeMask(style: style, extent: extent)
+            : regularStripeMask(style: style, extent: extent)
     }
 
     private static func regularStripeMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
-        let vertical = style.pattern == .stripesVertical
+        let vertical = style.stripeVertical
         let band = max(1, Int(style.stripeWidth.rounded()))
         let gap = max(0, Int(style.stripeSpacing.rounded()))
         let period = band + gap
@@ -597,6 +640,56 @@ public final class MosaicEngine {
             ]).cropped(to: extent)
         }
         return clouds
+    }
+
+    /// フラッシュ（集中線）パターン: 指定した中心点から放射状に線を描く（漫画の集中線風）。
+    /// 中心位置はROIのローカル正規化座標（0〜1、左上原点。`style.flashCenter`）で保持し、
+    /// 未指定時はROI中心を使う。線の本数・太さは固定シードの乱数で決めるため、
+    /// 再レンダリングしても同じ模様になる（ボーダーランダムと同じ考え方）。
+    static func flashLayer(style: MosaicStyle, roi: MosaicROI, extent: CGRect) -> CIImage {
+        let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        let local = style.flashCenter ?? NormalizedPoint(x: 0.5, y: 0.5)
+        // ローカル座標は左上原点、CI座標は左下原点のためyを反転する。
+        let center = CGPoint(
+            x: rect.minX + local.x * rect.width,
+            y: rect.minY + (1 - local.y) * rect.height
+        )
+        let width = max(1, Int(extent.width))
+        let height = max(1, Int(extent.height))
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return CIImage(color: .white).cropped(to: extent) }
+
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        context.setStrokeColor(CGColor(gray: 0, alpha: 1))
+
+        var rng = SeededRandomGenerator(seed: 0x466C_6173)
+        let lineCount = 96
+        let maxRadius = hypot(extent.width, extent.height)
+        for index in 0..<lineCount {
+            let baseAngle = (Double(index) / Double(lineCount)) * 2 * .pi
+            let angle = baseAngle + Double.random(in: -0.035...0.035, using: &rng)
+            let lineWidth = max(0.6, style.blockScale / 22 * Double.random(in: 0.55...1.3, using: &rng))
+            let innerRadius = maxRadius * Double.random(in: 0.01...0.05, using: &rng)
+            let dx = cos(angle)
+            let dy = sin(angle)
+            let start = CGPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius)
+            let end = CGPoint(x: center.x + dx * maxRadius, y: center.y + dy * maxRadius)
+            context.setLineWidth(CGFloat(lineWidth))
+            context.beginPath()
+            context.move(to: start)
+            context.addLine(to: end)
+            context.strokePath()
+        }
+        guard let image = context.makeImage() else { return CIImage(color: .white).cropped(to: extent) }
+        return CIImage(cgImage: image).cropped(to: extent)
     }
 
     /// 8bitグレースケールのタイルCGImageを生成する（縞・帯パターン用）。

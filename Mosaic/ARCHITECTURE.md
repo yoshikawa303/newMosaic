@@ -255,6 +255,16 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **モザイクパターン毎の詳細設定記憶**: 従来、透明度・色付け・粒度等の詳細設定はパターンをまたいだ単一のグローバル状態で保持されており、例えば色付き帯パターンから「ノイズ」へ切替えると、色付けチェックがONのまま引き継がれて「ノイズがカラーになる」ように見える不具合があった。UserDefaultsキーをパターン毎に名前空間分け（`mosaicStyleKeyPrefix(for:)`＝`"MosaicStyle.<pattern>."`）し、パターン切替時（`patternTileClicked`）に該当パターン専用の記憶済み設定（無ければ`MosaicStyle`の既定値）を`loadMosaicStyleDetails(for:)`で復元してから適用するよう変更。個別スタイル設定中のROIを選択したままパターンを切替えた場合、グローバルな既定スタイルまで書き換えないよう`canvas.selectedROIID == nil`のガードを追加。
 - **ツールバー項目の整理**: 「ライブラリを更新」ボタンをツールバーからライブラリパネルの拡大縮小アイコンの右（`modeRow`）へ移設。「選択範囲をすべて消去」を「レイヤ削除」に改名し、ライブラリの「選択画像を削除」（`trash`アイコン）と区別するため`rectangle.badge.minus`アイコンへ変更。
 
+## 5.25 検出・マスク生成バグ修正、パネル既定配置、フラッシュ/ボーダー統合（2026-07-26 v0.0.00079〜）
+
+- **ライブラリのサムネイル拡大縮小アイコン統一**: `thumbSmallerButton`/`thumbLargerButton`が独自の`.texturedRounded`ベゼルで構築されており、キャンバスのズームボタン（`shortcutToolbarButton`経由の`SquareIconButton`）とサイズ・詳細設定「アイコンサイズ」への追従が食い違っていた。同じ`configureToolbarButton`経路で構築し直して統一。
+- **乳首検出の誤ROIバグ**: `SensitiveROIGenerator.chestROIs`（v0.0.00076で追加したROI自動回転）が、肩ラインの傾き方向へROI中心まで投影オフセットしていたため、肩関節推定角度の僅かなずれで中心が実際の乳首位置から外れやすくなっていた。ずれたROIは直接検出器（`AnimeCensorDetector`等）の正しい検出とIoUベースの重複除去（`mergeCandidates`、閾値0.5）でマッチしなくなり、斜めにずれた誤ROIが正しいROIと並んで残る不具合があった。中心位置は水平オフセットのみ（回転導入前の位置式）へ戻し、`rotation`のみ肩の傾きへ反映するよう修正（`groinROI`は元々この方式で問題なし）。
+- **回転ROIで「対象形状」が検知できないバグ**: `RegionForegroundSegmentEngine.regionMask`が無回転の`roi.rect`のみでVision用クロップを切り出しており、回転したROIでは実際の選択範囲とクロップ位置がずれ、対象物がクロップ外へ出て検知できないことがあった。回転後の外接矩形（`rotatedBoundingBox(of:rotationDegrees:)`）を基準にクロップするよう修正。他のマスク生成方式（`ShapeSegmentEngine`は回転を直接描画、`ForegroundSegmentEngine`/`VisionPersonSegmentEngine`は画像全体を処理してから回転対応の`ShapeSegmentEngine.restrict`で制限）は元々問題なし。
+- **サイドパネル既定配置の修正**: 全パネル種別の既定サイドが一律「right」だったため、初期化するとインスペクタまで含めた3ウィンドウが右ペインへ詰め込まれ、右ペイン幅がアプリの大半を占める不具合があった（左ペインが空のまま非表示になり、右ペイン幅解決ロジックが想定していない状態に陥っていたのが真因）。`defaultPanelSide(for:)`を新設し、`.inspector`のみ既定「left」、`.library`/`.layers`は既定「right」に変更（右＝ライブラリ+レイヤ、左＝インスペクタ）。
+- **ボーダー3パターンの統合**: `MosaicFillPattern`の`.stripesVertical`/`.stripesHorizontal`/`.stripesRandom`を`.border`1つへ統合し、`MosaicStyle`/`MosaicROIStyle`の`stripeVertical`（縦/横）・`stripeRandom`（ランダムON/OFF）・`stripeTone`（帯を元画像の網点変換で塗るON/OFF）で切替える方式に変更。既存ライブラリ/プロジェクトJSONとの互換性のため、`MosaicROIStyle`にカスタム`init(from decoder:)`を追加し、旧パターン名（`stripesVertical`等）を`.border`＋対応するフラグへ変換して読み込む。
+- **フラッシュ（集中線）パターンの追加**: `MosaicFillPattern.flash`を新設。`MosaicEngine.flashLayer(style:roi:extent:)`が固定シードの乱数で放射状の線をCGContextに描画する（`SeededRandomGenerator`で再現性を確保、ボーダーランダムと同じ考え方）。中心位置は`MosaicStyle.flashCenter`（ROIローカル正規化座標、nilはROI中心）で保持し、`ImageCanvasView`上に十字マーク付きの黄色いハンドルを表示してドラッグで指定できる（`FlashCenterDragState`、回転ROIでも逆回転してローカル座標を計算）。フラッシュは中心位置がROIごとに異なるため、他パターンと違い`MosaicEngine`の`layerCache`（`MosaicROIStyle`をキーとする共有フィルキャッシュ）の対象から除外し、ROIごとに毎回生成する。
+- **パターン表示名の変更**: 「雲」→「トーン」（`MosaicFillPattern.clouds.displayName`）、「トーン化（漫画トーン）」→「トーン」（`styleCloudToneCheckbox`のタイトル）。ボーダーの「トーン」チェックボックス（`styleBorderToneCheckbox`）も同名だが、雲パターンのトーン化とは別の実装（帯の塗りを元画像の網点変換にする）で、UI上は文脈（表示中のパターンの詳細設定）で区別される。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

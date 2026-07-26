@@ -663,8 +663,8 @@ final class MosaicWindowController: NSObject {
     private let thumbnailSizeSlider = NSSlider(value: 120, minValue: 64, maxValue: 220, target: nil, action: nil)
     /// サムネイルグリッド表示以外（テキスト/サムネイルリスト表示）では無効表示にする
     /// （`updateLibraryModeVisibility()`参照。グリッド以外ではサムネイルサイズに意味がないため）。
-    private let thumbSmallerButton = NSButton()
-    private let thumbLargerButton = NSButton()
+    private let thumbSmallerButton = SquareIconButton()
+    private let thumbLargerButton = SquareIconButton()
     private let undoButton = NSButton(title: "元に戻す", target: nil, action: nil)
     private let redoButton = NSButton(title: "やり直す", target: nil, action: nil)
     private let zoomLabel = NSTextField(labelWithString: "100%")
@@ -727,13 +727,24 @@ final class MosaicWindowController: NSObject {
     private let styleStripeWidthValueLabel = NSTextField(labelWithString: "12px")
     private let styleStripeSpacingSlider = NSSlider(value: 12, minValue: 0, maxValue: 60, target: nil, action: nil)
     private let styleStripeSpacingValueLabel = NSTextField(labelWithString: "12px")
+    /// ボーダー: 種別（縦/横）。「ランダム」ON時は無効化される（斜め固定のため）。
+    private let styleBorderDirectionControl = NSSegmentedControl(
+        labels: ["縦", "横"], trackingMode: .selectOne, target: nil, action: nil
+    )
+    private let styleBorderRandomCheckbox = NSButton(checkboxWithTitle: "ランダム", target: nil, action: nil)
+    private let styleBorderToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
     private let styleCloudDensitySlider = NSSlider(value: 0.5, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
     private let styleCloudDensityValueLabel = NSTextField(labelWithString: "50%")
-    private let styleCloudToneCheckbox = NSButton(checkboxWithTitle: "トーン化（漫画トーン）", target: nil, action: nil)
+    private let styleCloudToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
+    /// フラッシュ: 中心位置は画像上のハンドルをドラッグして指定する（既定はROI中心）。
+    private let styleFlashResetButton = NSButton(title: "中心をリセット", target: nil, action: nil)
     private let stylePatternImageButton = NSButton(title: "画像選択...", target: nil, action: nil)
     private let stylePatternImageLabel = NSTextField(labelWithString: "未選択")
     private var customPatternImage: CGImage?
     private var customPatternImageIdentifier: String?
+    /// フラッシュパターンの中心位置（ROIローカル正規化座標）。画像上のハンドルドラッグで更新される。
+    /// nilはROI中心を使う。`customPatternImage`同様、コントロール化していない実行時状態。
+    private var pendingFlashCenter: NormalizedPoint?
     private var patternImageCache: [String: CGImage] = [:]
     /// `patternImageCache`のLRU順（末尾が最新）。ファイル選択のたびに新規UUIDでキャッシュへ
     /// 追加され続け際限なく増える不具合があったため、上限を超えたら古いものから破棄する
@@ -1237,7 +1248,15 @@ final class MosaicWindowController: NSObject {
             self.suspendMosaicPreview()
         }
         canvas.onManualEditDidEnd = { [weak self] in
-            self?.resumeMosaicPreviewIfNeeded()
+            guard let self else { return }
+            // フラッシュ中心ハンドルのドラッグはcanvas側が直接ROIのstyleへ書き込むため、
+            // インスペクタ側の保持値（pendingFlashCenter）をここで実際の値へ再同期する
+            // （再同期しないと、直後に他のスライダーを操作した際に古い中心位置へ戻ってしまう）。
+            if let selectedID = self.canvas.selectedROIID,
+               let roi = self.canvas.rois.first(where: { $0.id == selectedID }) {
+                self.pendingFlashCenter = roi.style?.flashCenter ?? self.defaultMosaicStyle.flashCenter
+            }
+            self.resumeMosaicPreviewIfNeeded()
         }
         canvas.onROISelectionChanged = { [weak self] roi in
             guard let self else { return }
@@ -1388,12 +1407,11 @@ final class MosaicWindowController: NSObject {
     private func movePanel(from sender: NSButton, to side: String) {
         guard let raw = sender.identifier?.rawValue,
               let kind = SidePanelKind(rawValue: raw) else { return }
-        let currentSide = AppSettings.shared.string(forKey: "Layout.panelSide.\(kind.rawValue)") ?? "right"
+        let currentSide = panelSide(for: kind)
         // 移動先サイドに他のパネルが既にあれば、その幅を維持すべきなので幅の引き継ぎは行わない。
         let destinationOccupied = SidePanelKind.allCases.contains { other in
             guard other != kind else { return false }
-            let otherSide = AppSettings.shared.string(forKey: "Layout.panelSide.\(other.rawValue)") ?? "right"
-            return otherSide == side
+            return panelSide(for: other) == side
         }
         let inheritedWidth: CGFloat? = {
             guard !destinationOccupied, currentSide != side else { return nil }
@@ -1467,6 +1485,20 @@ final class MosaicWindowController: NSObject {
         return itemWidth * 2 + interitem + sectionInset + scrollbarReserve + panelPadding
     }
 
+    /// パネル配置が一度も保存されていない場合の工場既定サイド。
+    /// 右＝「ライブラリ」＋「レイヤ」、左＝「インスペクタ」（添付レイアウト準拠）。
+    /// 従来は全パネルが一律「right」既定だったため、初期化すると右ペインへ
+    /// インスペクタまで含めた3ウィンドウが詰め込まれ、右ペイン幅がアプリの9割以上を
+    /// 占める不具合があった（左ペインが空のまま非表示になり、右ペインの幅解決ロジックが
+    /// 想定していない状態に陥っていたのが真因）。
+    private func defaultPanelSide(for kind: SidePanelKind) -> String {
+        kind == .inspector ? "left" : "right"
+    }
+
+    private func panelSide(for kind: SidePanelKind) -> String {
+        AppSettings.shared.string(forKey: "Layout.panelSide.\(kind.rawValue)") ?? defaultPanelSide(for: kind)
+    }
+
     private func panelDisplayName(_ kind: SidePanelKind) -> String {
         switch kind {
         case .library: return "ライブラリ"
@@ -1494,7 +1526,7 @@ final class MosaicWindowController: NSObject {
         }
         for kind in SidePanelKind.allCases {
             guard let panel = sidePanels[kind] else { continue }
-            let side = AppSettings.shared.string(forKey: "Layout.panelSide.\(kind.rawValue)") ?? "right"
+            let side = panelSide(for: kind)
             (side == "left" ? leftPane : rightPane).addArrangedSubview(panel)
         }
         let leftEmpty = leftPane.arrangedSubviews.isEmpty
@@ -1810,6 +1842,23 @@ final class MosaicWindowController: NSObject {
         styleTintCheckbox.action = #selector(mosaicStyleChanged)
         styleCloudToneCheckbox.target = self
         styleCloudToneCheckbox.action = #selector(mosaicStyleChanged)
+        styleBorderDirectionControl.target = self
+        styleBorderDirectionControl.action = #selector(mosaicStyleChanged)
+        styleBorderDirectionControl.selectedSegment = 0
+        styleBorderDirectionControl.toolTip = "ボーダーの向き（縦/横）"
+        styleBorderRandomCheckbox.target = self
+        styleBorderRandomCheckbox.action = #selector(mosaicStyleChanged)
+        styleBorderRandomCheckbox.toolTip = "帯幅・間隔を揺らした斜めランダムボーダーにする"
+        styleBorderToneCheckbox.target = self
+        styleBorderToneCheckbox.action = #selector(mosaicStyleChanged)
+        styleBorderToneCheckbox.toolTip = "帯を網点（漫画トーン風）で塗る"
+        styleFlashResetButton.target = self
+        styleFlashResetButton.action = #selector(resetFlashCenter)
+        styleFlashResetButton.toolTip = "フラッシュの中心を選択範囲の中央に戻す（中心位置は画像上のハンドルをドラッグして指定できます）"
+        applyScaledFont(styleBorderDirectionControl, size: 11)
+        applyScaledFont(styleBorderRandomCheckbox, size: 12)
+        applyScaledFont(styleBorderToneCheckbox, size: 12)
+        applyScaledFont(styleFlashResetButton, size: 11)
         styleTintColorWell.target = self
         styleTintColorWell.action = #selector(mosaicStyleChanged)
         styleTintColorWell.translatesAutoresizingMaskIntoConstraints = false
@@ -1934,8 +1983,11 @@ final class MosaicWindowController: NSObject {
             [styleRowLabel("輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
             [styleRowLabel("帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
             [styleRowLabel("帯の間隔"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
-            [styleRowLabel("雲の密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
-            [styleRowLabel("雲"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
+            [styleRowLabel("種別"), styleBorderDirectionControl, NSGridCell.emptyContentView],
+            [styleRowLabel("ボーダー"), styleBorderRandomCheckbox, styleBorderToneCheckbox],
+            [styleRowLabel("密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
+            [styleRowLabel("トーン"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
+            [styleRowLabel("フラッシュ"), styleFlashResetButton, NSGridCell.emptyContentView],
             [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
         ])
         styleGrid.rowSpacing = 7
@@ -2138,8 +2190,12 @@ final class MosaicWindowController: NSObject {
         style.edgeFeather = styleFeatherSlider.doubleValue
         style.stripeWidth = styleStripeWidthSlider.doubleValue
         style.stripeSpacing = styleStripeSpacingSlider.doubleValue
+        style.stripeVertical = styleBorderDirectionControl.selectedSegment == 0
+        style.stripeRandom = styleBorderRandomCheckbox.state == .on
+        style.stripeTone = styleBorderToneCheckbox.state == .on
         style.cloudDensity = styleCloudDensitySlider.doubleValue
         style.cloudTone = styleCloudToneCheckbox.state == .on
+        style.flashCenter = pendingFlashCenter
         style.patternImage = customPatternImage
         style.patternImageIdentifier = customPatternImageIdentifier
         return style
@@ -2216,8 +2272,12 @@ final class MosaicWindowController: NSObject {
         styleFeatherSlider.doubleValue = style.edgeFeather
         styleStripeWidthSlider.doubleValue = style.stripeWidth
         styleStripeSpacingSlider.doubleValue = style.stripeSpacing
+        styleBorderDirectionControl.selectedSegment = style.stripeVertical ? 0 : 1
+        styleBorderRandomCheckbox.state = style.stripeRandom ? .on : .off
+        styleBorderToneCheckbox.state = style.stripeTone ? .on : .off
         styleCloudDensitySlider.doubleValue = style.cloudDensity
         styleCloudToneCheckbox.state = style.cloudTone ? .on : .off
+        pendingFlashCenter = style.flashCenter
         customPatternImageIdentifier = style.patternImageIdentifier
         customPatternImage = style.patternImageIdentifier.flatMap { patternImage(for: $0) } ?? style.patternImage
         updateCustomPatternPreview(customPatternImage)
@@ -2237,8 +2297,13 @@ final class MosaicWindowController: NSObject {
         refreshPatternTileSelectionHighlight()
         styleStripeWidthSlider.isEnabled = pattern.isStripes
         styleStripeSpacingSlider.isEnabled = pattern.isStripes
+        styleBorderRandomCheckbox.isEnabled = pattern.isStripes
+        styleBorderToneCheckbox.isEnabled = pattern.isStripes
+        // ランダムON時は斜め固定になるため、種別（縦/横）は無効化する
+        styleBorderDirectionControl.isEnabled = pattern.isStripes && styleBorderRandomCheckbox.state == .off
         styleCloudDensitySlider.isEnabled = pattern == .clouds
         styleCloudToneCheckbox.isEnabled = pattern == .clouds
+        styleFlashResetButton.isEnabled = pattern == .flash && canvas.selectedROIID != nil
         stylePatternImageButton.isEnabled = pattern.requiresPatternImage
         styleCloudDensityValueLabel.stringValue = "\(Int(styleCloudDensitySlider.doubleValue * 100)) %"
         styleOpacityValueLabel.stringValue = "\(Int(styleOpacitySlider.doubleValue * 100)) %"
@@ -2246,6 +2311,23 @@ final class MosaicWindowController: NSObject {
         styleFeatherValueLabel.stringValue = "\(Int(styleFeatherSlider.doubleValue)) px"
         styleStripeWidthValueLabel.stringValue = "\(Int(styleStripeWidthSlider.doubleValue)) px"
         styleStripeSpacingValueLabel.stringValue = "\(Int(styleStripeSpacingSlider.doubleValue)) px"
+        updateFlashHandle(pattern: pattern)
+    }
+
+    /// キャンバス上のフラッシュ中心ハンドル表示を、現在のパターン・ROI選択状態へ同期する。
+    private func updateFlashHandle(pattern: MosaicFillPattern) {
+        if pattern == .flash, canvas.selectedROIID != nil {
+            canvas.flashHandleLocal = pendingFlashCenter ?? NormalizedPoint(x: 0.5, y: 0.5)
+        } else {
+            canvas.flashHandleLocal = nil
+        }
+    }
+
+    /// フラッシュの中心位置をROI中心へリセットする。
+    @objc private func resetFlashCenter() {
+        pendingFlashCenter = nil
+        canvas.flashHandleLocal = NormalizedPoint(x: 0.5, y: 0.5)
+        mosaicStyleChanged()
     }
 
     /// 任意パターン画像を選択し、ライブラリ配下へコピーして永続化する。
@@ -2403,6 +2485,9 @@ final class MosaicWindowController: NSObject {
         defaults.set(styleFeatherSlider.doubleValue, forKey: prefix + "edgeFeather")
         defaults.set(styleStripeWidthSlider.doubleValue, forKey: prefix + "stripeWidth")
         defaults.set(styleStripeSpacingSlider.doubleValue, forKey: prefix + "stripeSpacing")
+        defaults.set(styleBorderDirectionControl.selectedSegment == 0, forKey: prefix + "stripeVertical")
+        defaults.set(styleBorderRandomCheckbox.state == .on, forKey: prefix + "stripeRandom")
+        defaults.set(styleBorderToneCheckbox.state == .on, forKey: prefix + "stripeTone")
         defaults.set(styleCloudDensitySlider.doubleValue, forKey: prefix + "cloudDensity")
         defaults.set(styleCloudToneCheckbox.state == .on, forKey: prefix + "cloudTone")
         defaults.set(customPatternImageIdentifier, forKey: prefix + "patternImageIdentifier")
@@ -2452,6 +2537,11 @@ final class MosaicWindowController: NSObject {
             ? defaults.double(forKey: prefix + "stripeWidth") : fallback.stripeWidth
         styleStripeSpacingSlider.doubleValue = defaults.object(forKey: prefix + "stripeSpacing") != nil
             ? defaults.double(forKey: prefix + "stripeSpacing") : fallback.stripeSpacing
+        styleBorderDirectionControl.selectedSegment = (defaults.object(forKey: prefix + "stripeVertical") != nil
+            ? defaults.bool(forKey: prefix + "stripeVertical") : fallback.stripeVertical) ? 0 : 1
+        styleBorderRandomCheckbox.state = defaults.bool(forKey: prefix + "stripeRandom") ? .on : .off
+        styleBorderToneCheckbox.state = defaults.bool(forKey: prefix + "stripeTone") ? .on : .off
+        pendingFlashCenter = nil
         styleCloudDensitySlider.doubleValue = defaults.object(forKey: prefix + "cloudDensity") != nil
             ? defaults.double(forKey: prefix + "cloudDensity") : fallback.cloudDensity
         styleCloudToneCheckbox.state = defaults.bool(forKey: prefix + "cloudTone") ? .on : .off
@@ -3774,19 +3864,12 @@ final class MosaicWindowController: NSObject {
         thumbnailSizeSlider.translatesAutoresizingMaskIntoConstraints = false
         thumbnailSizeSlider.widthAnchor.constraint(equalToConstant: 90).isActive = true
 
-        // サムネイルの拡大縮小は虫めがねボタンで段階調整（スライダーは内部の値保持として維持）
-        thumbSmallerButton.image = NSImage(systemSymbolName: "minus.magnifyingglass", accessibilityDescription: "サムネイルを縮小")
-        thumbSmallerButton.target = self
-        thumbSmallerButton.action = #selector(thumbnailSizeStepDown)
-        thumbLargerButton.image = NSImage(systemSymbolName: "plus.magnifyingglass", accessibilityDescription: "サムネイルを拡大")
-        thumbLargerButton.target = self
-        thumbLargerButton.action = #selector(thumbnailSizeStepUp)
-        for button in [thumbSmallerButton, thumbLargerButton] {
-            button.bezelStyle = .texturedRounded
-            button.setButtonType(.momentaryPushIn)
-        }
-        thumbSmallerButton.toolTip = "サムネイルを縮小"
-        thumbLargerButton.toolTip = "サムネイルを拡大"
+        // サムネイルの拡大縮小は虫めがねボタンで段階調整（スライダーは内部の値保持として維持）。
+        // キャンバスのズームボタンと同じ`configureToolbarButton`経路で構築し、見た目のサイズや
+        // 詳細設定「アイコンサイズ」への追従を統一する（従来は独自のtexturedRoundedベゼルで
+        // サイズが揃っていなかった）。
+        configureToolbarButton(thumbSmallerButton, symbol: "minus.magnifyingglass", help: "サムネイルを縮小", action: #selector(thumbnailSizeStepDown))
+        configureToolbarButton(thumbLargerButton, symbol: "plus.magnifyingglass", help: "サムネイルを拡大", action: #selector(thumbnailSizeStepUp))
         // 「ライブラリを更新」はツールバーから、ライブラリパネルの拡大縮小アイコンの右へ移設。
         let reloadLibraryButton = shortcutToolbarButton("reloadLibraryFromButton", symbol: "arrow.clockwise")
         let modeRow = NSStackView(views: [viewModeControl, thumbSmallerButton, thumbLargerButton, reloadLibraryButton])
@@ -5801,6 +5884,10 @@ final class ImageCanvasView: NSView {
     var poseLayerOutlineVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var poseLayerTagVisibility: [Bool] = [] { didSet { needsDisplay = true } }
 
+    /// フラッシュパターンの中心ハンドル（選択中ROIの塗りつぶしパターンがフラッシュのときだけ
+    /// ウィンドウコントローラ側から設定される。nilなら非表示）。ROIローカル正規化座標（0〜1、左上原点）。
+    var flashHandleLocal: NormalizedPoint? { didSet { needsDisplay = true } }
+
     var onROIsChanged: (([MosaicROI]) -> Void)?
     var onManualEditWillBegin: (() -> Void)?
     var onManualEditDidEnd: (() -> Void)?
@@ -5820,6 +5907,7 @@ final class ImageCanvasView: NSView {
     private var moveState: MoveState?
     private var rotationState: RotationState?
     private var vertexDragState: VertexDragState?
+    private var flashCenterDragState: FlashCenterDragState?
 
     private struct ResizeState {
         var roiID: UUID
@@ -5839,6 +5927,14 @@ final class ImageCanvasView: NSView {
         var roiID: UUID
         var vertexIndex: Int
         /// ドラッグ開始時のビュー座標rect（ドラッグ中は凍結し、終了時に外接矩形を再計算する）
+        var rect: NSRect
+        var center: NSPoint
+        var rotationDegrees: Double
+    }
+
+    private struct FlashCenterDragState {
+        var roiID: UUID
+        /// ドラッグ開始時のビュー座標rect（回転中のROIでも一貫した基準を保つため凍結する）
         var rect: NSRect
         var center: NSPoint
         var rotationDegrees: Double
@@ -6201,6 +6297,7 @@ final class ImageCanvasView: NSView {
         resizeState = nil
         moveState = nil
         groupMoveState = nil
+        flashCenterDragState = nil
         dragStart = nil
         dragCurrent = nil
         let point = convert(event.locationInWindow, from: nil)
@@ -6223,6 +6320,22 @@ final class ImageCanvasView: NSView {
                 onManualEditWillBegin?()
                 rotationState = RotationState(roiID: selectedID, center: NSPoint(x: rect.midX, y: rect.midY))
                 return
+            }
+            // フラッシュ中心ハンドル（パターンがフラッシュのROI選択時のみ表示される）
+            if let local = flashHandleLocal {
+                let center = NSPoint(x: rect.midX, y: rect.midY)
+                let raw = NSPoint(x: rect.minX + local.x * rect.width, y: rect.minY + local.y * rect.height)
+                let flashHandle = rotatedPoint(raw, around: center, degrees: roi.rotation)
+                if hypot(flashHandle.x - point.x, flashHandle.y - point.y) <= handleRadius + 2 {
+                    onManualEditWillBegin?()
+                    flashCenterDragState = FlashCenterDragState(
+                        roiID: selectedID,
+                        rect: rect,
+                        center: center,
+                        rotationDegrees: roi.rotation
+                    )
+                    return
+                }
             }
             // 多角形の頂点ドラッグ（四隅リサイズより優先）
             if roi.shape == .polygon {
@@ -6325,6 +6438,21 @@ final class ImageCanvasView: NSView {
             return
         }
 
+        if let flashDrag = flashCenterDragState {
+            guard flashDrag.rect.width > 0, flashDrag.rect.height > 0 else { return }
+            // 回転中のROIはマウス点を無回転ローカル座標へ逆回転してから中心位置を更新する
+            let local = rotatedPoint(point, around: flashDrag.center, degrees: -flashDrag.rotationDegrees)
+            let newLocal = NormalizedPoint(
+                x: min(max(0, (local.x - flashDrag.rect.minX) / flashDrag.rect.width), 1),
+                y: min(max(0, (local.y - flashDrag.rect.minY) / flashDrag.rect.height), 1)
+            )
+            flashHandleLocal = newLocal
+            if let index = rois.firstIndex(where: { $0.id == flashDrag.roiID }) {
+                rois[index].style?.flashCenter = newLocal
+            }
+            return
+        }
+
         if let rotation = rotationState {
             guard let index = rois.firstIndex(where: { $0.id == rotation.roiID }) else { return }
             // ハンドルはROI上方に付くため、マウス方向の角度+90度が回転角になる
@@ -6413,6 +6541,13 @@ final class ImageCanvasView: NSView {
 
         if rotationState != nil {
             rotationState = nil
+            needsDisplay = true
+            onManualEditDidEnd?()
+            return
+        }
+
+        if flashCenterDragState != nil {
+            flashCenterDragState = nil
             needsDisplay = true
             onManualEditDidEnd?()
             return
@@ -6571,6 +6706,9 @@ final class ImageCanvasView: NSView {
                 if roi.shape == .polygon {
                     drawPolygonVertexHandles(roi: roi, rect: rect)
                 }
+                if let local = flashHandleLocal {
+                    drawFlashCenterHandle(local: local, rect: rect, rotation: roi.rotation)
+                }
             } else if selectedROIGroupIDs.contains(roi.id) {
                 drawSelectedLayerHighlight(rect)
             }
@@ -6654,6 +6792,27 @@ final class ImageCanvasView: NSView {
         NSColor.controlAccentColor.setStroke()
         circle.lineWidth = 1.5
         circle.stroke()
+    }
+
+    /// フラッシュパターンの中心ハンドル（ドラッグして放射の中心位置を指定できる、十字マーク付きの丸）。
+    private func drawFlashCenterHandle(local: NormalizedPoint, rect: NSRect, rotation: Double) {
+        let center = NSPoint(x: rect.midX, y: rect.midY)
+        let raw = NSPoint(x: rect.minX + local.x * rect.width, y: rect.minY + local.y * rect.height)
+        let handle = rotatedPoint(raw, around: center, degrees: rotation)
+        let circle = NSBezierPath(ovalIn: NSRect(x: handle.x - 6, y: handle.y - 6, width: 12, height: 12))
+        NSColor.systemYellow.setFill()
+        circle.fill()
+        NSColor.black.setStroke()
+        circle.lineWidth = 1.5
+        circle.stroke()
+        let cross = NSBezierPath()
+        cross.move(to: NSPoint(x: handle.x - 4, y: handle.y))
+        cross.line(to: NSPoint(x: handle.x + 4, y: handle.y))
+        cross.move(to: NSPoint(x: handle.x, y: handle.y - 4))
+        cross.line(to: NSPoint(x: handle.x, y: handle.y + 4))
+        cross.lineWidth = 1
+        NSColor.black.setStroke()
+        cross.stroke()
     }
 
     /// 多角形の頂点ハンドル（丸）を描画する。ドラッグで変形、Option+クリックで追加/削除。

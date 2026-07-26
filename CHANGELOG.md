@@ -1,5 +1,27 @@
 # Changelog
 
+## v0.0.00079 - 2026-07-26
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: ライブラリのサムネイル拡大縮小アイコンが、画像側の拡大縮小アイコンとサイズ・見た目が異なっていた不具合を修正した（同じ描画方式に統一）。
+- バグ修正: 乳首検出時、斜めに回転した誤ったROIが2箇所検出されることがある不具合を修正した。体の傾きに応じたROI自動回転（v0.0.00076）の際、中心位置まで傾き方向へずらしていたことで、直接検出結果との重複除去が効かなくなっていたのが真因。
+- バグ修正: 選択範囲を回転した状態でマスク生成方式「対象形状」を使うと検知処理されない不具合を修正した（他のマスク生成方式は元々問題なし）。
+- バグ修正: 初期化時にサイドパネルの既定配置により右パネルがアプリの大半を占めてしまう不具合を修正し、右＝「ライブラリ」＋「レイヤ」、左＝「インスペクタ」を既定配置にした。
+- 新機能: モザイクパターンに「フラッシュ」（集中線）を追加した。選択範囲内で放射の中心位置を画像上のハンドルドラッグで指定できる。
+- 改善: 「ボーダー（縦）」「ボーダー（横）」「ボーダーランダム」を1つの「ボーダー」パターンへ統合し、種別（縦/横）・ランダムON/OFF・トーンON/OFFの設定で切替えられるようにした。
+- 改善: パターン表示名を変更した（「雲」→「トーン」、「トーン化（漫画トーン）」→「トーン」）。
+
+■更新履歴
+
+- `thumbSmallerButton`/`thumbLargerButton`を`configureToolbarButton`経路（`SquareIconButton`）で構築し直し、キャンバスズームボタンとサイズ・詳細設定「アイコンサイズ」への追従を統一。
+- `SensitiveROIGenerator.chestROIs`のROI中心位置計算から、肩ラインの傾き方向への投影オフセット（`offsetUnit.x/y`）を削除し、水平オフセットのみに戻した（回転は`rotation`のみへ反映）。未使用になった`unitVector`ヘルパーを削除。
+- `RegionForegroundSegmentEngine.regionMask`のクロップ範囲を、ROIの無回転矩形ではなく回転後の外接矩形（`rotatedBoundingBox(of:rotationDegrees:)`）基準に変更。
+- `MosaicWindowController.defaultPanelSide(for:)`を新設し、`.inspector`のみ既定サイドを「left」に変更（他は従来通り「right」）。パネル配置の参照箇所（`movePanel`/`applyPanelAssignments`）を`panelSide(for:)`へ統一。
+- `MosaicFillPattern`から`.stripesVertical`/`.stripesHorizontal`/`.stripesRandom`を削除し`.border`へ統合、`.flash`を追加。`MosaicStyle`/`MosaicROIStyle`へ`stripeVertical`/`stripeRandom`/`stripeTone`/`flashCenter`を追加。`MosaicROIStyle`に旧パターン名からの移行ロジックを持つカスタム`init(from decoder:)`を追加し、既存ライブラリ/プロジェクトJSONの読み込み互換性を維持。
+- `MosaicEngine.flashLayer(style:roi:extent:)`を新設（放射状の集中線をCGContextで描画、固定シードで再現性を確保）。フラッシュはROIごとに中心位置が異なるため`layerCache`の対象から除外。
+- `ImageCanvasView`にフラッシュ中心ハンドルのドラッグ操作（`FlashCenterDragState`）と描画（`drawFlashCenterHandle`）を追加。
+
 ## v0.0.00078 - 2026-07-26
 
 ■更新履歴（Readme / ChangeLog 用）

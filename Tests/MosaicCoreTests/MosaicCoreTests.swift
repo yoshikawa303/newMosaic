@@ -102,7 +102,7 @@ import Testing
 @Test func mosaicEngineAppliesDifferentStylesPerROI() throws {
     let image = try makeSolidImage(width: 100, height: 60)
     let individualStyle = MosaicROIStyle(
-        pattern: .stripesVertical,
+        pattern: .border,
         opacity: 1,
         tint: .init(red: 0, green: 1, blue: 0),
         blockScale: 16,
@@ -128,7 +128,7 @@ import Testing
         )
     ]
     let globalStyle = MosaicStyle(
-        pattern: .stripesVertical,
+        pattern: .border,
         opacity: 0.1,
         tintColor: (red: 0, green: 0, blue: 1),
         blockScale: 16,
@@ -964,14 +964,16 @@ private final class PatchyStubSegmentEngine: Segmenting {
 @Test func mosaicStyleStripeMaskAlternatesBands() {
     // 帯8px+間隔4pxの縦ボーダーで、縞マスクが生成されることを検証する
     var style = MosaicStyle()
-    style.pattern = .stripesVertical
+    style.pattern = .border
+    style.stripeVertical = true
     style.stripeWidth = 8
     style.stripeSpacing = 4
 
     let mask = MosaicEngine.stripePatternMask(style: style, extent: CGRect(x: 0, y: 0, width: 64, height: 64))
 
     var randomStyle = MosaicStyle()
-    randomStyle.pattern = .stripesRandom
+    randomStyle.pattern = .border
+    randomStyle.stripeRandom = true
     randomStyle.stripeWidth = 8
     randomStyle.stripeSpacing = 4
     let randomMask = MosaicEngine.stripePatternMask(style: randomStyle, extent: CGRect(x: 0, y: 0, width: 64, height: 64))
