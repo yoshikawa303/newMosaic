@@ -1314,6 +1314,12 @@ final class MosaicWindowController: NSObject {
         canvas.onDetectionLayerDeleteRequest = { [weak self] kind in
             self?.deleteDetectionLayer(kind)
         }
+        canvas.onDetectionLayerSelected = { [weak self] kind in
+            self?.selectDetectionLayerInList(kind)
+        }
+        canvas.onDetectionLayerMoved = { [weak self] kind, dx, dy in
+            self?.applyDetectionLayerMove(kind, dx: dx, dy: dy)
+        }
         canvas.onZoomChanged = { [weak self] zoom in
             self?.zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"
         }
@@ -3175,6 +3181,64 @@ final class MosaicWindowController: NSObject {
 
     private func allLayerLeaves() -> [LayerLeaf] {
         ungroupedLayers + layerGroups.flatMap(\.children)
+    }
+
+    /// 画像上のクリックで選択された人物/骨格レイヤを、レイヤ一覧の選択にも反映する。
+    private func selectDetectionLayerInList(_ kind: LayerKind) {
+        guard let leaf = allLayerLeaves().first(where: { $0.kind == kind }) else { return }
+        let row = layerOutlineView.row(forItem: leaf)
+        guard row >= 0 else { return }
+        layerOutlineView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        layerOutlineView.scrollRowToVisible(row)
+    }
+
+    /// 人物/骨格レイヤの移動完了時、マスク画像・骨格ボーンを同じ移動量だけ追従させる。
+    private func applyDetectionLayerMove(_ kind: LayerKind, dx: Double, dy: Double) {
+        switch kind {
+        case .person(let index):
+            if index < canvas.personLayerMasks.count, let mask = canvas.personLayerMasks[index] {
+                canvas.personLayerMasks[index] = Self.translatedMask(mask, dx: dx, dy: dy)
+            }
+            updateStatus("人物\(index + 1) レイヤを移動しました")
+        case .pose(let index):
+            if index < canvas.poseLayerBones.count {
+                canvas.poseLayerBones[index] = canvas.poseLayerBones[index].map { bone in
+                    (from: CGPoint(x: bone.from.x + dx, y: bone.from.y + dy),
+                     to: CGPoint(x: bone.to.x + dx, y: bone.to.y + dy))
+                }
+            }
+            if index < canvas.poseLayerJointPoints.count {
+                canvas.poseLayerJointPoints[index] = canvas.poseLayerJointPoints[index].map {
+                    CGPoint(x: $0.x + dx, y: $0.y + dy)
+                }
+            }
+            updateStatus("骨格\(index + 1) レイヤを移動しました")
+        default:
+            break
+        }
+    }
+
+    /// 全面マスク画像を正規化座標の移動量だけ平行移動した画像を返す（はみ出しは切り捨て）。
+    private static func translatedMask(_ mask: CGImage, dx: Double, dy: Double) -> CGImage? {
+        let width = mask.width
+        let height = mask.height
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceRGB(),
+            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+        ) else { return mask }
+        // 正規化dyは下方向が正（上原点）、CGContextは下原点のためyを反転して描画する
+        context.draw(mask, in: CGRect(
+            x: dx * Double(width),
+            y: -dy * Double(height),
+            width: Double(width),
+            height: Double(height)
+        ))
+        return context.makeImage()
     }
 
     /// 画像上のダブルクリックによる人物/骨格レイヤの削除。レイヤ一覧から該当レイヤを取り除き、
@@ -6107,6 +6171,10 @@ final class ImageCanvasView: NSView {
     var onCategoryChangeRequest: ((UUID, MosaicTargetCategory) -> Void)?
     /// 画像上の人物/骨格レイヤのダブルクリック削除要求（ROIのダブルクリック削除と操作を統一）
     fileprivate var onDetectionLayerDeleteRequest: ((LayerKind) -> Void)?
+    /// 画像上のクリックで人物/骨格レイヤを選択したときの通知（レイヤ一覧の選択と同期する）
+    fileprivate var onDetectionLayerSelected: ((LayerKind) -> Void)?
+    /// 人物/骨格レイヤの移動完了通知（正規化座標の累積移動量。マスク・ボーンの追従に使う）
+    fileprivate var onDetectionLayerMoved: ((LayerKind, Double, Double) -> Void)?
 
     /// 表示中の人物/骨格レイヤのヒットテスト（骨格優先）。ダブルクリック削除の対象判定に使う。
     fileprivate func detectionLayerHit(at point: NSPoint, imageRect: NSRect) -> LayerKind? {
@@ -6117,6 +6185,24 @@ final class ImageCanvasView: NSView {
         for (index, rect) in personLayerRects.enumerated()
         where index < personLayerVisibility.count && personLayerVisibility[index] {
             if viewRect(from: rect, imageRect: imageRect).contains(point) { return .person(index) }
+        }
+        return nil
+    }
+
+    /// 表示中の人物/骨格レイヤの「枠線帯」（±8px）のヒットテスト。選択+移動の掴み判定に使う。
+    fileprivate func detectionLayerEdgeHit(at point: NSPoint, imageRect: NSRect) -> LayerKind? {
+        func hitsEdge(_ viewR: NSRect) -> Bool {
+            let outer = viewR.insetBy(dx: -8, dy: -8)
+            let inner = viewR.insetBy(dx: 8, dy: 8)
+            return outer.contains(point) && !inner.contains(point)
+        }
+        for (index, rect) in poseLayerRects.enumerated()
+        where index < poseLayerVisibility.count && poseLayerVisibility[index] {
+            if hitsEdge(viewRect(from: rect, imageRect: imageRect)) { return .pose(index) }
+        }
+        for (index, rect) in personLayerRects.enumerated()
+        where index < personLayerVisibility.count && personLayerVisibility[index] {
+            if hitsEdge(viewRect(from: rect, imageRect: imageRect)) { return .person(index) }
         }
         return nil
     }
@@ -6178,6 +6264,17 @@ final class ImageCanvasView: NSView {
         var didBeginEdit = false
     }
     private var groupMoveState: GroupMoveState?
+
+    /// 人物/骨格レイヤの移動用ドラッグ状態（モザイク対象と同様の選択＆移動を可能にする）。
+    /// マスク・ボーンの追従はドラッグ終了時にまとめて行うため、累積移動量を保持する。
+    fileprivate struct DetectionMoveState {
+        var kind: LayerKind
+        var lastPoint: NSPoint
+        var totalDX: Double = 0
+        var totalDY: Double = 0
+        var didMove = false
+    }
+    fileprivate var detectionMoveState: DetectionMoveState?
 
     private let handleRadius: CGFloat = 7
     private let dragThreshold: CGFloat = 4
@@ -6553,6 +6650,7 @@ final class ImageCanvasView: NSView {
         moveState = nil
         groupMoveState = nil
         flashCenterDragState = nil
+        detectionMoveState = nil
         dragStart = nil
         dragCurrent = nil
         let point = convert(event.locationInWindow, from: nil)
@@ -6667,6 +6765,16 @@ final class ImageCanvasView: NSView {
             return
         }
 
+        // 表示中の人物/骨格レイヤの「枠線付近」クリックで選択+ドラッグ移動（モザイク対象と
+        // 同じ操作感）。人物矩形は画面の大部分を覆うことがあるため、内側クリックまで奪うと
+        // ROIの新規作成ドラッグができなくなる。枠の帯（±8px）だけを掴めるようにする。
+        if let kind = detectionLayerEdgeHit(at: point, imageRect: imageRect) {
+            selectedDetectionLayer = kind
+            onDetectionLayerSelected?(kind)
+            detectionMoveState = DetectionMoveState(kind: kind, lastPoint: point)
+            return
+        }
+
         // Optionキーを押しながらの場合、このドラッグ限定でモードを一時的に入れ替える
         // （Photoshopのスペースキー一時パン切替と同様の考え方）。
         let wantsMarquee = event.modifierFlags.contains(.option)
@@ -6763,6 +6871,34 @@ final class ImageCanvasView: NSView {
             return
         }
 
+        if var detectionMove = detectionMoveState {
+            let imageRect = imageDrawRect()
+            guard imageRect.width > 0, imageRect.height > 0 else { return }
+            let dx = Double((point.x - detectionMove.lastPoint.x) / imageRect.width)
+            let dy = Double((point.y - detectionMove.lastPoint.y) / imageRect.height)
+            switch detectionMove.kind {
+            case .person(let index) where index < personLayerRects.count:
+                var rect = personLayerRects[index]
+                rect.x = min(max(0, rect.x + dx), 1 - rect.width)
+                rect.y = min(max(0, rect.y + dy), 1 - rect.height)
+                personLayerRects[index] = rect
+            case .pose(let index) where index < poseLayerRects.count:
+                var rect = poseLayerRects[index]
+                rect.x = min(max(0, rect.x + dx), 1 - rect.width)
+                rect.y = min(max(0, rect.y + dy), 1 - rect.height)
+                poseLayerRects[index] = rect
+            default:
+                return
+            }
+            detectionMove.totalDX += dx
+            detectionMove.totalDY += dy
+            detectionMove.lastPoint = point
+            detectionMove.didMove = true
+            detectionMoveState = detectionMove
+            NSCursor.closedHand.set()
+            return
+        }
+
         if var groupMove = groupMoveState {
             let imageRect = imageDrawRect()
             guard imageRect.width > 0, imageRect.height > 0 else { return }
@@ -6839,6 +6975,17 @@ final class ImageCanvasView: NSView {
             needsDisplay = true
             if groupMove.didBeginEdit {
                 onManualEditDidEnd?()
+            }
+            return
+        }
+
+        if let detectionMove = detectionMoveState {
+            detectionMoveState = nil
+            needsDisplay = true
+            if detectionMove.didMove {
+                // マスク・ボーンの追従はドラッグ完了時に累積移動量でまとめて行う（毎フレームの
+                // 全面画像再生成を避けるため）。
+                onDetectionLayerMoved?(detectionMove.kind, detectionMove.totalDX, detectionMove.totalDY)
             }
             return
         }
@@ -7137,8 +7284,12 @@ final class ImageCanvasView: NSView {
             let showsTag = index < personLayerTagVisibility.count ? personLayerTagVisibility[index] : true
             let viewR = viewRect(from: rect, imageRect: target)
             if index < personLayerMasks.count, let mask = personLayerMasks[index] {
+                // NSImage.draw(in:from:operation:fraction:)はflippedビューで上下反転を補正しない
+                // （respectFlipped指定なしの既定はfalse）。人物マスクだけ上下反転・鏡映位置に
+                // 表示される不具合の真因だったため、respectFlipped: trueを明示する。
                 NSImage(cgImage: mask, size: NSSize(width: mask.width, height: mask.height))
-                    .draw(in: target, from: .zero, operation: .sourceOver, fraction: 0.9)
+                    .draw(in: target, from: .zero, operation: .sourceOver, fraction: 0.9,
+                          respectFlipped: true, hints: nil)
                 if showsOutline {
                     drawDashedRect(viewR, color: .systemBlue)
                 }

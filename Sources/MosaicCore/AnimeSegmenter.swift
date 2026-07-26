@@ -76,13 +76,15 @@ public final class AnimeSegmenter {
         let mask = outputData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         guard mask.count >= size * size else { return nil }
 
-        // パディングを除いたコンテンツ領域を8bitグレースケール化。
-        // モデル出力の行方向は入力と逆（行0=下）であることがGUI実測で確定した
-        // （「人物認識範囲が上下反転表示される」報告。コードレビューでも行方向未検証として
-        // 指摘されていた項目）。上下を反転して取り出す。
+        // パディングを除いたコンテンツ領域を8bitグレースケール化（CGContextの描画は上原点行順で一致）。
+        // ※モデル出力の行方向は入力と同一（行0=上）。
+        // 「人物マスクが上下反転する」報告はモデル出力ではなく表示側の
+        // NSImage.draw(in:from:...)がflippedビューで反転補正しないことが真因だった
+        // （v0.0.00081で一度ここを反転したが誤修正のため元へ戻した。合成マスクでの
+        // personMask配置テストによりこの読み出し方向で正しいことを実測確認済み）。
         var gray = [UInt8](repeating: 0, count: contentWidth * contentHeight)
         for y in 0..<contentHeight {
-            let sourceRow = (size - 1 - (y + padY)) * size + padX
+            let sourceRow = (y + padY) * size + padX
             for x in 0..<contentWidth {
                 let value = mask[sourceRow + x]
                 gray[y * contentWidth + x] = UInt8(min(255, max(0, value * 255)))

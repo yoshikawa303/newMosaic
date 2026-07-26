@@ -1,5 +1,20 @@
 # Changelog
 
+## v0.0.00082 - 2026-07-26
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: 人物マスクの範囲が鏡映位置になる・矩形外までマスクが表示される不具合を修正した。合成マスクによる実測テストでマスク合成ロジック自体は正しいことを証明し、真因は表示側（`NSImage.draw(in:from:...)`がflippedビューで上下反転を補正しない既知の挙動）と特定。表示側へ`respectFlipped: true`を明示し、v0.0.00081で行ったモデル出力の反転読み出しは誤修正だったため元へ戻した（回帰テストを恒久追加）。
+- 追加: 人物/骨格レイヤを画像上で選択・移動できるようにした。枠線付近（±8px）をクリックすると選択（レイヤ一覧とも同期）され、そのままドラッグで移動できる。移動完了時にマスク・骨格ボーンも追従する（枠の内側はROI新規作成のため掴まない）。
+- 改善: マスク生成「対象形状」の認識精度を向上した。小さい選択範囲はVisionの実効解像度が不足するため短辺384px以上へ拡大してから推論し、顕著領域マスクはしきい値で二値化して対象物の形がはっきり出るようにした。
+
+■更新履歴
+
+- `AnimeSegmenter.characterMask`の読み出し行方向を元（行0=上）へ復元。`Tests/MosaicCoreTests/AnimeSegmenterPlacementTests.swift`（`personMask`の配置・制限の回帰テスト）を新規追加（74件目）。
+- `ImageCanvasView.drawDetectionLayers`のマスク描画を`draw(in:from:operation:fraction:respectFlipped:hints:)`へ変更。
+- `ImageCanvasView`に`DetectionMoveState`/`detectionLayerEdgeHit`/`onDetectionLayerSelected`/`onDetectionLayerMoved`を追加。コントローラ側で`selectDetectionLayerInList`/`applyDetectionLayerMove`（`translatedMask`によるマスク平行移動、ボーン・関節点の平行移動）を実装。
+- `RegionForegroundSegmentEngine`: クロップ短辺が384px未満なら整数倍拡大（`upscaled`）してからVisionへ入力。`saliencyMask`に`CIColorThreshold`（0.35）による二値化を追加。
+
 ## v0.0.00081 - 2026-07-26
 
 ■更新履歴（Readme / ChangeLog 用）
