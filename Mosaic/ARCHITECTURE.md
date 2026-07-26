@@ -235,6 +235,15 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **モザイク詳細設定の左マージン再修正**: `styleGrid`（NSGridView）は他のinspectorRow系の行と異なり内容から一意な幅が決まらず、親の`content`スタック（`alignment = .leading`だが`leadingAnchor`/`trailingAnchor`をdocumentへ両端固定しているため、intrinsicContentSizeが不定なビューは伸縮してしまう）内で幅いっぱいに引き伸ばされていたのが真因。`styleGrid.widthAnchor.constraint(lessThanOrEqualToConstant: 362)`（ラベル78+間隔8+スライダー220+間隔8+数値48の想定最大値）を追加して解消。
 - **ライブラリの拡大縮小アイコン無効化**: `thumbSmallerButton`/`thumbLargerButton`をインスタンスプロパティ化し、`updateLibraryModeVisibility()`で`libraryViewMode == .thumbnailGrid`のときのみ有効化（テキスト/サムネイルリスト表示では意味を持たないため）。
 
+## 5.23 コードレビュー由来の品質改善（2026-07-25 v0.0.00077〜）
+
+- **`LibraryEngine`の並行アクセス安全化**: `loadItems()`→変更→`saveItems()`というread-modify-writeパターンに排他制御が無く、一括処理のバックグラウンドTaskとメインアクター側の単発保存（ROI保存・削除等）が同一インスタンスへ並行アクセスすると、後勝ちの`saveItems`で一方の更新が消えるTOCTOU競合があった（コードレビューで検出）。直列`DispatchQueue`を追加し、全mutatingメソッド（`importOriginal`/`saveProcessedImage`/`deleteItems`/`importLinked`/`relink`/`repairBrokenLinks`）をこのキュー上で実行するよう変更。キュー内から再度キューへ同期投入するとデッドロックするため、内部専用の`loadItemsUnsynchronized()`を分離した。`HistoryEngine.append`・`LearningEngine.record`（`appendToFile`の`seekToEnd()+write()`が非アトミック）にも同種の排他制御を追加。
+- **`ImageCanvasView`のジェスチャー状態残留バグ**: `mouseDown()`が直前の未完了ジェスチャー（ウィンドウがキーを失う等でmouseUpを受け取れず中断したドラッグ）の状態をクリアしておらず、次のドラッグが古い状態を引き継いで別のROIを誤操作しうる不具合があった。`mouseDown()`冒頭で全ジェスチャー状態（`vertexDragState`/`rotationState`/`resizeState`/`moveState`/`groupMoveState`/`dragStart`/`dragCurrent`）を明示的にクリアするよう修正。
+- **`MosaicEngine`の`CIEdges`クランプ順序**: `.edgeBlur`/`.unsharpEdges`の`edges`生成で、`CIEdges`等の近傍サンプリングフィルタを`clampedToExtent()`より前に適用しており、画像外周で透明領域との境界を偽エッジとして検出していた（`blurred`側は正しい順序）。`blurred`と同じ「clamp→filter」の順序へ統一。
+- **`VisionPersonSegmentEngine`のフォールバック統一**: Vision実行を`try`（例外伝播）から`try?`へ変更し、`ForegroundSegmentEngine`/`RegionForegroundSegmentEngine`と同じ「失敗時はShapeSegmentEngineへフォールバック」という挙動に統一。
+- **`MosaicStyle`のSendable対応・`NormalizedRect`のゼロ除算ガード・`patternImageCache`のLRU化・`AppSettings.persistNow()`のエラーログ・`outlineView(child:ofItem:)`のフォールバック安全化・`setWorkingImage`のforce-unwrap除去・`AnimePoseEstimator`の出力名不一致検知ログ**: いずれも小規模な堅牢性向上。詳細は `Docs/QC/CodeReview/QC_CodeReview_v0.0.00077.md` を参照。
+- **見送った指摘（今後の対応候補）**: 6つのONNX推論クラスが個別に`ORTEnv`を生成している点（共有Env化は範囲が大きく別回で対応）、`AnimeSegmenter`の出力行方向が実測未検証な点、ONNX系検出器3クラスへのログ未追加、`importLinked`のO(n²)、`performLibraryAutoSave`/`exportConfirmed`のメインスレッド同期IO。いずれも詳細は上記QC記録を参照。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

@@ -14,7 +14,16 @@ public struct NormalizedRect: Codable, Equatable, Sendable {
         self.height = height
     }
 
+    /// `imageSize`の縦横いずれかが0以下の場合はゼロ除算でNaN/Infが生じるため、
+    /// 空の矩形（0,0,0,0）を返す（コードレビューで検出）。
     public init(_ rect: CGRect, imageSize: CGSize) {
+        guard imageSize.width > 0, imageSize.height > 0 else {
+            self.x = 0
+            self.y = 0
+            self.width = 0
+            self.height = 0
+            return
+        }
         self.x = rect.minX / imageSize.width
         self.y = rect.minY / imageSize.height
         self.width = rect.width / imageSize.width

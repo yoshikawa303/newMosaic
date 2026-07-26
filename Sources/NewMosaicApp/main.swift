@@ -726,6 +726,11 @@ final class MosaicWindowController: NSObject {
     private var customPatternImage: CGImage?
     private var customPatternImageIdentifier: String?
     private var patternImageCache: [String: CGImage] = [:]
+    /// `patternImageCache`のLRU順（末尾が最新）。ファイル選択のたびに新規UUIDでキャッシュへ
+    /// 追加され続け際限なく増える不具合があったため、上限を超えたら古いものから破棄する
+    /// （コードレビューで検出）。
+    private var patternImageCacheOrder: [String] = []
+    private static let patternImageCacheLimit = 40
     private var ungroupedLayers: [LayerLeaf] = [
         LayerLeaf(kind: .image, isVisible: true),
         LayerLeaf(kind: .roi, isVisible: true)
@@ -2270,6 +2275,17 @@ final class MosaicWindowController: NSObject {
         )
     }
 
+    /// `patternImageCache`へ登録し、上限を超えたらLRU順で古いものから破棄する。
+    private func setPatternImageCache(_ image: CGImage, for identifier: String) {
+        patternImageCache[identifier] = image
+        patternImageCacheOrder.removeAll { $0 == identifier }
+        patternImageCacheOrder.append(identifier)
+        while patternImageCacheOrder.count > Self.patternImageCacheLimit {
+            let oldest = patternImageCacheOrder.removeFirst()
+            patternImageCache.removeValue(forKey: oldest)
+        }
+    }
+
     /// 同梱素材をパターン画像として選択する。
     @objc private func selectBuiltinOverlay(_ sender: NSMenuItem) {
         guard let identifier = sender.representedObject as? String,
@@ -2277,7 +2293,7 @@ final class MosaicWindowController: NSObject {
               let asset = OverlayAssetCatalog.assets.first(where: { $0.identifier == identifier }) else { return }
         customPatternImage = image
         customPatternImageIdentifier = identifier
-        patternImageCache[identifier] = image
+        setPatternImageCache(image, for: identifier)
         stylePatternImageLabel.stringValue = asset.displayName
         updateCustomPatternPreview(image)
         mosaicStyleChanged()
@@ -2293,7 +2309,7 @@ final class MosaicWindowController: NSObject {
             customPatternImage = loaded.cgImage
             let identifier = UUID().uuidString
             customPatternImageIdentifier = identifier
-            patternImageCache[identifier] = loaded.cgImage
+            setPatternImageCache(loaded.cgImage, for: identifier)
             try libraryEngine.savePatternImage(loaded.cgImage, identifier: identifier)
             stylePatternImageLabel.stringValue = url.lastPathComponent
             updateCustomPatternPreview(loaded.cgImage)
@@ -2307,7 +2323,7 @@ final class MosaicWindowController: NSObject {
         if let cached = patternImageCache[identifier] { return cached }
         if identifier.hasPrefix(OverlayAssetCatalog.identifierPrefix) {
             guard let image = OverlayAssetCatalog.image(for: identifier) else { return nil }
-            patternImageCache[identifier] = image
+            setPatternImageCache(image, for: identifier)
             return image
         }
         let url: URL?
@@ -2322,7 +2338,7 @@ final class MosaicWindowController: NSObject {
             url = libraryEngine.patternURL(identifier: identifier)
         }
         guard let url, let loaded = try? imageLoader.loadImage(from: url) else { return nil }
-        patternImageCache[identifier] = loaded.cgImage
+        setPatternImageCache(loaded.cgImage, for: identifier)
         return loaded.cgImage
     }
 
@@ -4205,8 +4221,16 @@ final class MosaicWindowController: NSObject {
 
         if let saved = imageEditStates[item.id] {
             renderedImage = saved.renderedImage
-            mosaicPreviewCheckbox.state = (saved.mosaicPreviewOn && saved.renderedImage != nil) ? .on : .off
-            canvas.setImage(mosaicPreviewCheckbox.state == .on ? saved.renderedImage! : image)
+            // 「プレビューON」と「renderedImageあり」という不変条件を、直後のforce-unwrapが
+            // 別の行の判定に依存する形で表現しており、将来の変更で崩れやすい書き方だった
+            // （コードレビューで検出）。if letで両方を同時に扱う形へ変更。
+            if saved.mosaicPreviewOn, let rendered = saved.renderedImage {
+                mosaicPreviewCheckbox.state = .on
+                canvas.setImage(rendered)
+            } else {
+                mosaicPreviewCheckbox.state = .off
+                canvas.setImage(image)
+            }
             canvas.rois = saved.rois
             canvas.personLayerRects = saved.personLayerRects
             canvas.personLayerMasks = saved.personLayerMasks
@@ -5482,7 +5506,11 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
             if index < roiListGroups.count { return roiListGroups[index] }
             return ungroupedROIEntries[index - roiListGroups.count]
         }
-        return ungroupedLayers[0]
+        // 現在の isItemExpandable() の実装では到達しないはずの分岐だが、`ungroupedLayers[0]` への
+        // 固定インデックスアクセスは配列が空の場合にクラッシュしうる脆い書き方だった
+        // （コードレビューで検出）。空でも安全なプレースホルダへフォールバックする。
+        assertionFailure("outlineView(child:ofItem:) reached unexpected fallback for item: \(item ?? "nil")")
+        return ungroupedLayers.first ?? LayerLeaf(kind: .image, isVisible: false)
     }
 
     func outlineView(_ outlineView: NSOutlineView, viewFor tableColumn: NSTableColumn?, item: Any) -> NSView? {
@@ -6023,6 +6051,17 @@ final class ImageCanvasView: NSView {
 
     override func mouseDown(with event: NSEvent) {
         guard image != nil else { return }
+        // 直前のドラッグ操作がmouseUpを受け取らないまま中断した場合（ウィンドウがキーを失う、
+        // シートが割り込む等）、古いジェスチャー状態が残ってしまい、次のドラッグを乗っ取って
+        // 別のROIを意図せず移動・リサイズ・回転させる不具合があった（コードレビューで検出）。
+        // 新しいジェスチャーを判定する前に必ず全状態をクリアする。
+        vertexDragState = nil
+        rotationState = nil
+        resizeState = nil
+        moveState = nil
+        groupMoveState = nil
+        dragStart = nil
+        dragCurrent = nil
         let point = convert(event.locationInWindow, from: nil)
 
         // Option+クリック: 多角形の頂点追加（辺上）/削除（頂点上）
@@ -6814,16 +6853,22 @@ final class AppSettings {
     func persistNow() {
         saveWorkItem?.cancel()
         saveWorkItem = nil
-        guard JSONSerialization.isValidJSONObject(values),
-              let data = try? JSONSerialization.data(
-                  withJSONObject: values,
-                  options: [.prettyPrinted, .sortedKeys]
-              ) else { return }
-        try? FileManager.default.createDirectory(
-            at: fileURL.deletingLastPathComponent(),
-            withIntermediateDirectories: true
-        )
-        try? data.write(to: fileURL, options: .atomic)
+        guard JSONSerialization.isValidJSONObject(values) else {
+            AppLog.ui.error("AppSettings.persistNow: valuesがJSONとして不正なため保存を中止しました")
+            return
+        }
+        do {
+            let data = try JSONSerialization.data(withJSONObject: values, options: [.prettyPrinted, .sortedKeys])
+            try FileManager.default.createDirectory(
+                at: fileURL.deletingLastPathComponent(),
+                withIntermediateDirectories: true
+            )
+            try data.write(to: fileURL, options: .atomic)
+        } catch {
+            // 全設定変更（初期化・分割位置の自動保存・プロジェクト読込等）がここを経由するため、
+            // 失敗を無言のtry?で握りつぶさずログへ残す（コードレビューで検出）。
+            AppLog.ui.error("AppSettings.persistNow failed: \(error.localizedDescription, privacy: .public)")
+        }
     }
 
     /// 現在の設定ファイルの場所（ステータス表示・診断用）。

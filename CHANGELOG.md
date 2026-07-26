@@ -1,5 +1,26 @@
 # Changelog
 
+## v0.0.00077 - 2026-07-25
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 品質改善: コードベース全体（MosaicCore・アプリ本体）のコードレビューを実施し、複数のバグ・潜在的な不具合を修正した。詳細は `Docs/QC/CodeReview/QC_CodeReview_v0.0.00077.md` を参照。
+- バグ修正: 画像上でROIをドラッグ操作中に別の操作へ割り込まれた場合、次のドラッグで別のROIを意図せず移動・変形させてしまうことがある不具合を修正した。
+- バグ修正: ライブラリの一括処理とROI保存等が同時に走った場合に、一方の更新が消えてしまう可能性があった競合状態を修正した。
+- バグ修正: 「線・エッジぼかし」「アンシャープ（エッジ強調）」パターンで、画像の外周付近にエッジ検出の誤りが生じうる不具合を修正した。
+- バグ修正: 人物セグメンテーション方式で、Vision処理が失敗した場合にモザイク処理全体が失敗してしまう不具合を修正し、他の検出方式と同様に図形ベースへ自動的に切り替わるようにした。
+- 改善: パターン画像のキャッシュが際限なく増え続けないよう上限を設けた。
+- 改善: 設定の保存に失敗した場合、これまでは無言で失敗していたが、デバッグログへ記録するようにした。
+
+■更新履歴
+
+- コードレビュー（5並列エージェントによる初回スキャン→実コード検証→修正→再検証の4パス）で計19件の指摘を検出、14件を修正、5件は設計変更を伴うため理由を明記して見送った。詳細一覧は `Docs/QC/CodeReview/QC_CodeReview_v0.0.00077.md`。
+- `LibraryEngine`に直列`DispatchQueue`を導入し、全mutatingメソッド（`importOriginal`/`saveProcessedImage`/`deleteItems`/`importLinked`/`relink`/`repairBrokenLinks`）のread-modify-writeを排他制御。`HistoryEngine.append`/`LearningEngine.record`も同様に排他制御を追加。
+- `MosaicEngine.makeFillLayer`の`.edgeBlur`/`.unsharpEdges`で`CIEdges`適用前のクランプ順序を修正。`SegmentEngine.VisionPersonSegmentEngine`のVision実行を`try?`へ統一。
+- `MosaicStyle`へ`@unchecked Sendable`を付与、`NormalizedRect.init(_:imageSize:)`にゼロ除算ガードを追加。
+- `main.swift`: `ImageCanvasView.mouseDown()`でジェスチャー状態を明示クリア、`patternImageCache`のLRU化、`AppSettings.persistNow()`のエラーログ追加、`outlineView(child:ofItem:)`のフォールバック安全化、`setWorkingImage`のforce-unwrap除去。
+- `AnimePoseEstimator`にUnified Loggingを追加し、モデル出力名の不一致時に警告を記録。
+
 ## v0.0.00076 - 2026-07-25
 
 ■更新履歴（Readme / ChangeLog 用）

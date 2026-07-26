@@ -238,7 +238,7 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         var localMask = Self.foregroundMask(in: crop)
         // 前景がクロップのほぼ全面を覆う場合（ROI周辺が人物で埋まっていて対象物を分離できていない）
         // や前景が得られない場合は、顕著領域マスクでROI内の対象物の形状を取る
-        if localMask == nil || coverageRatio(of: localMask!) > 0.85 {
+        if localMask.map({ coverageRatio(of: $0) > 0.85 }) ?? true {
             localMask = Self.saliencyMask(in: crop) ?? localMask
         }
         guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
@@ -327,7 +327,10 @@ public final class VisionPersonSegmentEngine: Segmenting {
         request.qualityLevel = .balanced
         request.outputPixelFormat = kCVPixelFormatType_OneComponent8
         let handler = VNImageRequestHandler(cgImage: image, options: [:])
-        try handler.perform([request])
+        // Vision実行時エラーもshape基準へフォールバックする（ForegroundSegmentEngine/
+        // RegionForegroundSegmentEngineと同じ挙動に統一。従来はここだけtryで例外を伝播させ、
+        // applyMosaic全体が失敗していた）。
+        try? handler.perform([request])
 
         guard let observation = request.results?.first else {
             return try fallback.createMasks(for: rois, in: image, extent: extent)

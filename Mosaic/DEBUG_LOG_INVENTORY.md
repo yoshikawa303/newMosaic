@@ -19,6 +19,14 @@
 - 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Detection"' --last 10m`
 - 削除: アプリ独自ファイルは作成しない。OSのUnified Logging保持方針に従う。
 
+## アニメ骨格検出診断（v0.0.00077〜）
+
+- 経路: macOS Unified Logging（subsystem `com.yoshikawa.newMosaic`、category `AnimePose`。上記と同一subsystem）。
+- 対象: `AnimePoseEstimator`のモデル出力名（`simcc_x`/`simcc_y`）が想定と一致せず、出力順（first/last）依存のフォールバックを使った場合の警告のみ（コードレビューで検出した潜在的なX/Y座標入れ替わりリスクへの対応）。
+- 内容: 警告メッセージのみ。座標・画像内容は記録しない。
+- 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "AnimePose"' --last 10m`
+- 削除: アプリ独自ファイルは作成しない。OSのUnified Logging保持方針に従う。
+
 ## アプリ側イベントログ・デバッグログ画面（2026-07-25〜）
 
 - 経路: macOS Unified Logging。`Sources/NewMosaicApp/main.swift` の `enum AppLog`（subsystem

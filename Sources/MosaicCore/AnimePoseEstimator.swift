@@ -1,6 +1,7 @@
 import CoreGraphics
 import Foundation
 import OnnxRuntimeBindings
+import OSLog
 
 /// アニメ・イラスト向けの骨格（姿勢）検出器。
 /// モデル: yzd-v/DWPose dw-ll_ucoco_384.onnx（Apache-2.0, RTMPose系SimCC, 入力288x384,
@@ -8,6 +9,8 @@ import OnnxRuntimeBindings
 /// ControlNet系ワークフローで知られており、イラスト/漫画の骨格レイヤ未対応（残件）の解消に採用。
 /// 人物ごとにクロップして推論するトップダウン方式。完全ローカル実行。
 public final class AnimePoseEstimator {
+    /// DetectionPipeline.swiftのVision検出診断と同一subsystemに統一（画像内容・座標は記録しない）。
+    static let logger = Logger(subsystem: "com.yoshikawa.newMosaic", category: "AnimePose")
     static let inputWidth = 288
     static let inputHeight = 384
     static let keypointCount = 133
@@ -169,6 +172,14 @@ public final class AnimePoseEstimator {
             outputNames: Set(outputNames),
             runOptions: nil
         )
+        // モデル出力名が"simcc_x"/"simcc_y"と一致しない場合、出力順（first/last）へ暗黙依存した
+        // フォールバックとなり、出力順が入れ替わっているとX/Yが交換され全キーポイントが誤検出に
+        // なりうる（コードレビューで検出）。既知の名前と一致しない場合はログを残す。
+        if outputs["simcc_x"] == nil || outputs["simcc_y"] == nil {
+            AnimePoseEstimator.logger.error(
+                "simcc_x/simcc_y という名前の出力が見つからず、出力順（first/last）に依存したフォールバックを使用しています。モデルの出力順が変更されているとX/Y座標が入れ替わる可能性があります。"
+            )
+        }
         guard let xValue = outputs["simcc_x"] ?? outputs[outputNames.first ?? ""],
               let yValue = outputs["simcc_y"] ?? outputs[outputNames.last ?? ""] else { return [] }
         let xData = try xValue.tensorData() as Data

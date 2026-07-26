@@ -85,6 +85,10 @@ public final class LearningEngine {
     private let decoder: JSONDecoder
     private var cachedSamples: [ROITrainingSample]?
     private var cachedStats: LearningStats?
+    // record()内のappendToFile()（seekToEnd()+write()の非アトミックな2ステップ）と
+    // cachedSamples/cachedStatsへの書き換えが競合しないよう、直列キューで排他制御する
+    // （コードレビューで検出。HistoryEngineと同種の不具合）。
+    private let syncQueue = DispatchQueue(label: "jp.yoshikawa303.newMosaic.LearningEngine.sync")
 
     public init(rootURL: URL) {
         self.rootURL = rootURL
@@ -125,11 +129,13 @@ public final class LearningEngine {
         }
         guard !newSamples.isEmpty else { return 0 }
 
-        let existing = try loadSamples()
-        try appendToFile(newSamples)
-        cachedSamples = existing + newSamples
-        try rebuildStats()
-        return newSamples.count
+        return try syncQueue.sync {
+            let existing = try loadSamplesUnsynchronized()
+            try appendToFile(newSamples)
+            cachedSamples = existing + newSamples
+            try rebuildStats()
+            return newSamples.count
+        }
     }
 
     private func makeSample(
@@ -215,8 +221,9 @@ public final class LearningEngine {
 
     // MARK: - 統計
 
+    /// `syncQueue`内からのみ呼ぶこと（record()内から呼ばれるため）。
     private func rebuildStats() throws {
-        let samples = try loadSamples()
+        let samples = try loadSamplesUnsynchronized()
         var categories: [String: LearningCategoryStats] = [:]
         for sample in samples where sample.isPositive {
             var stats = categories[sample.category.rawValue] ?? .empty(gridCells: Self.gridCells)
@@ -243,6 +250,11 @@ public final class LearningEngine {
     }
 
     public func loadSamples() throws -> [ROITrainingSample] {
+        try syncQueue.sync { try loadSamplesUnsynchronized() }
+    }
+
+    /// `syncQueue`内からのみ呼ぶこと。
+    private func loadSamplesUnsynchronized() throws -> [ROITrainingSample] {
         if let cachedSamples { return cachedSamples }
         guard FileManager.default.fileExists(atPath: samplesURL.path) else {
             cachedSamples = []
@@ -257,10 +269,12 @@ public final class LearningEngine {
     }
 
     public func loadStats() -> LearningStats? {
-        if let cachedStats { return cachedStats }
-        guard let data = try? Data(contentsOf: statsURL) else { return nil }
-        cachedStats = try? decoder.decode(LearningStats.self, from: data)
-        return cachedStats
+        syncQueue.sync {
+            if let cachedStats { return cachedStats }
+            guard let data = try? Data(contentsOf: statsURL) else { return nil }
+            cachedStats = try? decoder.decode(LearningStats.self, from: data)
+            return cachedStats
+        }
     }
 
     // MARK: - 推論（候補の信頼度調整と追加提案）

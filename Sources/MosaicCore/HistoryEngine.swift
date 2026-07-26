@@ -3,6 +3,10 @@ import Foundation
 public final class HistoryEngine {
     private let encoder: JSONEncoder
     private let decoder: JSONDecoder
+    // seekToEnd()→write()は2ステップに分かれておりアトミックでないため、複数スレッドから
+    // 同時にappendすると書き込み位置が重なりログ行が破損しうる（コードレビューで検出）。
+    // 直列キューで排他制御する。
+    private let syncQueue = DispatchQueue(label: "jp.yoshikawa303.newMosaic.HistoryEngine.sync")
 
     public init() {
         self.encoder = JSONEncoder()
@@ -13,17 +17,19 @@ public final class HistoryEngine {
     }
 
     public func append(_ entry: MosaicHistoryEntry, to url: URL) throws {
-        let directory = url.deletingLastPathComponent()
-        try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
-        let data = try encoder.encode(entry)
-        if !FileManager.default.fileExists(atPath: url.path) {
-            FileManager.default.createFile(atPath: url.path, contents: nil)
+        try syncQueue.sync {
+            let directory = url.deletingLastPathComponent()
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            let data = try encoder.encode(entry)
+            if !FileManager.default.fileExists(atPath: url.path) {
+                FileManager.default.createFile(atPath: url.path, contents: nil)
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            defer { try? handle.close() }
+            try handle.seekToEnd()
+            try handle.write(contentsOf: data)
+            try handle.write(contentsOf: Data("\n".utf8))
         }
-        let handle = try FileHandle(forWritingTo: url)
-        defer { try? handle.close() }
-        try handle.seekToEnd()
-        try handle.write(contentsOf: data)
-        try handle.write(contentsOf: Data("\n".utf8))
     }
 
     public func readEntries(from url: URL) throws -> [MosaicHistoryEntry] {

@@ -59,7 +59,9 @@ public enum MosaicFillPattern: String, Codable, CaseIterable, Hashable, Sendable
 }
 
 /// モザイク描画のスタイル設定。塗りつぶしパターン（②）と共通パラメータ（①）の組み合わせ。
-public struct MosaicStyle {
+// CGImageは不変（一度生成した内容が変化しない）値のため、参照型でもスレッド間の共有は安全。
+// Swift 6の並行性チェック向けに@unchecked Sendableを明示する（コードレビューで指摘）。
+public struct MosaicStyle: @unchecked Sendable {
     public var pattern: MosaicFillPattern
     /// 透明度（0.05〜1.0。1.0で完全塗りつぶし、下げるほど元画像が透ける）
     public var opacity: Double
@@ -403,9 +405,12 @@ public final class MosaicEngine {
                 .clampedToExtent()
                 .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: max(1, style.blockScale / 2)])
                 .cropped(to: extent)
+            // CIEdges等の近傍サンプリングフィルタは、適用前にclampedToExtent()しておかないと
+            // 画像外周で透明領域との境界を偽エッジとして検出してしまう（blurredと同じ順序に統一。
+            // コードレビューで検出）。
             let edges = original
-                .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 10])
                 .clampedToExtent()
+                .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 10])
                 .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: max(1, style.blockScale / 8)])
                 .cropped(to: extent)
             fill = blurred.applyingFilter("CIBlendWithMask", parameters: [
@@ -421,9 +426,12 @@ public final class MosaicEngine {
                     kCIInputIntensityKey: 2.5
                 ])
                 .cropped(to: extent)
+            // CIEdges等の近傍サンプリングフィルタは、適用前にclampedToExtent()しておかないと
+            // 画像外周で透明領域との境界を偽エッジとして検出してしまう（blurredと同じ順序に統一。
+            // コードレビューで検出）。
             let edges = original
-                .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 10])
                 .clampedToExtent()
+                .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 10])
                 .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: max(1, style.blockScale / 8)])
                 .cropped(to: extent)
             fill = sharpened.applyingFilter("CIBlendWithMask", parameters: [

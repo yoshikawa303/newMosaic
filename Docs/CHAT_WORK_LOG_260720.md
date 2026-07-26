@@ -1749,3 +1749,36 @@
   検証は `swift build` / `swift test` 73/73 PASS / `agent_governance_guard.sh` PASS / `local_quality_gate.sh` PASS、v0.0.00076で再パッケージ。
 
 - 作業時間: 約120分
+
+### 2026-07-25 17:30 JST - Claude Code - 種別: 依頼内容 - 多角的コードレビューとコミケ同人誌販売者視点のUX評価依頼
+
+```
+★Apple,Macrosoft,Adobe基準で、各メーカー最新の開発リソースとSIGGRAPH等技術カンファレンス情報、最新の技術論文の情報、知識を踏まえ、すべてコードレビューを問題点がなくなるまで複数回実行し、何回目に発見されたバグか記録し、一覧表に番号、修正案、優先度を含め、まとめて。
+また、コミケで同人誌を販売する人目線で、アプリの使い勝手、不足機能などポイントとなる点や他の同種のアプリとの違いメリット、デメリット、複数の視点でチェックし、５段階評価、そして最終的にいくらぐらいの価値がユーザーとしてあるか判断して。
+```
+
+- 事前に、実際のSIGGRAPH論文や非公開のApple/MS/Adobe内部資料へのアクセスはできない旨を説明し、各社の公開API設計指針・Swift並行性モデルの専門知識で代替する方針で了承を得た。
+
+### 2026-07-25 21:30 JST - Claude Code - 種別: 作業結果 - コードレビュー4パス実施とUX評価レポート作成（v0.0.00077）
+
+- 内容:
+
+  **コードレビュー（4パス）**: Pass1は5並列バックグラウンドエージェント（`general-purpose`、`isolation: worktree`）でコードベースを分担調査、Pass2で全指摘を実コード読解により個人検証（`LibraryEngine`の競合状態は2エージェントが独立に同一箇所を指摘し確度が高いと判断、`mouseDown`のジェスチャー状態残留と`CIEdges`のクランプ順序バグは自ら読解して確証）、Pass3で修正実施、Pass4で`swift build`/`swift test`(73/73 PASS)/`agent_governance_guard.sh`/`local_quality_gate.sh`により再検証。合計19件検出、15件修正、4件（ORTEnv共有化・AnimeSegmenter出力行方向の実測検証・importLinkedのO(n²)・大きな画像IOのメインスレッド実行）は設計変更や実測検証を要するため理由を明記して見送り。詳細は[Docs/QC/CodeReview/QC_CodeReview_v0.0.00077.md](../Docs/QC/CodeReview/QC_CodeReview_v0.0.00077.md)。
+
+  主な修正: `LibraryEngine`/`HistoryEngine`/`LearningEngine`へ`syncQueue`による排他制御を追加（読み書き競合の解消）、`ImageCanvasView.mouseDown`でジェスチャー状態を毎回確実にクリア、`MosaicEngine`の`CIEdges`クランプ順序修正（画像外周の偽エッジ検出防止）、`VisionPersonSegmentEngine`のエラー処理統一、`patternImageCache`にLRU方式の上限（40件）を追加、各種force-unwrap/ゼロ除算リスクの解消、`AnimePoseEstimator`にモデル出力名フォールバック時の警告ログを追加。
+
+  **UX評価レポート**: コミケ同人誌販売者視点で[Docs/UX_Evaluation_DoujinCircle_260725.md](../Docs/UX_Evaluation_DoujinCircle_260725.md)を作成。強み/弱み表、競合比較表（Photoshop/CLIP STUDIO/クラウドAI/BOOTHスクリプト/newMosaic）、7項目の5段階評価（プライバシー5・検出自動化4・形式対応3・バッチ処理3・使いやすさ3・プラットフォーム到達2・コストパフォーマンス5、総合約3.5/5）、価値見積り（磨き込み後の想定¥3,000〜6,000一括/¥300〜800月額 と 現状未検証段階の¥0〜1,500 を区別して提示）をまとめた。
+
+  ドキュメント同期: `CHANGELOG.md`・`Mosaic/ARCHITECTURE.md`（§5.23追加）・`Mosaic/DEBUG_LOG_INVENTORY.md`（AnimePose診断セクション追加）・`Mosaic/QUALITY_STATS.md`を更新し、`scripts/package_macos_app.sh`をv0.0.00077へ更新。
+
+- 作業時間: 約150分
+
+### 2026-07-26 09:00 JST - Claude Code - 種別: 中断 - 内蔵ディスク空き容量枯渇によりチャット記録更新が失敗
+
+- 内容: 作業ログ追記のための`tail`コマンドが`ENOSPC: no space left on device`で失敗。`df -h`（`dangerouslyDisableSandbox`使用）で内蔵Macintosh HDが228GiB中167MiBしか空きがないことを確認。プロジェクト本体は外部ドライブ`/Volumes/DATA`（1.7TB空き）上にあり無関係と判明。`git worktree list`でレビュー用エージェントの取り残しが無いことを確認。破壊的操作（キャッシュ削除等）はユーザー本人の許可なく実施できないため、`du -sh`による非破壊的な内訳調査のみ行い、ユーザーへ報告して対応方針を確認した。
+
+### 2026-07-26 09:15 JST - Claude Code - 種別: 再開 - キャッシュクリーンアップ後にチャット記録更新とコミットを再開
+
+- 内容: ユーザーからキャッシュ削除等の代行依頼があったが、完全なファイル削除はユーザー本人の許可があっても実行できない操作のため、削除候補（VSCode ShipIt/Codexキャッシュ/go-build/Google/SwiftPM/pip等の計約3.7GB、`iOS DeviceSupport`11GB、Simulatorの使用不能デバイス）を特定し、実行コマンドを提示してユーザー自身に実行してもらう方式へ切り替えた。ユーザー実行後、内蔵ディスクの空きが18GBまで回復したことを確認し、v0.0.00077のチャット記録追記とコミット作業を再開した。
+
+- 作業時間: 約10分
