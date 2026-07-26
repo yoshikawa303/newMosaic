@@ -470,8 +470,8 @@ private enum LayerKind: Equatable {
         switch self {
         case .image: return "画像"
         case .roi: return "モザイク対象"
-        case .person(let index): return "人物検出\(index + 1)"
-        case .pose(let index): return "骨格検出\(index + 1)"
+        case .person(let index): return "人物\(index + 1)"
+        case .pose(let index): return "骨格\(index + 1)"
         }
     }
 
@@ -561,6 +561,7 @@ private final class LayerRowView: NSTableCellView {
         checkbox.action = #selector(handleToggle)
         label.translatesAutoresizingMaskIntoConstraints = false
         label.font = MosaicWindowController.scaledFont(12)
+        label.alignment = .left
         label.lineBreakMode = .byTruncatingTail
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(checkbox)
@@ -667,6 +668,14 @@ final class MosaicWindowController: NSObject {
     private let undoButton = NSButton(title: "元に戻す", target: nil, action: nil)
     private let redoButton = NSButton(title: "やり直す", target: nil, action: nil)
     private let zoomLabel = NSTextField(labelWithString: "100%")
+    /// ツールバーのモード切替（編集モード/範囲選択モード）。既定は編集モード（従来通りの挙動）。
+    /// Option(⌥)キーを押しながらのドラッグで、そのドラッグ限定に一時的にモードを入れ替えられる。
+    private let canvasModeControl = NSSegmentedControl(
+        labels: ["", ""],
+        trackingMode: .selectOne,
+        target: nil,
+        action: nil
+    )
     private let shapeControl = NSSegmentedControl(
         labels: ["矩形", "楕円", "多角形"],
         trackingMode: .selectOne,
@@ -674,8 +683,8 @@ final class MosaicWindowController: NSObject {
         action: nil
     )
     // レイヤパネル先頭の表示トグル（ツールバーから移設）
-    private let personLayerCheckbox = NSButton(checkboxWithTitle: "人物検出", target: nil, action: nil)
-    private let poseLayerCheckbox = NSButton(checkboxWithTitle: "骨格検出", target: nil, action: nil)
+    private let personLayerCheckbox = NSButton(checkboxWithTitle: "人物", target: nil, action: nil)
+    private let poseLayerCheckbox = NSButton(checkboxWithTitle: "骨格", target: nil, action: nil)
     private let roiLayerCheckbox = NSButton(checkboxWithTitle: "ROI", target: nil, action: nil)
     /// 全レイヤ一括の輪郭/タグ表示ON/OFF（旧: レイヤ行毎の個別設定から変更）。
     private let layerOutlineAllCheckbox = NSButton(checkboxWithTitle: "輪郭", target: nil, action: nil)
@@ -693,7 +702,7 @@ final class MosaicWindowController: NSObject {
     private let ungroupButton = NSButton(title: "グループ解除", target: nil, action: nil)
     private let autoGenerateCheckbox = NSButton(checkboxWithTitle: "自動候補生成", target: nil, action: nil)
     private let autoSaveCheckbox = NSButton(checkboxWithTitle: "自動保存", target: nil, action: nil)
-    private let mosaicPreviewCheckbox = NSButton(checkboxWithTitle: "モザイク表示", target: nil, action: nil)
+    private let mosaicPreviewCheckbox = NSButton(checkboxWithTitle: "モザイク", target: nil, action: nil)
     private let groinPositionSlider = NSSlider(value: 0.45, minValue: 0.2, maxValue: 0.8, target: nil, action: nil)
     private let groinPositionValueLabel = NSTextField(labelWithString: "45%")
     private static let groinPositionDefaultsKey = "GroinPositionRatio"
@@ -736,14 +745,12 @@ final class MosaicWindowController: NSObject {
         LayerLeaf(kind: .roi, isVisible: true)
     ]
     private var layerGroups: [LayerGroup] = []
-    private var layerGroupCounter = 0
     /// レイヤパネル「モザイク対象」配下のROI選択リスト（同一カテゴリ名は連番付き。フラット・全件）
     private var roiListEntries: [ROIListEntry] = []
     /// ROI選択リストのグループ（`MosaicROI.roiGroupName` 単位）。表示順に構築する。
     private var roiListGroups: [ROIListGroup] = []
     /// どのグループにも属さないROI選択リスト行（表示順）。
     private var ungroupedROIEntries: [ROIListEntry] = []
-    private var roiGroupCounter = 0
     private var roiListSignature: [String] = []
     private var isSyncingROISelection = false
     private var loadedImage: LoadedImage?
@@ -924,7 +931,7 @@ final class MosaicWindowController: NSObject {
                     key: "z", modifiers: [.command], isRecommended: true, action: #selector(performUndo)),
         AppShortcut(id: "performRedo", category: "編集", title: "やり直す",
                     key: "z", modifiers: [.command, .shift], isRecommended: true, action: #selector(performRedo)),
-        AppShortcut(id: "clearROIs", category: "編集", title: "選択範囲をすべて消去",
+        AppShortcut(id: "clearROIs", category: "編集", title: "レイヤ削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(clearROIs)),
         AppShortcut(id: "generateCandidates", category: "処理", title: "候補を生成",
                     key: "g", modifiers: [.command], isRecommended: true, action: #selector(generateCandidates)),
@@ -987,7 +994,8 @@ final class MosaicWindowController: NSObject {
         let pasteButton = shortcutToolbarButton("pasteImage", symbol: "doc.on.clipboard")
         let detectButton = shortcutToolbarButton("generateCandidates", symbol: "wand.and.stars")
         let applyButton = shortcutToolbarButton("applyMosaic", symbol: "checkerboard.rectangle")
-        let clearButton = shortcutToolbarButton("clearROIs", symbol: "trash")
+        // ライブラリの「選択画像を削除」（trashアイコン）と区別するため別アイコンにする。
+        let clearButton = shortcutToolbarButton("clearROIs", symbol: "rectangle.badge.minus")
         configureShortcutToolbarButton(undoButton, id: "performUndo", symbol: "arrow.uturn.backward")
         configureShortcutToolbarButton(redoButton, id: "performRedo", symbol: "arrow.uturn.forward")
         undoButton.keyEquivalent = "z"
@@ -1002,7 +1010,6 @@ final class MosaicWindowController: NSObject {
             symbol: "bolt.circle",
             helpOverride: "一括処理（未加工の画像を候補生成→適用→保存）"
         )
-        let reloadLibraryButton = shortcutToolbarButton("reloadLibraryFromButton", symbol: "arrow.clockwise")
         let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
         let zoomOutButton = shortcutToolbarButton("zoomOut", symbol: "minus.magnifyingglass")
         let zoomFitButton = shortcutToolbarButton("zoomToFit", symbol: "arrow.up.left.and.arrow.down.right")
@@ -1018,9 +1025,10 @@ final class MosaicWindowController: NSObject {
 
         let toolbar = NSStackView(views: [
             openButton, pasteButton, linkFolderButton, repairLinksButton, batchButton, makeToolbarSeparator(),
+            canvasModeControl, makeToolbarSeparator(),
             detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
-            saveButton, reloadLibraryButton, revealButton,
+            saveButton, revealButton,
             NSView(), makeToolbarSeparator(), zoomOutButton, zoomFitButton, zoomInButton, zoomLabel
         ])
         toolbar.orientation = .horizontal
@@ -1029,12 +1037,23 @@ final class MosaicWindowController: NSObject {
         toolbar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         toolbar.translatesAutoresizingMaskIntoConstraints = false
 
+        canvasModeControl.segmentStyle = .texturedRounded
+        canvasModeControl.setImage(NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: "編集モード"), forSegment: 0)
+        canvasModeControl.setImage(NSImage(systemSymbolName: "rectangle.dashed", accessibilityDescription: "範囲選択モード"), forSegment: 1)
+        canvasModeControl.setToolTip("編集モード（ドラッグでROIを新規作成。従来通り）", forSegment: 0)
+        canvasModeControl.setToolTip("範囲選択モード（ドラッグで複数ROIを一括選択。Option(⌥)キーで一時的に編集モードへ切替）", forSegment: 1)
+        canvasModeControl.selectedSegment = 0
+        canvasModeControl.target = self
+        canvasModeControl.action = #selector(canvasModeChanged)
+        canvasModeControl.toolTip = "画像上の操作モード（編集/範囲選択）"
+
         shapeControl.selectedSegment = 1
         shapeControl.toolTip = "新規または選択中のモザイク範囲の形状"
         applyScaledFont(shapeControl, size: 12)
         segmentEngineControl.removeAllItems()
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
-        segmentEngineControl.selectItem(at: 0)
+        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .regionForeground) ?? 0
+        segmentEngineControl.selectItem(at: defaultEngineIndex)
         segmentEngineControl.toolTip = "選択範囲から実際の処理マスクを生成する方式"
         applyScaledFont(segmentEngineControl, size: 13)
 
@@ -1231,6 +1250,9 @@ final class MosaicWindowController: NSObject {
             }
             self.loadMosaicStyleForSelection(roi)
             self.syncROIListSelectionFromCanvas()
+        }
+        canvas.onROIGroupSelectionByMarquee = { [weak self] ids in
+            self?.syncROIListSelectionFromCanvasGroup(ids)
         }
         canvas.onZoomChanged = { [weak self] zoom in
             self?.zoomLabel.stringValue = "\(Int((zoom * 100).rounded()))%"
@@ -1854,6 +1876,12 @@ final class MosaicWindowController: NSObject {
 
     @objc private func patternTileClicked(_ sender: NSButton) {
         stylePatternPopUp.selectItem(at: sender.tag)
+        // パターン切替時、直前のパターン用に調整していた色付け等の詳細設定を
+        // そのまま引き継ぐと「ノイズに切替えたらカラーのままだった」のような
+        // 意図しない持ち越しになる。パターンごとに最後に使った設定を記憶・復元する。
+        if (0..<MosaicFillPattern.allCases.count).contains(sender.tag) {
+            loadMosaicStyleDetails(for: MosaicFillPattern.allCases[sender.tag])
+        }
         mosaicStyleChanged()
     }
 
@@ -2349,77 +2377,108 @@ final class MosaicWindowController: NSObject {
             ?? makePatternPreviewImage(.customImage)
     }
 
+    /// パターン毎の詳細設定を独立して記憶するためのUserDefaultsキー接頭辞
+    /// （例: "MosaicStyle.noise.opacity"）。パターン切替時に前のパターンの
+    /// 色付け等を引き継いでしまわないようにするための名前空間分け。
+    private func mosaicStyleKeyPrefix(for pattern: MosaicFillPattern) -> String {
+        "MosaicStyle.\(pattern.rawValue)."
+    }
+
     private func saveMosaicStyleSettings() {
         let defaults = AppSettings.shared
         let patterns = MosaicFillPattern.allCases
         let index = stylePatternPopUp.indexOfSelectedItem
-        if (0..<patterns.count).contains(index) {
-            defaults.set(patterns[index].rawValue, forKey: "MosaicStyle.pattern")
-        }
-        defaults.set(styleOpacitySlider.doubleValue, forKey: "MosaicStyle.opacity")
-        defaults.set(styleTintCheckbox.state == .on, forKey: "MosaicStyle.useTint")
+        guard (0..<patterns.count).contains(index) else { return }
+        let pattern = patterns[index]
+        defaults.set(pattern.rawValue, forKey: "MosaicStyle.pattern")
+        let prefix = mosaicStyleKeyPrefix(for: pattern)
+        defaults.set(styleOpacitySlider.doubleValue, forKey: prefix + "opacity")
+        defaults.set(styleTintCheckbox.state == .on, forKey: prefix + "useTint")
         if let color = styleTintColorWell.color.usingColorSpace(.deviceRGB) {
-            defaults.set(Double(color.redComponent), forKey: "MosaicStyle.tintR")
-            defaults.set(Double(color.greenComponent), forKey: "MosaicStyle.tintG")
-            defaults.set(Double(color.blueComponent), forKey: "MosaicStyle.tintB")
+            defaults.set(Double(color.redComponent), forKey: prefix + "tintR")
+            defaults.set(Double(color.greenComponent), forKey: prefix + "tintG")
+            defaults.set(Double(color.blueComponent), forKey: prefix + "tintB")
         }
-        defaults.set(styleBlockScaleSlider.doubleValue, forKey: "MosaicStyle.blockScale")
-        defaults.set(styleFeatherSlider.doubleValue, forKey: "MosaicStyle.edgeFeather")
-        defaults.set(styleStripeWidthSlider.doubleValue, forKey: "MosaicStyle.stripeWidth")
-        defaults.set(styleStripeSpacingSlider.doubleValue, forKey: "MosaicStyle.stripeSpacing")
-        defaults.set(styleCloudDensitySlider.doubleValue, forKey: "MosaicStyle.cloudDensity")
-        defaults.set(styleCloudToneCheckbox.state == .on, forKey: "MosaicStyle.cloudTone")
-        defaults.set(customPatternImageIdentifier, forKey: "MosaicStyle.patternImageIdentifier")
+        defaults.set(styleBlockScaleSlider.doubleValue, forKey: prefix + "blockScale")
+        defaults.set(styleFeatherSlider.doubleValue, forKey: prefix + "edgeFeather")
+        defaults.set(styleStripeWidthSlider.doubleValue, forKey: prefix + "stripeWidth")
+        defaults.set(styleStripeSpacingSlider.doubleValue, forKey: prefix + "stripeSpacing")
+        defaults.set(styleCloudDensitySlider.doubleValue, forKey: prefix + "cloudDensity")
+        defaults.set(styleCloudToneCheckbox.state == .on, forKey: prefix + "cloudTone")
+        defaults.set(customPatternImageIdentifier, forKey: prefix + "patternImageIdentifier")
     }
 
     private func loadMosaicStyleSettings() {
         let defaults = AppSettings.shared
+        var pattern = MosaicFillPattern.pixelate
         if let raw = defaults.string(forKey: "MosaicStyle.pattern"),
-           let pattern = MosaicFillPattern(rawValue: raw),
-           let index = MosaicFillPattern.allCases.firstIndex(of: pattern) {
+           let saved = MosaicFillPattern(rawValue: raw) {
+            pattern = saved
+        }
+        if let index = MosaicFillPattern.allCases.firstIndex(of: pattern) {
             stylePatternPopUp.selectItem(at: index)
         }
-        if defaults.object(forKey: "MosaicStyle.opacity") != nil {
-            styleOpacitySlider.doubleValue = defaults.double(forKey: "MosaicStyle.opacity")
+        loadMosaicStyleDetails(for: pattern)
+    }
+
+    /// 指定パターンの詳細設定（透明度・色付け・粒度等）を、そのパターン専用に
+    /// 記憶された値（無ければ既定値）から復元する。パターン切替のたびに呼び出し、
+    /// 前のパターンの設定（特に色付け）を引き継がないようにする。
+    private func loadMosaicStyleDetails(for pattern: MosaicFillPattern) {
+        isLoadingMosaicStyleControls = true
+        defer {
+            updateMosaicStyleControlAvailability()
+            isLoadingMosaicStyleControls = false
         }
-        styleTintCheckbox.state = defaults.bool(forKey: "MosaicStyle.useTint") ? .on : .off
-        if defaults.object(forKey: "MosaicStyle.tintR") != nil {
+        let defaults = AppSettings.shared
+        let prefix = mosaicStyleKeyPrefix(for: pattern)
+        let fallback = MosaicStyle(pattern: pattern)
+        styleOpacitySlider.doubleValue = defaults.object(forKey: prefix + "opacity") != nil
+            ? defaults.double(forKey: prefix + "opacity") : fallback.opacity
+        styleTintCheckbox.state = defaults.bool(forKey: prefix + "useTint") ? .on : .off
+        if defaults.object(forKey: prefix + "tintR") != nil {
             styleTintColorWell.color = NSColor(
-                deviceRed: defaults.double(forKey: "MosaicStyle.tintR"),
-                green: defaults.double(forKey: "MosaicStyle.tintG"),
-                blue: defaults.double(forKey: "MosaicStyle.tintB"),
+                deviceRed: defaults.double(forKey: prefix + "tintR"),
+                green: defaults.double(forKey: prefix + "tintG"),
+                blue: defaults.double(forKey: prefix + "tintB"),
                 alpha: 1
             )
         }
-        if defaults.object(forKey: "MosaicStyle.blockScale") != nil {
-            styleBlockScaleSlider.doubleValue = defaults.double(forKey: "MosaicStyle.blockScale")
-        }
-        if defaults.object(forKey: "MosaicStyle.edgeFeather") != nil {
-            styleFeatherSlider.doubleValue = defaults.double(forKey: "MosaicStyle.edgeFeather")
-        }
-        if defaults.object(forKey: "MosaicStyle.stripeWidth") != nil {
-            styleStripeWidthSlider.doubleValue = defaults.double(forKey: "MosaicStyle.stripeWidth")
-        }
-        if defaults.object(forKey: "MosaicStyle.stripeSpacing") != nil {
-            styleStripeSpacingSlider.doubleValue = defaults.double(forKey: "MosaicStyle.stripeSpacing")
-        }
-        if defaults.object(forKey: "MosaicStyle.cloudDensity") != nil {
-            styleCloudDensitySlider.doubleValue = defaults.double(forKey: "MosaicStyle.cloudDensity")
-        }
-        styleCloudToneCheckbox.state = defaults.bool(forKey: "MosaicStyle.cloudTone") ? .on : .off
-        if let identifier = defaults.string(forKey: "MosaicStyle.patternImageIdentifier"),
+        styleBlockScaleSlider.doubleValue = defaults.object(forKey: prefix + "blockScale") != nil
+            ? defaults.double(forKey: prefix + "blockScale") : fallback.blockScale
+        styleFeatherSlider.doubleValue = defaults.object(forKey: prefix + "edgeFeather") != nil
+            ? defaults.double(forKey: prefix + "edgeFeather") : fallback.edgeFeather
+        styleStripeWidthSlider.doubleValue = defaults.object(forKey: prefix + "stripeWidth") != nil
+            ? defaults.double(forKey: prefix + "stripeWidth") : fallback.stripeWidth
+        styleStripeSpacingSlider.doubleValue = defaults.object(forKey: prefix + "stripeSpacing") != nil
+            ? defaults.double(forKey: prefix + "stripeSpacing") : fallback.stripeSpacing
+        styleCloudDensitySlider.doubleValue = defaults.object(forKey: prefix + "cloudDensity") != nil
+            ? defaults.double(forKey: prefix + "cloudDensity") : fallback.cloudDensity
+        styleCloudToneCheckbox.state = defaults.bool(forKey: prefix + "cloudTone") ? .on : .off
+        customPatternImageIdentifier = nil
+        customPatternImage = nil
+        if let identifier = defaults.string(forKey: prefix + "patternImageIdentifier"),
            let image = patternImage(for: identifier) {
             customPatternImageIdentifier = identifier
             customPatternImage = image
             stylePatternImageLabel.stringValue = "保存済みパターン"
-        } else if let legacy = patternImage(for: "legacy") {
+        } else if pattern.requiresPatternImage, let legacy = patternImage(for: "legacy") {
+            // 旧バージョン（パターン毎の記憶が無かった単一グローバル設定時代）の
+            // 保存先からの移行フォールバック。画像必須パターンでのみ意味を持つ。
             customPatternImageIdentifier = "legacy"
             customPatternImage = legacy
             stylePatternImageLabel.stringValue = "保存済みパターン"
+        } else {
+            stylePatternImageLabel.stringValue = "未選択"
         }
         updateCustomPatternPreview(customPatternImage)
         updateMosaicStyleControlAvailability()
-        defaultMosaicStyle = currentMosaicStyle()
+        // 個別設定中のROIを選択したままパターンを切替えた場合、ここでグローバルな
+        // 既定スタイルまで書き換えてしまわないようにする（そちらは直後の
+        // mosaicStyleChanged()が選択中ROIの個別スタイルとして反映する）。
+        if canvas.selectedROIID == nil {
+            defaultMosaicStyle = currentMosaicStyle()
+        }
     }
 
     /// 画像種別（自動判定/実写/イラスト・漫画）の手動指定。永続化され、次回の候補生成から適用される。
@@ -2508,7 +2567,7 @@ final class MosaicWindowController: NSObject {
         applyScaledFont(poseLayerCheckbox, size: 13)
         applyScaledFont(roiLayerCheckbox, size: 13)
         applyScaledFont(mosaicPreviewCheckbox, size: 13)
-        let togglesRow = NSStackView(views: [togglesLabel, personLayerCheckbox, poseLayerCheckbox, roiLayerCheckbox, mosaicPreviewCheckbox])
+        let togglesRow = NSStackView(views: [togglesLabel, roiLayerCheckbox, mosaicPreviewCheckbox, personLayerCheckbox, poseLayerCheckbox])
         togglesRow.orientation = .horizontal
         togglesRow.alignment = .centerY
         togglesRow.spacing = 8
@@ -2673,6 +2732,32 @@ final class MosaicWindowController: NSObject {
         layerOutlineView.scrollRowToVisible(row)
     }
 
+    /// 範囲選択モードで画像上をラバーバンド選択した結果（複数ROI）を、レイヤ一覧側の
+    /// 選択にも反映する（画像上の一括選択とレイヤ一覧の選択状態を一致させる）。
+    private func syncROIListSelectionFromCanvasGroup(_ ids: Set<UUID>) {
+        guard !isSyncingROISelection else { return }
+        isSyncingROISelection = true
+        defer { isSyncingROISelection = false }
+        guard !ids.isEmpty else {
+            for index in layerOutlineView.selectedRowIndexes
+            where layerOutlineView.item(atRow: index) is ROIListEntry {
+                layerOutlineView.deselectRow(index)
+            }
+            return
+        }
+        let rows = roiListEntries
+            .filter { ids.contains($0.roiID) }
+            .map { layerOutlineView.row(forItem: $0) }
+            .filter { $0 >= 0 }
+        guard !rows.isEmpty else { return }
+        layerOutlineView.selectRowIndexes(IndexSet(rows), byExtendingSelection: false)
+    }
+
+    /// ツールバーの編集モード/範囲選択モード切替。
+    @objc private func canvasModeChanged() {
+        canvas.interactionMode = canvasModeControl.selectedSegment == 1 ? .marqueeSelect : .edit
+    }
+
     /// 選択中のレイヤをグループ化する。選択行は「未グループのレイヤ」だけでなく、
     /// 既存グループの内側にある子レイヤ（人物検出/骨格検出など）も対象にでき、
     /// 元の場所（未グループ配列・元グループ）から取り除いた上で新しいグループへまとめる
@@ -2698,14 +2783,24 @@ final class MosaicWindowController: NSObject {
         let items = layerOutlineView.selectedRowIndexes.map { layerOutlineView.item(atRow: $0) }
         let leaves = items.compactMap { $0 as? LayerLeaf }
         let roiEntries = items.compactMap { $0 as? ROIListEntry }
-        let hasGroupSelected = items.contains { $0 is LayerGroup || $0 is ROIListGroup }
         let canGroup = leaves.count >= 2 || roiEntries.count >= 2
         let alreadyGrouped = leaves.contains { leaf in layerGroups.contains { $0.children.contains { $0 === leaf } } }
             || roiEntries.contains { entry in roiListGroups.contains { $0.children.contains { $0 === entry } } }
+        // グループ名自体の選択に加え、グループ内の個別レイヤ/ROIを選択した場合も
+        // 「グループ解除」（その項目だけをグループから除外）を出せるようにする。
+        let hasGroupSelected = items.contains { $0 is LayerGroup || $0 is ROIListGroup } || alreadyGrouped
         guard menu.items.count >= 2 else { return }
         menu.items[0].title = (canGroup && alreadyGrouped) ? "再グループ化" : "グループ化"
         menu.items[0].isHidden = !canGroup
         menu.items[1].isHidden = !hasGroupSelected
+    }
+
+    /// 既存グループ名を避けた「グループN」のうち、使われていない最小のNを採番する
+    /// （解除→再グループ化を繰り返しても過去の番号から増え続けないようにする）。
+    private func nextAvailableGroupName(excluding existingNames: Set<String>) -> String {
+        var n = 1
+        while existingNames.contains("グループ\(n)") { n += 1 }
+        return "グループ\(n)"
     }
 
     @objc private func groupSelectedLayers() {
@@ -2727,8 +2822,8 @@ final class MosaicWindowController: NSObject {
                 updateStatus("グループ化するROIを2つ以上選択してください")
                 return
             }
-            roiGroupCounter += 1
-            let groupName = "グループ\(roiGroupCounter)"
+            let existingROIGroupNames = Set(canvas.rois.compactMap(\.roiGroupName))
+            let groupName = nextAvailableGroupName(excluding: existingROIGroupNames)
             let ids = Set(roiEntriesToGroup.map(\.roiID))
             for index in canvas.rois.indices where ids.contains(canvas.rois[index].id) {
                 canvas.rois[index].roiGroupName = groupName
@@ -2747,8 +2842,8 @@ final class MosaicWindowController: NSObject {
             group.children.removeAll { leaf in leavesToGroup.contains { $0 === leaf } }
         }
         layerGroups.removeAll { $0.children.isEmpty }
-        layerGroupCounter += 1
-        let group = LayerGroup(name: "グループ\(layerGroupCounter)", children: leavesToGroup)
+        let existingLayerGroupNames = Set(layerGroups.map(\.name))
+        let group = LayerGroup(name: nextAvailableGroupName(excluding: existingLayerGroupNames), children: leavesToGroup)
         layerGroups.append(group)
         editorRevision += 1
         reloadLayerList()
@@ -2758,6 +2853,8 @@ final class MosaicWindowController: NSObject {
     @objc private func ungroupSelectedGroup() {
         var didUngroup = false
         var didUngroupROI = false
+        var leavesToRemove: [LayerLeaf] = []
+        var entriesToRemove: [ROIListEntry] = []
         for index in layerOutlineView.selectedRowIndexes {
             let item = layerOutlineView.item(atRow: index)
             if let group = item as? LayerGroup {
@@ -2770,6 +2867,35 @@ final class MosaicWindowController: NSObject {
                     canvas.rois[roiIndex].roiGroupName = nil
                 }
                 didUngroupROI = true
+            } else if let leaf = item as? LayerLeaf {
+                leavesToRemove.append(leaf)
+            } else if let entry = item as? ROIListEntry {
+                entriesToRemove.append(entry)
+            }
+        }
+        // グループ名自体ではなく、グループ内の個別レイヤ/ROIを選択して「グループ解除」を
+        // 押した場合は、そのレイヤ/ROIだけをグループから除外する（グループ名を選択した
+        // 場合の従来動作＝グループ全体の解除はそのまま維持）。
+        if !leavesToRemove.isEmpty {
+            let actuallyGrouped = leavesToRemove.filter { leaf in
+                layerGroups.contains { $0.children.contains { $0 === leaf } }
+            }
+            if !actuallyGrouped.isEmpty {
+                for group in layerGroups {
+                    group.children.removeAll { leaf in actuallyGrouped.contains { $0 === leaf } }
+                }
+                layerGroups.removeAll { $0.children.isEmpty }
+                ungroupedLayers.append(contentsOf: actuallyGrouped)
+                didUngroup = true
+            }
+        }
+        if !entriesToRemove.isEmpty {
+            let ids = Set(entriesToRemove.map(\.roiID))
+            for roiIndex in canvas.rois.indices where ids.contains(canvas.rois[roiIndex].id) {
+                if canvas.rois[roiIndex].roiGroupName != nil {
+                    canvas.rois[roiIndex].roiGroupName = nil
+                    didUngroupROI = true
+                }
             }
         }
         if didUngroupROI {
@@ -3661,7 +3787,9 @@ final class MosaicWindowController: NSObject {
         }
         thumbSmallerButton.toolTip = "サムネイルを縮小"
         thumbLargerButton.toolTip = "サムネイルを拡大"
-        let modeRow = NSStackView(views: [viewModeControl, thumbSmallerButton, thumbLargerButton])
+        // 「ライブラリを更新」はツールバーから、ライブラリパネルの拡大縮小アイコンの右へ移設。
+        let reloadLibraryButton = shortcutToolbarButton("reloadLibraryFromButton", symbol: "arrow.clockwise")
+        let modeRow = NSStackView(views: [viewModeControl, thumbSmallerButton, thumbLargerButton, reloadLibraryButton])
         modeRow.orientation = .horizontal
         modeRow.spacing = 8
         modeRow.translatesAutoresizingMaskIntoConstraints = false
@@ -5650,6 +5778,14 @@ final class ImageCanvasView: NSView {
     /// 画像上でまとめて強調表示し、いずれか1つをドラッグするとグループ全体を一括移動できる
     /// （レイヤ一覧のグループ選択と画像上の一括範囲選択・一括移動を一致させる）。
     var selectedROIGroupIDs: Set<UUID> = [] { didSet { needsDisplay = true } }
+    /// ツールバーで切替える画像上の操作モード。編集モードでは空白部分のドラッグで新規ROIを
+    /// 作成する（従来通り）。範囲選択モードでは同じ操作が既存ROIのラバーバンド一括選択になる。
+    /// Option(⌥)キーを押しながら開始したドラッグは、そのドラッグ限定で一時的に逆モードになる。
+    enum InteractionMode { case edit, marqueeSelect }
+    var interactionMode: InteractionMode = .edit
+    /// 範囲選択モードで複数ROIをラバーバンド選択したとき、レイヤ一覧側の選択にも反映するための通知。
+    var onROIGroupSelectionByMarquee: ((Set<UUID>) -> Void)?
+    private var dragIsMarqueeSelect = false
     var personLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var poseLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var personLayerMasks: [CGImage?] = [] { didSet { needsDisplay = true } }
@@ -5854,12 +5990,17 @@ final class ImageCanvasView: NSView {
             drawROIs(in: target)
         }
         if let dragStart, let dragCurrent {
-            drawPreviewShape(NSRect(
+            let rect = NSRect(
                 x: min(dragStart.x, dragCurrent.x),
                 y: min(dragStart.y, dragCurrent.y),
                 width: abs(dragCurrent.x - dragStart.x),
                 height: abs(dragCurrent.y - dragStart.y)
-            ))
+            )
+            if dragIsMarqueeSelect {
+                drawMarqueeSelectionRect(rect)
+            } else {
+                drawPreviewShape(rect)
+            }
         }
     }
 
@@ -6151,7 +6292,16 @@ final class ImageCanvasView: NSView {
             return
         }
 
+        // Optionキーを押しながらの場合、このドラッグ限定でモードを一時的に入れ替える
+        // （Photoshopのスペースキー一時パン切替と同様の考え方）。
+        let wantsMarquee = event.modifierFlags.contains(.option)
+            ? interactionMode == .edit
+            : interactionMode == .marqueeSelect
+        dragIsMarqueeSelect = wantsMarquee
         selectedROIID = nil
+        if !wantsMarquee {
+            selectedROIGroupIDs = []
+        }
         dragStart = point
         dragCurrent = point
         needsDisplay = true
@@ -6297,13 +6447,34 @@ final class ImageCanvasView: NSView {
         }
 
         guard let start = dragStart else { return }
+        let wasMarqueeSelect = dragIsMarqueeSelect
         defer {
             dragStart = nil
             dragCurrent = nil
+            dragIsMarqueeSelect = false
             needsDisplay = true
         }
 
         guard imageDrawRect().contains(start) else { return }
+
+        if wasMarqueeSelect {
+            // 範囲選択モード: 空白部分のドラッグは新規ROI作成ではなく、矩形と重なる
+            // 既存ROIすべてのラバーバンド一括選択にする（クリックのみの場合は選択解除のみ）。
+            guard hypot(point.x - start.x, point.y - start.y) >= dragThreshold else { return }
+            let marqueeRect = NSRect(
+                x: min(start.x, point.x),
+                y: min(start.y, point.y),
+                width: abs(point.x - start.x),
+                height: abs(point.y - start.y)
+            )
+            let imageRect = imageDrawRect()
+            let hitIDs = Set(rois.filter { roi in
+                viewRect(from: roi.rect, imageRect: imageRect).intersects(marqueeRect)
+            }.map(\.id))
+            selectedROIGroupIDs = hitIDs
+            onROIGroupSelectionByMarquee?(hitIDs)
+            return
+        }
 
         if hypot(point.x - start.x, point.y - start.y) < dragThreshold {
             addROIWithRememberedSize(at: point)
@@ -6509,6 +6680,17 @@ final class ImageCanvasView: NSView {
         path.stroke()
     }
 
+    /// 範囲選択モードのラバーバンド矩形（点線。新規ROI作成時の実線プレビューと区別する）。
+    private func drawMarqueeSelectionRect(_ rect: NSRect) {
+        let path = NSBezierPath(rect: rect)
+        path.lineWidth = 1.5
+        path.setLineDash([4, 3], count: 2, phase: 0)
+        NSColor.controlAccentColor.setStroke()
+        path.stroke()
+        NSColor.controlAccentColor.withAlphaComponent(0.12).setFill()
+        path.fill()
+    }
+
     private func drawSelectionHandles(_ rect: NSRect, rotation: Double = 0) {
         let size: CGFloat = 8
         let center = NSPoint(x: rect.midX, y: rect.midY)
@@ -6543,7 +6725,7 @@ final class ImageCanvasView: NSView {
                 drawLayerRect(viewR, color: .systemBlue)
             }
             if showsTag {
-                drawLayerName("人物検出\(index + 1)", in: viewR, color: .systemBlue)
+                drawLayerName("人物\(index + 1)", in: viewR, color: .systemBlue)
             }
             if case .person(index) = selectedDetectionLayer {
                 drawSelectedLayerHighlight(viewR)
@@ -6565,7 +6747,7 @@ final class ImageCanvasView: NSView {
                 )
             }
             if showsTag {
-                drawLayerName("骨格検出\(index + 1)", in: viewR, color: .systemOrange)
+                drawLayerName("骨格\(index + 1)", in: viewR, color: .systemOrange)
             }
             if case .pose(index) = selectedDetectionLayer {
                 drawSelectedLayerHighlight(viewR)

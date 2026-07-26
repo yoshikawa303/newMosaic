@@ -1,5 +1,31 @@
 # Changelog
 
+## v0.0.00078 - 2026-07-26
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 新機能: ツールバーに「編集モード/範囲選択モード」の切替を追加した。範囲選択モードでは画像上の空白部分をドラッグすると、重なる複数ROIを一括選択できる（レイヤ一覧の選択とも連動）。Option(⌥)キーを押しながらのドラッグで、そのドラッグ限定で一時的にモードを入れ替えられる。
+- バグ修正: レイヤパネルのレイヤ名等が右寄せ表示になっていた不具合を修正し、左寄せに戻した。
+- バグ修正: グループ化解除後に再度グループ化すると、グループ名の連番が過去使用した番号から増え続けてしまう不具合を修正した（使われていない最小の番号から採番するようにした）。
+- 改善: グループ内の個別レイヤ/ROIだけを選択して「グループ解除」を押した場合、そのレイヤ/ROIだけをグループから除外するようにした（グループ名自体を選択した場合の全体解除は従来通り）。
+- 改善: レイヤパネル「表示:」のラベルを短縮した（「人物検出」→「人物」、「骨格検出」→「骨格」、「モザイク表示」→「モザイク」）。表示順もROI・モザイク・人物・骨格の順へ変更した。
+- 改善: インスペクタ＞検出のマスク生成方式の既定選択を「対象形状」に変更した。
+- バグ修正: モザイクのノイズパターンがカラーノイズに戻ってしまう不具合を修正した。パターン切替時に色付け等の詳細設定が別パターンから引き継がれていたのが真因で、パターンごとに最後に使った詳細設定を記憶・復元するようにした。
+- 改善: 「ライブラリを更新」ボタンをツールバーから、ライブラリパネルの拡大縮小アイコンの右側へ移動した。
+- 改善: 「選択範囲をすべて消去」を「レイヤ削除」に改名し、ライブラリの「選択画像を削除」と区別できるよう別アイコンにした。
+
+■更新履歴
+
+- `ImageCanvasView`に`interactionMode`（`.edit`/`.marqueeSelect`）を追加。空白ドラッグ時、Option修飾で一時反転する`dragIsMarqueeSelect`を判定し、`mouseUp`でラバーバンド矩形と交差する既存ROIを`selectedROIGroupIDs`へ格納。`onROIGroupSelectionByMarquee`でレイヤ一覧選択（`syncROIListSelectionFromCanvasGroup`）へ同期。ツールバーに`canvasModeControl`（2segment）を新設。
+- `LayerRowView.label.alignment`を明示的に`.left`へ設定。
+- `groupSelectedLayers()`のグループ命名を、使用中の`roiGroupCounter`/`layerGroupCounter`（増え続けるカウンタ）から、既存グループ名を避けた最小連番を採番する`nextAvailableGroupName(excluding:)`へ変更。
+- `ungroupSelectedGroup()`を拡張し、`LayerLeaf`/`ROIListEntry`単体選択時はそのレイヤ/ROIのみをグループから除外するよう分岐（`updateLayerContextMenu`の「グループ解除」表示条件も同様に拡張）。
+- `LayerKind.title`の"人物検出N"/"骨格検出N"を"人物N"/"骨格N"へ変更（画像上のレイヤ名表示・チェックボックスラベルも統一）。
+- `segmentEngineControl`の初期選択インデックスを`SegmentEngineKind.regionForeground`へ変更。
+- モザイクスタイルの詳細設定（透明度・色付け・粒度等）をパターン毎にUserDefaultsへ名前空間分けして保存する方式へ変更（`mosaicStyleKeyPrefix(for:)`/`loadMosaicStyleDetails(for:)`）。パターン切替時（`patternTileClicked`）に該当パターンの記憶済み設定を復元してから適用する。
+- `reloadLibraryFromButton`のツールバーボタンをライブラリパネルの`modeRow`（サムネイル拡縮アイコンの隣）へ移設。
+- `clearROIs`のショートカット表示名を「レイヤ削除」に変更し、アイコンを`trash`から`rectangle.badge.minus`へ変更。
+
 ## v0.0.00077 - 2026-07-25
 
 ■更新履歴（Readme / ChangeLog 用）

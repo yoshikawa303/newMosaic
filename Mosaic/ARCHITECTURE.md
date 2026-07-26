@@ -244,6 +244,17 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **`MosaicStyle`のSendable対応・`NormalizedRect`のゼロ除算ガード・`patternImageCache`のLRU化・`AppSettings.persistNow()`のエラーログ・`outlineView(child:ofItem:)`のフォールバック安全化・`setWorkingImage`のforce-unwrap除去・`AnimePoseEstimator`の出力名不一致検知ログ**: いずれも小規模な堅牢性向上。詳細は `Docs/QC/CodeReview/QC_CodeReview_v0.0.00077.md` を参照。
 - **見送った指摘（今後の対応候補）**: 6つのONNX推論クラスが個別に`ORTEnv`を生成している点（共有Env化は範囲が大きく別回で対応）、`AnimeSegmenter`の出力行方向が実測未検証な点、ONNX系検出器3クラスへのログ未追加、`importLinked`のO(n²)、`performLibraryAutoSave`/`exportConfirmed`のメインスレッド同期IO。いずれも詳細は上記QC記録を参照。
 
+## 5.24 ツールバーのモード切替・レイヤ/グループ修正・パターン毎スタイル記憶（2026-07-26 v0.0.00078〜）
+
+- **ツールバーの編集モード/範囲選択モード切替**: `ImageCanvasView.InteractionMode`（`.edit`/`.marqueeSelect`）を追加し、ツールバーの2segment `canvasModeControl`で切替える。既定は`.edit`（従来通り、空白ドラッグで新規ROIを作成）。`.marqueeSelect`では同じ空白ドラッグがラバーバンド矩形になり、矩形と交差する既存ROI全てを`selectedROIGroupIDs`へ一括選択する（`onROIGroupSelectionByMarquee`でレイヤ一覧選択にも同期）。Option(⌥)キーを押しながら開始したドラッグは、そのドラッグ限定で一時的にモードを入れ替える（`dragIsMarqueeSelect`をmouseDown時に判定）。マーキー矩形は新規ROI作成時の実線プレビュー（`drawPreviewShape`）と区別するため、破線+半透明塗り（`drawMarqueeSelectionRect`）で描画する。
+- **レイヤパネルのテキスト左寄せ修正**: `LayerRowView.label`の`alignment`が明示指定されておらず右寄せ表示になっていた不具合を修正し、`.left`を明示設定。
+- **グループ再作成時の連番バグ修正**: `roiGroupCounter`/`layerGroupCounter`という単調増加カウンタが原因で、グループ解除後に再度グループ化すると常に過去の番号から連番が振られていた。既存グループ名を避けた最小の未使用番号を採番する`nextAvailableGroupName(excluding:)`へ置き換えた。
+- **グループ内個別選択時のグループ解除**: `ungroupSelectedGroup()`を拡張し、グループ名自体ではなく`LayerLeaf`/`ROIListEntry`を個別選択して「グループ解除」を押した場合は、その項目だけをグループから除外するようにした（空になったグループは自動的に消える）。グループ名選択時の全体解除は従来通り。右クリックメニューの表示条件（`updateLayerContextMenu`）も同様に拡張。
+- **レイヤ表示トグルの表記・並び順**: 「人物検出」→「人物」、「骨格検出」→「骨格」、「モザイク表示」→「モザイク」に短縮（`LayerKind.title`・チェックボックスラベル・画像上のレイヤ名表示を統一）。「表示:」行の並びをROI・モザイク・人物・骨格の順に変更。
+- **マスク生成のデフォルト変更**: `segmentEngineControl`の初期選択を`SegmentEngineKind.regionForeground`（対象形状）に変更。
+- **モザイクパターン毎の詳細設定記憶**: 従来、透明度・色付け・粒度等の詳細設定はパターンをまたいだ単一のグローバル状態で保持されており、例えば色付き帯パターンから「ノイズ」へ切替えると、色付けチェックがONのまま引き継がれて「ノイズがカラーになる」ように見える不具合があった。UserDefaultsキーをパターン毎に名前空間分け（`mosaicStyleKeyPrefix(for:)`＝`"MosaicStyle.<pattern>."`）し、パターン切替時（`patternTileClicked`）に該当パターン専用の記憶済み設定（無ければ`MosaicStyle`の既定値）を`loadMosaicStyleDetails(for:)`で復元してから適用するよう変更。個別スタイル設定中のROIを選択したままパターンを切替えた場合、グローバルな既定スタイルまで書き換えないよう`canvas.selectedROIID == nil`のガードを追加。
+- **ツールバー項目の整理**: 「ライブラリを更新」ボタンをツールバーからライブラリパネルの拡大縮小アイコンの右（`modeRow`）へ移設。「選択範囲をすべて消去」を「レイヤ削除」に改名し、ライブラリの「選択画像を削除」（`trash`アイコン）と区別するため`rectangle.badge.minus`アイコンへ変更。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。
