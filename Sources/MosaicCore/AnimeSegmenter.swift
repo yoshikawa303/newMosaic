@@ -76,11 +76,13 @@ public final class AnimeSegmenter {
         let mask = outputData.withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         guard mask.count >= size * size else { return nil }
 
-        // パディングを除いたコンテンツ領域を8bitグレースケール化（CGContextの描画は上原点行順で一致）
-        // ※モデル出力の行方向は入力と同一（行0=上）
+        // パディングを除いたコンテンツ領域を8bitグレースケール化。
+        // モデル出力の行方向は入力と逆（行0=下）であることがGUI実測で確定した
+        // （「人物認識範囲が上下反転表示される」報告。コードレビューでも行方向未検証として
+        // 指摘されていた項目）。上下を反転して取り出す。
         var gray = [UInt8](repeating: 0, count: contentWidth * contentHeight)
         for y in 0..<contentHeight {
-            let sourceRow = (y + padY) * size + padX
+            let sourceRow = (size - 1 - (y + padY)) * size + padX
             for x in 0..<contentWidth {
                 let value = mask[sourceRow + x]
                 gray[y * contentWidth + x] = UInt8(min(255, max(0, value * 255)))

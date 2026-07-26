@@ -88,8 +88,8 @@ public struct MosaicStyle: @unchecked Sendable {
     public var cloudTone: Bool
     /// フラッシュ: 放射の中心位置（ROIのローカル正規化座標、0〜1・左上原点）。nilはROI中心。
     public var flashCenter: NormalizedPoint?
-    /// フラッシュ: 種別（false=集中線（白地に黒線）、true=ベタフラッシュ（黒地に白））
-    public var flashBeta: Bool
+    /// フラッシュ: 種別（集中線/ベタフラッシュ/ウニフラッシュ）
+    public var flashKind: MosaicFlashKind
     /// 任意パターン画像（customImage時。タイル状に敷き詰める）
     public var patternImage: CGImage?
     /// 永続化された任意パターン画像を解決するための識別子。
@@ -110,7 +110,7 @@ public struct MosaicStyle: @unchecked Sendable {
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
         flashCenter: NormalizedPoint? = nil,
-        flashBeta: Bool = false,
+        flashKind: MosaicFlashKind = .line,
         patternImage: CGImage? = nil,
         patternImageIdentifier: String? = nil
     ) {
@@ -128,7 +128,7 @@ public struct MosaicStyle: @unchecked Sendable {
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
         self.flashCenter = flashCenter
-        self.flashBeta = flashBeta
+        self.flashKind = flashKind
         self.patternImage = patternImage
         self.patternImageIdentifier = patternImageIdentifier
     }
@@ -150,7 +150,7 @@ public struct MosaicStyle: @unchecked Sendable {
             cloudDensity: cloudDensity,
             cloudTone: cloudTone,
             flashCenter: flashCenter,
-            flashBeta: flashBeta,
+            flashKind: flashKind,
             patternImageIdentifier: patternImageIdentifier
         )
     }
@@ -173,7 +173,7 @@ public struct MosaicStyle: @unchecked Sendable {
             cloudDensity: roiStyle.cloudDensity,
             cloudTone: roiStyle.cloudTone,
             flashCenter: roiStyle.flashCenter,
-            flashBeta: roiStyle.flashBeta,
+            flashKind: roiStyle.flashKind,
             patternImage: patternImage,
             patternImageIdentifier: roiStyle.patternImageIdentifier
         )
@@ -675,8 +675,9 @@ public final class MosaicEngine {
         return clouds
     }
 
-    /// フラッシュパターン: 指定した中心点から放射状の線（先細りの三角形）を描く。
-    /// - 種別: `flashBeta` false=集中線（白地に黒線）、true=ベタフラッシュ（黒地に白）。
+    /// フラッシュパターン: 指定した中心点から放射状の線を描く。
+    /// - 種別: 集中線（白地に黒の先細り線）/ ベタフラッシュ（黒地に白の放射）/
+    ///   ウニフラッシュ（両端が尖った紡錘形の線をリング状に描く）。
     /// - 密度: `cloudDensity`（トーンの密度スライダーを兼用）で放射線の本数を調整。
     /// - トーン: `cloudTone` ONで結果を網点（漫画トーン風）へ変換する。
     /// - 乱数シードはROIのIDから導出し、レイヤ（ROI）ごとに異なる形の集中線になる
@@ -689,8 +690,9 @@ public final class MosaicEngine {
             x: rect.minX + local.x * rect.width,
             y: rect.minY + (1 - local.y) * rect.height
         )
-        let background = CGColor(gray: style.flashBeta ? 0 : 1, alpha: 1)
-        let lineColor = CGColor(gray: style.flashBeta ? 1 : 0, alpha: 1)
+        let beta = style.flashKind == .beta
+        let background = CGColor(gray: beta ? 0 : 1, alpha: 1)
+        let lineColor = CGColor(gray: beta ? 1 : 0, alpha: 1)
         let fallback = CIImage(color: CIColor(cgColor: background)).cropped(to: extent)
         let width = max(1, Int(extent.width))
         let height = max(1, Int(extent.height))
@@ -717,25 +719,53 @@ public final class MosaicEngine {
         let density = min(max(style.cloudDensity, 0.05), 1.0)
         let lineCount = Int(32 + density * 200)
         let maxRadius = hypot(extent.width, extent.height)
-        // 各放射線は外周側が太く中心へ向かって尖る三角形（漫画の集中線らしい先細り）
         let baseHalfWidth = max(0.8, style.blockScale / 8)
-        for index in 0..<lineCount {
-            let baseAngle = (Double(index) / Double(lineCount)) * 2 * .pi
-            let angle = baseAngle + Double.random(in: -0.5...0.5, using: &rng) * (2 * .pi / Double(lineCount))
-            let halfWidth = baseHalfWidth * Double.random(in: 0.35...1.3, using: &rng)
-            let innerRadius = maxRadius * Double.random(in: 0.02...0.08, using: &rng)
-            let dx = CGFloat(cos(angle))
-            let dy = CGFloat(sin(angle))
-            let apex = CGPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius)
-            let baseCenter = CGPoint(x: center.x + dx * maxRadius, y: center.y + dy * maxRadius)
-            let perpX = -dy * CGFloat(halfWidth)
-            let perpY = dx * CGFloat(halfWidth)
-            context.beginPath()
-            context.move(to: apex)
-            context.addLine(to: CGPoint(x: baseCenter.x + perpX, y: baseCenter.y + perpY))
-            context.addLine(to: CGPoint(x: baseCenter.x - perpX, y: baseCenter.y - perpY))
-            context.closePath()
-            context.fillPath()
+
+        if style.flashKind == .uni {
+            // ウニフラッシュ: ROIサイズを基準にした半径帯に、両端が尖った紡錘形（ひし形）の
+            // 線をリング状に並べる（漫画のウニフラ吹き出し風）。
+            let roiRadius = hypot(rect.width, rect.height) / 2
+            for index in 0..<lineCount {
+                let baseAngle = (Double(index) / Double(lineCount)) * 2 * .pi
+                let angle = baseAngle + Double.random(in: -0.5...0.5, using: &rng) * (2 * .pi / Double(lineCount))
+                let halfWidth = baseHalfWidth * Double.random(in: 0.35...1.2, using: &rng)
+                let innerRadius = roiRadius * Double.random(in: 0.30...0.50, using: &rng)
+                let outerRadius = roiRadius * Double.random(in: 0.90...1.20, using: &rng)
+                let dx = CGFloat(cos(angle))
+                let dy = CGFloat(sin(angle))
+                let inner = CGPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius)
+                let outer = CGPoint(x: center.x + dx * outerRadius, y: center.y + dy * outerRadius)
+                let mid = CGPoint(x: (inner.x + outer.x) / 2, y: (inner.y + outer.y) / 2)
+                let perpX = -dy * CGFloat(halfWidth)
+                let perpY = dx * CGFloat(halfWidth)
+                context.beginPath()
+                context.move(to: inner)
+                context.addLine(to: CGPoint(x: mid.x + perpX, y: mid.y + perpY))
+                context.addLine(to: outer)
+                context.addLine(to: CGPoint(x: mid.x - perpX, y: mid.y - perpY))
+                context.closePath()
+                context.fillPath()
+            }
+        } else {
+            // 集中線/ベタフラッシュ: 外周側が太く中心へ向かって尖る三角形の放射線
+            for index in 0..<lineCount {
+                let baseAngle = (Double(index) / Double(lineCount)) * 2 * .pi
+                let angle = baseAngle + Double.random(in: -0.5...0.5, using: &rng) * (2 * .pi / Double(lineCount))
+                let halfWidth = baseHalfWidth * Double.random(in: 0.35...1.3, using: &rng)
+                let innerRadius = maxRadius * Double.random(in: 0.02...0.08, using: &rng)
+                let dx = CGFloat(cos(angle))
+                let dy = CGFloat(sin(angle))
+                let apex = CGPoint(x: center.x + dx * innerRadius, y: center.y + dy * innerRadius)
+                let baseCenter = CGPoint(x: center.x + dx * maxRadius, y: center.y + dy * maxRadius)
+                let perpX = -dy * CGFloat(halfWidth)
+                let perpY = dx * CGFloat(halfWidth)
+                context.beginPath()
+                context.move(to: apex)
+                context.addLine(to: CGPoint(x: baseCenter.x + perpX, y: baseCenter.y + perpY))
+                context.addLine(to: CGPoint(x: baseCenter.x - perpX, y: baseCenter.y - perpY))
+                context.closePath()
+                context.fillPath()
+            }
         }
         guard let image = context.makeImage() else { return fallback }
         var result = CIImage(cgImage: image).cropped(to: extent)

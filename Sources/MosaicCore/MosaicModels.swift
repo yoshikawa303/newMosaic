@@ -138,6 +138,24 @@ public enum MosaicTargetCategory: String, Codable, Sendable, CaseIterable {
 /// 永続化可能なROI個別のモザイク設定。
 ///
 /// `CGImage` は永続化対象にせず、任意パターン画像はUIが実行時に `MosaicStyle` へ渡す。
+/// フラッシュパターンの種別。
+public enum MosaicFlashKind: String, Codable, Equatable, Hashable, Sendable, CaseIterable {
+    /// 集中線（白地に黒の放射線）
+    case line
+    /// ベタフラッシュ（黒地に白の放射）
+    case beta
+    /// ウニフラッシュ（両端が尖った紡錘形の線をリング状に描く）
+    case uni
+
+    public var displayName: String {
+        switch self {
+        case .line: return "集中線"
+        case .beta: return "ベタフラッシュ"
+        case .uni: return "ウニフラッシュ"
+        }
+    }
+}
+
 public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
     public struct Tint: Codable, Equatable, Hashable, Sendable {
         public var red: Double
@@ -171,8 +189,8 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
     /// フラッシュ（集中線）: 放射の中心位置（ROIのローカル正規化座標、0〜1・左上原点）。
     /// nilはROI中心を使う。
     public var flashCenter: NormalizedPoint?
-    /// フラッシュ: 種別（false=集中線（黒線）、true=ベタフラッシュ（黒地に白））。
-    public var flashBeta: Bool
+    /// フラッシュ: 種別（集中線/ベタフラッシュ/ウニフラッシュ）。
+    public var flashKind: MosaicFlashKind
     /// Application Support内に保存した任意パターン画像の識別子。
     public var patternImageIdentifier: String?
 
@@ -191,7 +209,7 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         cloudDensity: Double = 0.5,
         cloudTone: Bool = false,
         flashCenter: NormalizedPoint? = nil,
-        flashBeta: Bool = false,
+        flashKind: MosaicFlashKind = .line,
         patternImageIdentifier: String? = nil
     ) {
         self.pattern = pattern
@@ -208,14 +226,19 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         self.cloudDensity = cloudDensity
         self.cloudTone = cloudTone
         self.flashCenter = flashCenter
-        self.flashBeta = flashBeta
+        self.flashKind = flashKind
         self.patternImageIdentifier = patternImageIdentifier
     }
 
     private enum CodingKeys: String, CodingKey {
         case pattern, opacity, tint, blockScale, edgeFeather, stripeWidth, stripeSpacing,
              stripeVertical, stripeRandom, stripeTone, stripeWobble, cloudDensity, cloudTone,
-             flashCenter, flashBeta, patternImageIdentifier
+             flashCenter, flashKind, patternImageIdentifier
+    }
+
+    /// v0.0.00080の一時形式（種別をBoolの`flashBeta`で保持）からの読み込み互換用。
+    private enum LegacyCodingKeys: String, CodingKey {
+        case flashBeta
     }
 
     /// 旧バージョン（ボーダー縦/横/ランダムを別パターンとして保持していた時代）に保存された
@@ -234,7 +257,12 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         cloudTone = try container.decode(Bool.self, forKey: .cloudTone)
         stripeWobble = try container.decodeIfPresent(Double.self, forKey: .stripeWobble) ?? 0
         flashCenter = try container.decodeIfPresent(NormalizedPoint.self, forKey: .flashCenter)
-        flashBeta = try container.decodeIfPresent(Bool.self, forKey: .flashBeta) ?? false
+        if let kind = try container.decodeIfPresent(MosaicFlashKind.self, forKey: .flashKind) {
+            flashKind = kind
+        } else {
+            let legacy = try decoder.container(keyedBy: LegacyCodingKeys.self)
+            flashKind = (try legacy.decodeIfPresent(Bool.self, forKey: .flashBeta) ?? false) ? .beta : .line
+        }
         patternImageIdentifier = try container.decodeIfPresent(String.self, forKey: .patternImageIdentifier)
 
         switch rawPattern {

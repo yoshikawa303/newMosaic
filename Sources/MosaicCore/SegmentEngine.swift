@@ -258,8 +258,15 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
 
         let black = CIImage(color: .black).cropped(to: extent)
-        // 前景マスクをROIの形状範囲（矩形/楕円+回転）に制限して返す（ROI外へモザイクが漏れないようにする）
-        return ShapeSegmentEngine.restrict(mask.composited(over: black), to: roi, extent: extent)
+        // 前景マスクの制限はROIの「（回転を含む）矩形範囲」のみとする。ROIの図形（楕円等）で
+        // 制限すると、せっかく取れた対象物の輪郭が楕円形に切り取られ「対象形状の輪郭でマスク
+        // できない」精度低下になる（GUI報告で確定したデグレ。対象形状の目的は対象物の実形状の
+        // ままマスクすることのため、ROI形状は検索範囲としてのみ扱う）。
+        let boundsRect = roi.rect.cgRect(imageSize: imageSize, origin: .bottomLeft)
+        let boundsMask = ShapeSegmentEngine.rectangleMask(rect: boundsRect, extent: extent, rotation: roi.rotation)
+        return mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: boundsMask
+        ]).cropped(to: extent)
     }
 
     /// 矩形を中心周りに回転させた場合の軸並行外接矩形。ROIのクロップ範囲が回転後の

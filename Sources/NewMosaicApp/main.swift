@@ -581,12 +581,17 @@ private final class LayerRowView: NSTableCellView {
         label.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         addSubview(checkbox)
         addSubview(label)
+        // ラベルのtrailingを行末へ固定するとラベルが行幅いっぱいへ引き伸ばされ、テキストの
+        // 寄せ設定次第で右端に表示されてしまう（alignment指定・属性付き文字列でも環境により
+        // 右寄せ表示になるデグレが再発した）。trailingは「はみ出さない」上限（<=）だけにして
+        // ラベル幅を内容幅に保ち、フレーム自体をチェックボックス直後（左側）へ置く。
+        // これでテキスト寄せ設定に関係なく、見た目は常に左寄せになる。
         NSLayoutConstraint.activate([
             checkbox.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 2),
             checkbox.centerYAnchor.constraint(equalTo: centerYAnchor),
             label.leadingAnchor.constraint(equalTo: checkbox.trailingAnchor, constant: 4),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
-            label.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -2)
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -2)
         ])
     }
 
@@ -760,9 +765,9 @@ final class MosaicWindowController: NSObject {
     /// ボーダー: 並行揺れ（各線を中央軸にランダムで傾ける度合い。ランダムON時のみ有効）
     private let styleStripeWobbleSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let styleStripeWobbleValueLabel = NSTextField(labelWithString: "0 %")
-    /// フラッシュ: 種別（集中線=白地に黒線 / ベタフラッシュ=黒地に白）
+    /// フラッシュ: 種別（集中線 / ベタフラッシュ / ウニフラッシュ）
     private let styleFlashKindControl = NSSegmentedControl(
-        labels: ["集中線", "ベタフラッシュ"], trackingMode: .selectOne, target: nil, action: nil
+        labels: MosaicFlashKind.allCases.map(\.displayName), trackingMode: .selectOne, target: nil, action: nil
     )
     private let styleCloudDensitySlider = NSSlider(value: 0.5, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
     private let styleCloudDensityValueLabel = NSTextField(labelWithString: "50%")
@@ -977,7 +982,7 @@ final class MosaicWindowController: NSObject {
                     key: "z", modifiers: [.command, .shift], isRecommended: true, action: #selector(performRedo)),
         AppShortcut(id: "clearROIs", category: "編集", title: "レイヤ削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(clearROIs)),
-        AppShortcut(id: "generateCandidates", category: "処理", title: "候補を生成",
+        AppShortcut(id: "generateCandidates", category: "処理", title: "自動候補生成",
                     key: "g", modifiers: [.command], isRecommended: true, action: #selector(generateCandidates)),
         AppShortcut(id: "applyMosaic", category: "処理", title: "モザイクを適用",
                     key: "\r", modifiers: [.command], isRecommended: true, action: #selector(applyMosaic)),
@@ -999,7 +1004,7 @@ final class MosaicWindowController: NSObject {
                     key: "", modifiers: [], isRecommended: false, action: #selector(exportTrainingDataset)),
         AppShortcut(id: "registerFolderAsLinks", category: "一括処理", title: "フォルダを一括登録（リンク）",
                     key: "", modifiers: [], isRecommended: false, action: #selector(registerFolderAsLinks)),
-        AppShortcut(id: "repairBrokenLinksAction", category: "一括処理", title: "リンク切れを修正",
+        AppShortcut(id: "repairBrokenLinksAction", category: "一括処理", title: "リンク切れ修正",
                     key: "", modifiers: [], isRecommended: false, action: #selector(repairBrokenLinksAction)),
         AppShortcut(id: "batchProcessAll", category: "一括処理", title: "一括処理",
                     key: "", modifiers: [], isRecommended: false, action: #selector(batchProcessAll))
@@ -1046,15 +1051,12 @@ final class MosaicWindowController: NSObject {
         undoButton.keyEquivalentModifierMask = [.command]
         redoButton.keyEquivalent = "z"
         redoButton.keyEquivalentModifierMask = [.command, .shift]
-        let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
         let linkFolderButton = shortcutToolbarButton("registerFolderAsLinks", symbol: "folder.badge.plus")
-        let repairLinksButton = shortcutToolbarButton("repairBrokenLinksAction", symbol: "link.badge.plus")
         let batchButton = shortcutToolbarButton(
             "batchProcessAll",
             symbol: "bolt.circle",
             helpOverride: "一括処理（未加工の画像を候補生成→適用→保存）"
         )
-        let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
         let zoomOutButton = shortcutToolbarButton("zoomOut", symbol: "minus.magnifyingglass")
         let zoomFitButton = shortcutToolbarButton("zoomToFit", symbol: "arrow.up.left.and.arrow.down.right")
         let zoomInButton = shortcutToolbarButton("zoomIn", symbol: "plus.magnifyingglass")
@@ -1067,12 +1069,14 @@ final class MosaicWindowController: NSObject {
         zoomLabel.alignment = .center
         zoomLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
+        // 配置（ユーザー指定）: ファイル系 | 一括処理・候補生成・適用・レイヤ削除 | 元に戻す・やり直す |
+        // 編集/範囲選択モード切替。ライブラリ関連（リンク切れ修正・画像出力・Finderで表示・削除）は
+        // ライブラリパネル側の操作行へ移動した。
         let toolbar = NSStackView(views: [
-            openButton, pasteButton, linkFolderButton, repairLinksButton, batchButton, makeToolbarSeparator(),
-            canvasModeControl, makeToolbarSeparator(),
-            detectButton, applyButton, clearButton, makeToolbarSeparator(),
+            openButton, pasteButton, linkFolderButton, makeToolbarSeparator(),
+            batchButton, detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
-            saveButton, revealButton,
+            canvasModeControl,
             NSView(), makeToolbarSeparator(), zoomOutButton, zoomFitButton, zoomInButton, zoomLabel
         ])
         toolbar.orientation = .horizontal
@@ -1894,7 +1898,7 @@ final class MosaicWindowController: NSObject {
         styleFlashKindControl.target = self
         styleFlashKindControl.action = #selector(mosaicStyleChanged)
         styleFlashKindControl.selectedSegment = 0
-        styleFlashKindControl.toolTip = "フラッシュの種別（集中線=黒線 / ベタフラッシュ=黒地に白）"
+        styleFlashKindControl.toolTip = "フラッシュの種別（集中線=黒線 / ベタフラッシュ=黒地に白 / ウニフラッシュ=紡錘形の線のリング）"
         styleFlashResetButton.target = self
         styleFlashResetButton.action = #selector(resetFlashCenter)
         styleFlashResetButton.toolTip = "フラッシュの中心を選択範囲の中央に戻す（中心位置は画像上のハンドルをドラッグして指定できます）"
@@ -2019,19 +2023,32 @@ final class MosaicWindowController: NSObject {
         let tintRow = NSStackView(views: [styleTintCheckbox, styleTintColorWell])
         tintRow.orientation = .horizontal
         tintRow.spacing = 6
+        // スライダーと設定値は1つのスタックにまとめ、固定8ptマージンで隣接させる
+        // （NSGridViewの列幅に依存すると他行の幅次第で間隔が広がるため。鼠径部位置の行と同じ方式）。
+        func sliderValueRow(_ slider: NSSlider, _ value: NSTextField) -> NSStackView {
+            let stack = NSStackView(views: [slider, value])
+            stack.orientation = .horizontal
+            stack.spacing = 8
+            stack.alignment = .centerY
+            return stack
+        }
+        // ランダム/トーンは候補カテゴリと同程度の間隔で横並びにする（列をまたいで離れないように）
+        let borderOptionsRow = NSStackView(views: [styleBorderRandomCheckbox, styleBorderToneCheckbox])
+        borderOptionsRow.orientation = .horizontal
+        borderOptionsRow.spacing = 12
         let styleGrid = NSGridView(views: [
             [styleRowLabel("パターン"), makePatternTileGrid(), NSGridCell.emptyContentView],
-            [styleRowLabel("透明度"), styleOpacitySlider, styleOpacityValueLabel],
+            [styleRowLabel("透明度"), sliderValueRow(styleOpacitySlider, styleOpacityValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("塗りつぶし色"), tintRow, NSGridCell.emptyContentView],
-            [styleRowLabel("細かさ"), styleBlockScaleSlider, styleBlockScaleValueLabel],
-            [styleRowLabel("輪郭ぼかし"), styleFeatherSlider, styleFeatherValueLabel],
-            [styleRowLabel("帯の太さ"), styleStripeWidthSlider, styleStripeWidthValueLabel],
-            [styleRowLabel("帯の間隔"), styleStripeSpacingSlider, styleStripeSpacingValueLabel],
+            [styleRowLabel("細かさ"), sliderValueRow(styleBlockScaleSlider, styleBlockScaleValueLabel), NSGridCell.emptyContentView],
+            [styleRowLabel("輪郭ぼかし"), sliderValueRow(styleFeatherSlider, styleFeatherValueLabel), NSGridCell.emptyContentView],
+            [styleRowLabel("帯の太さ"), sliderValueRow(styleStripeWidthSlider, styleStripeWidthValueLabel), NSGridCell.emptyContentView],
+            [styleRowLabel("帯の間隔"), sliderValueRow(styleStripeSpacingSlider, styleStripeSpacingValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("方向"), styleBorderDirectionControl, NSGridCell.emptyContentView],
-            [styleRowLabel("ボーダー"), styleBorderRandomCheckbox, styleBorderToneCheckbox],
-            [styleRowLabel("並行揺れ"), styleStripeWobbleSlider, styleStripeWobbleValueLabel],
+            [styleRowLabel("ボーダー"), borderOptionsRow, NSGridCell.emptyContentView],
+            [styleRowLabel("並行揺れ"), sliderValueRow(styleStripeWobbleSlider, styleStripeWobbleValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("種別"), styleFlashKindControl, NSGridCell.emptyContentView],
-            [styleRowLabel("密度"), styleCloudDensitySlider, styleCloudDensityValueLabel],
+            [styleRowLabel("密度"), sliderValueRow(styleCloudDensitySlider, styleCloudDensityValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("トーン"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
             [styleRowLabel("フラッシュ"), styleFlashResetButton, NSGridCell.emptyContentView],
             [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
@@ -2244,7 +2261,10 @@ final class MosaicWindowController: NSObject {
         style.cloudDensity = styleCloudDensitySlider.doubleValue
         style.cloudTone = styleCloudToneCheckbox.state == .on
         style.flashCenter = pendingFlashCenter
-        style.flashBeta = styleFlashKindControl.selectedSegment == 1
+        let flashKinds = MosaicFlashKind.allCases
+        if (0..<flashKinds.count).contains(styleFlashKindControl.selectedSegment) {
+            style.flashKind = flashKinds[styleFlashKindControl.selectedSegment]
+        }
         style.patternImage = customPatternImage
         style.patternImageIdentifier = customPatternImageIdentifier
         return style
@@ -2328,7 +2348,7 @@ final class MosaicWindowController: NSObject {
         styleCloudDensitySlider.doubleValue = style.cloudDensity
         styleCloudToneCheckbox.state = style.cloudTone ? .on : .off
         pendingFlashCenter = style.flashCenter
-        styleFlashKindControl.selectedSegment = style.flashBeta ? 1 : 0
+        styleFlashKindControl.selectedSegment = MosaicFlashKind.allCases.firstIndex(of: style.flashKind) ?? 0
         customPatternImageIdentifier = style.patternImageIdentifier
         customPatternImage = style.patternImageIdentifier.flatMap { patternImage(for: $0) } ?? style.patternImage
         updateCustomPatternPreview(customPatternImage)
@@ -2578,7 +2598,10 @@ final class MosaicWindowController: NSObject {
         defaults.set(styleStripeWobbleSlider.doubleValue, forKey: prefix + "stripeWobble")
         defaults.set(styleCloudDensitySlider.doubleValue, forKey: prefix + "cloudDensity")
         defaults.set(styleCloudToneCheckbox.state == .on, forKey: prefix + "cloudTone")
-        defaults.set(styleFlashKindControl.selectedSegment == 1, forKey: prefix + "flashBeta")
+        let flashKindsForSave = MosaicFlashKind.allCases
+        if (0..<flashKindsForSave.count).contains(styleFlashKindControl.selectedSegment) {
+            defaults.set(flashKindsForSave[styleFlashKindControl.selectedSegment].rawValue, forKey: prefix + "flashKind")
+        }
         defaults.set(customPatternImageIdentifier, forKey: prefix + "patternImageIdentifier")
     }
 
@@ -2632,7 +2655,14 @@ final class MosaicWindowController: NSObject {
         styleBorderToneCheckbox.state = defaults.bool(forKey: prefix + "stripeTone") ? .on : .off
         styleStripeWobbleSlider.doubleValue = defaults.object(forKey: prefix + "stripeWobble") != nil
             ? defaults.double(forKey: prefix + "stripeWobble") : fallback.stripeWobble
-        styleFlashKindControl.selectedSegment = defaults.bool(forKey: prefix + "flashBeta") ? 1 : 0
+        if let rawKind = defaults.string(forKey: prefix + "flashKind"),
+           let savedKind = MosaicFlashKind(rawValue: rawKind),
+           let kindIndex = MosaicFlashKind.allCases.firstIndex(of: savedKind) {
+            styleFlashKindControl.selectedSegment = kindIndex
+        } else {
+            // v0.0.00080の一時キー（flashBeta: Bool）からの移行
+            styleFlashKindControl.selectedSegment = defaults.bool(forKey: prefix + "flashBeta") ? 1 : 0
+        }
         pendingFlashCenter = nil
         styleCloudDensitySlider.doubleValue = defaults.object(forKey: prefix + "cloudDensity") != nil
             ? defaults.double(forKey: prefix + "cloudDensity") : fallback.cloudDensity
@@ -2951,6 +2981,7 @@ final class MosaicWindowController: NSObject {
         menu.delegate = self
         menu.addItem(withTitle: "グループ化", action: #selector(groupSelectedLayers), keyEquivalent: "")
         menu.addItem(withTitle: "グループ解除", action: #selector(ungroupSelectedGroup), keyEquivalent: "")
+        menu.addItem(withTitle: "モザイク対象に追加", action: #selector(addPersonLayerAsROI), keyEquivalent: "")
         layerOutlineView.menu = menu
     }
 
@@ -2971,10 +3002,42 @@ final class MosaicWindowController: NSObject {
         // グループ名自体の選択に加え、グループ内の個別レイヤ/ROIを選択した場合も
         // 「グループ解除」（その項目だけをグループから除外）を出せるようにする。
         let hasGroupSelected = items.contains { $0 is LayerGroup || $0 is ROIListGroup } || alreadyGrouped
-        guard menu.items.count >= 2 else { return }
+        let hasPersonSelected = leaves.contains { $0.kind.isPerson }
+        guard menu.items.count >= 3 else { return }
         menu.items[0].title = (canGroup && alreadyGrouped) ? "再グループ化" : "グループ化"
         menu.items[0].isHidden = !canGroup
         menu.items[1].isHidden = !hasGroupSelected
+        // 人物レイヤ選択時のみ「モザイク対象に追加」を表示（人物にもモザイク処理を可能にする導線）
+        menu.items[2].isHidden = !hasPersonSelected
+    }
+
+    /// 選択中の人物レイヤの認識範囲からモザイクROIを作成する（人物にもモザイク処理を可能にする）。
+    /// マスク生成を「人物の輪郭」にすれば人物のシルエットに沿ったマスクになる。
+    @objc private func addPersonLayerAsROI() {
+        let items = layerOutlineView.selectedRowIndexes.map { layerOutlineView.item(atRow: $0) }
+        let personIndices = items.compactMap { item -> Int? in
+            guard let leaf = item as? LayerLeaf, case .person(let index) = leaf.kind else { return nil }
+            return index
+        }
+        let validIndices = personIndices.filter { $0 < canvas.personLayerRects.count }
+        guard !validIndices.isEmpty else {
+            updateStatus("モザイク対象に追加する人物レイヤを選択してください")
+            return
+        }
+        pushUndoSnapshot(currentEditorState())
+        suspendMosaicPreview()
+        for index in validIndices {
+            canvas.rois.append(MosaicROI(
+                rect: canvas.personLayerRects[index],
+                confidence: 1,
+                source: "person-layer",
+                shape: .rectangle,
+                category: .other
+            ))
+        }
+        resumeMosaicPreviewIfNeeded()
+        reloadLayerList()
+        updateStatus("人物レイヤをモザイク対象に追加しました（マスク生成を「人物の輪郭」にすると輪郭に沿ってマスクされます）")
     }
 
     /// 既存グループ名を避けた「グループN」のうち、使われていない最小のNを採番する
@@ -4049,7 +4112,16 @@ final class MosaicWindowController: NSObject {
         let openProcessedButton = shortcutToolbarButton("openSelectedLibraryProcessed", symbol: "photo.badge.checkmark")
         let deleteButton = shortcutToolbarButton("deleteSelectedLibraryItems", symbol: "trash")
         let exportButton = shortcutToolbarButton("exportTrainingDataset", symbol: "shippingbox")
-        let buttons = NSStackView(views: [openOriginalButton, openProcessedButton, deleteButton, exportButton])
+        // ライブラリ関連の操作はツールバーからライブラリパネルへ集約（ユーザー指定の配置）。
+        // 並び: 元画像/加工後を開く → リンク切れ修正 → 画像出力 → Finderで表示 → データセット
+        // → 削除（削除は誤操作を避けるため行末尾）。
+        let repairLinksButton = shortcutToolbarButton("repairBrokenLinksAction", symbol: "link.badge.plus")
+        let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
+        let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
+        let buttons = NSStackView(views: [
+            openOriginalButton, openProcessedButton, repairLinksButton,
+            saveButton, revealButton, exportButton, deleteButton
+        ])
         buttons.orientation = .horizontal
         buttons.spacing = 4
         buttons.translatesAutoresizingMaskIntoConstraints = false
@@ -5810,6 +5882,19 @@ extension MosaicWindowController: NSSplitViewDelegate {
 }
 
 extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate {
+    /// レイヤ一覧のルート表示順: モザイク対象 → 人物（グループ含む）→ 骨格 → 画像
+    /// （従来の画像先頭から変更。ユーザー指定の並び順）。
+    fileprivate func rootLayerItems() -> [AnyObject] {
+        let roiLeaves = ungroupedLayers.filter { $0.kind == .roi }
+        let personLeaves = ungroupedLayers.filter { $0.kind.isPerson }
+        let poseLeaves = ungroupedLayers.filter { $0.kind.isPose }
+        let imageLeaves = ungroupedLayers.filter { $0.kind == .image }
+        let others = ungroupedLayers.filter {
+            $0.kind != .roi && $0.kind != .image && !$0.kind.isPerson && !$0.kind.isPose
+        }
+        return roiLeaves + layerGroups + personLeaves + poseLeaves + others + imageLeaves
+    }
+
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
         if item == nil { return layerGroups.count + ungroupedLayers.count }
         if let group = item as? LayerGroup { return group.children.count }
@@ -5831,8 +5916,8 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
 
     func outlineView(_ outlineView: NSOutlineView, child index: Int, ofItem item: Any?) -> Any {
         if item == nil {
-            if index < layerGroups.count { return layerGroups[index] }
-            return ungroupedLayers[index - layerGroups.count]
+            let items = rootLayerItems()
+            if index < items.count { return items[index] }
         }
         if let group = item as? LayerGroup { return group.children[index] }
         if let roiGroup = item as? ROIListGroup { return roiGroup.children[index] }
