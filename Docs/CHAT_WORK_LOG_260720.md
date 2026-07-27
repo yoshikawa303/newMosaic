@@ -2048,3 +2048,13 @@
   検証は swift build / swift test 74/74 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00084で再パッケージ。ドキュメント（CHANGELOG/ARCHITECTURE §5.30/QUALITY_STATS）を同期。
 
 - 作業時間: 約70分（動画基盤のサブエージェント作業は別途進行中）
+
+### 2026-07-27 16:30 JST - Claude Code - 種別: 作業結果 - 動画プラグイン基盤MosaicVideoKitの検証・ハング修正・統合（v0.0.00085）
+
+- 内容:
+
+  Sonnetサブエージェントが作成した動画基盤（MosaicVideoKit: VideoFrameReader/VideoROITracker/VideoMosaicExporter/VideoDetectionPipeline+合成動画テスト5件、既存ソースへの変更はPackage.swiftのみ）をworktreeで検証。単体では全テストPASSしたが、mainへマージ後の全スイート並列実行でテストランナーがハングする問題を発見（無期限のDispatchSemaphore待機とisReadyForMoreMediaDataスピンが、並列テスト環境でスレッドプールを枯渇させ完了ハンドラが実行されない構図）。全待機へタイムアウト（超過時はエラー化）を付与し、AVFoundationを使う動画テストを@Suite(.serialized)で直列実行に変更して解消した。
+
+  修正後の全79件（既存74+動画5）が3.7秒でPASS、governance guard / local quality gate もPASS。v0.0.00085として統合コミット。UI統合（ライブラリでの動画再生・動画ROI操作）は次段階で行う。初期段階の制約: 音声なし・H.264出力。
+
+- 作業時間: 約40分

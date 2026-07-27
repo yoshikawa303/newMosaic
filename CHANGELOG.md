@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00085 - 2026-07-27
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 追加: 動画対応プラグイン基盤「MosaicVideoKit」を統合した。既存機能へ影響を与えない独立モジュールで、動画のフレーム読出し（AVFoundation）、ROIの移動追随（Vision物体追跡）、モザイク適用付き再エンコード（H.264、初期段階は音声なし）、キーフレーム検出+追跡パイプラインを提供する。UI統合（ライブラリでの再生・動画のROI認識操作）は次段階で行う。
+- バグ修正: 上記モジュールの全テストスイート並列実行時のハング（無期限セマフォ待機によるスレッドプール枯渇）を、タイムアウト付き待機と動画テストの直列実行化で修正した。
+
+■更新履歴
+
+- `Sources/MosaicVideoKit/`（VideoFrameReader/VideoROITracker/VideoMosaicExporter/VideoDetectionPipeline）+ `Tests/MosaicVideoKitTests`（合成動画による5テスト）を追加（Sonnetサブエージェント作、worktreeで検証後にマージ）。`Package.swift`へターゲット追加。
+- `VideoMosaicExporter`: `finishWriting`待機を60秒タイムアウト付きへ、`isReadyForMoreMediaData`スピンへ30秒デッドライン+writer状態チェックを追加（`writingFailed`エラー新設）。テスト側も同様のタイムアウト+`@Suite(.serialized)`化。
+
 ## v0.0.00084 - 2026-07-27
 
 ■更新履歴（Readme / ChangeLog 用）

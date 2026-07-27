@@ -13,6 +13,7 @@ public enum VideoMosaicExporterError: Error, LocalizedError {
     case pixelBufferCreationFailed
     case renderFailed
     case appendFailed
+    case writingFailed(Error?)
     case cancelled
 
     public var errorDescription: String? {
@@ -23,6 +24,9 @@ public enum VideoMosaicExporterError: Error, LocalizedError {
             return "動画書き出しの準備に失敗しました: \(detail)"
         case .pixelBufferPoolUnavailable:
             return "書き出し用のフレームバッファを確保できませんでした"
+        case .writingFailed(let underlying):
+            let detail = underlying.map { "（\($0.localizedDescription)）" } ?? ""
+            return "動画の書き出しが完了しませんでした\(detail)"
         case .pixelBufferCreationFailed:
             return "フレームバッファの生成に失敗しました"
         case .renderFailed:
@@ -174,7 +178,11 @@ public final class VideoMosaicExporter {
                     )
                 }
 
+                let readyDeadline = Date().addingTimeInterval(30)
                 while !input.isReadyForMoreMediaData {
+                    if Date() >= readyDeadline || writer.status != .writing {
+                        throw VideoMosaicExporterError.writingFailed(writer.error)
+                    }
                     if isCancelled() { throw VideoMosaicExporterError.cancelled }
                     Thread.sleep(forTimeInterval: 0.005)
                 }
@@ -207,7 +215,10 @@ public final class VideoMosaicExporter {
         input.markAsFinished()
         let semaphore = DispatchSemaphore(value: 0)
         writer.finishWriting { semaphore.signal() }
-        semaphore.wait()
+        // 無期限waitは呼び出しスレッドを塞ぎハングの原因になるため、タイムアウト付きで待つ
+        guard semaphore.wait(timeout: .now() + 60) == .success else {
+            throw VideoMosaicExporterError.writingFailed(writer.error)
+        }
 
         if writer.status == .failed {
             throw VideoMosaicExporterError.writerCreationFailed(writer.error?.localizedDescription ?? "unknown")

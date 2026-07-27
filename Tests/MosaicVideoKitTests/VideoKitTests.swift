@@ -69,7 +69,11 @@ private func makeSyntheticVideo(
     writer.startSession(atSourceTime: .zero)
 
     for index in 0..<frameCount {
+        let readyDeadline = Date().addingTimeInterval(10)
         while !input.isReadyForMoreMediaData {
+            guard Date() < readyDeadline, writer.status == .writing else {
+                throw SyntheticVideoError.pixelBufferPoolUnavailable
+            }
             Thread.sleep(forTimeInterval: 0.002)
         }
         guard let pool = adaptor.pixelBufferPool else {
@@ -109,10 +113,18 @@ private func makeSyntheticVideo(
     input.markAsFinished()
     let semaphore = DispatchSemaphore(value: 0)
     writer.finishWriting { semaphore.signal() }
-    semaphore.wait()
+    // 無期限waitはテスト並列実行時にスレッドプールを塞いでスイート全体をハングさせるため、
+    // タイムアウト付きで待ち、完了しなかった場合はエラーにする
+    guard semaphore.wait(timeout: .now() + 15) == .success, writer.status == .completed else {
+        throw SyntheticVideoError.pixelBufferPoolUnavailable
+    }
 }
 
 // MARK: - VideoFrameReader
+
+// AVFoundationを使うテストは他テストとの並列実行でスレッド・リソース競合を起こしやすいため
+// 直列実行にする（全体スイート実行時のハング対策）。
+@Suite(.serialized) struct VideoKitTests {
 
 @Test func readerReportsCorrectFrameCountAndSize() throws {
     let url = makeTemporaryVideoURL()
@@ -247,4 +259,6 @@ private func makeSyntheticVideo(
     #expect(FileManager.default.fileExists(atPath: outputURL.path))
     let info = try VideoFrameReader(url: outputURL).loadInfo()
     #expect(info.naturalSize.width == testSize.width)
+}
+
 }
