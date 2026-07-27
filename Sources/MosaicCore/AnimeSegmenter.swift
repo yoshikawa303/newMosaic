@@ -120,6 +120,37 @@ public final class AnimeSegmenter {
         return outputContext.makeImage()
     }
 
+    /// 人物矩形ごとにクロップして個別推論した per-person マスクを返す（全体フレームサイズ、矩形外は黒）。
+    /// 全体画像1回の推論では、画像内で小さく写る人物（複数人物の2人目以降等）のマスクが
+    /// 取れない・弱いことがあるため、人物領域を切り出して実効解像度を上げてから推論する
+    /// （「人物3のマスクが作成されない」報告への対応。複数人物では人物範囲毎にマスク生成する）。
+    public func personMaskByCrop(in image: CGImage, bounds: NormalizedRect) throws -> CGImage? {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        // 人物の輪郭が矩形ぎりぎりで切れないよう少し広げてクロップする
+        let expanded = bounds.expanded(scale: 1.08).clamped()
+        let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
+        guard cropRect.width >= 16, cropRect.height >= 16,
+              let crop = image.cropping(to: cropRect),
+              let cropMask = try characterMask(in: crop) else { return nil }
+        // クロップ位置へ配置した全体フレームのマスクを作り、さらに元のbounds内へ制限する
+        guard let context = CGContext(
+            data: nil,
+            width: Int(imageSize.width),
+            height: Int(imageSize.height),
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(origin: .zero, size: imageSize))
+        // CGContextは下原点のため配置位置を変換して描画する
+        let cropRectBottomLeft = expanded.cgRect(imageSize: imageSize, origin: .bottomLeft)
+        context.draw(cropMask, in: cropRectBottomLeft)
+        guard let fullMask = context.makeImage() else { return nil }
+        return Self.personMask(fullMask: fullMask, bounds: bounds, imageSize: imageSize)
+    }
+
     /// 全体キャラクターマスクを人物矩形内へ制限した per-person マスクを返す（矩形外は黒）。
     public static func personMask(
         fullMask: CGImage,

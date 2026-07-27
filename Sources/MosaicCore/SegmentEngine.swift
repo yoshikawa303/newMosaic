@@ -109,7 +109,7 @@ public final class ShapeSegmentEngine: Segmenting {
             .translatedBy(x: -center.x, y: -center.y)
     }
 
-    static func rectangleMask(rect: CGRect, extent: CGRect, rotation: Double = 0) -> CIImage {
+    public static func rectangleMask(rect: CGRect, extent: CGRect, rotation: Double = 0) -> CIImage {
         var white = CIImage(color: .white).cropped(to: rect)
         if abs(rotation) > 0.01 {
             white = white.transformed(by: ciRotation(around: CGPoint(x: rect.midX, y: rect.midY), degrees: rotation))
@@ -230,28 +230,22 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         imageSize: CGSize,
         extent: CGRect
     ) -> CIImage? {
-        // ROIが回転している場合、無回転のroi.rectだけでクロップすると実際の（回転した）選択範囲と
-        // クロップ位置がずれ、対象物がクロップ外へ出てVisionが検知できないことがあった
-        // （GUI報告により判明）。回転後の外接矩形を基準にクロップすることで、回転した選択範囲でも
-        // 対象物を確実にクロップへ含める。
-        let baseRectPixels = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
-        let rotatedBoundsPixels = Self.rotatedBoundingBox(of: baseRectPixels, rotationDegrees: roi.rotation)
-        let expanded = NormalizedRect(rotatedBoundsPixels, imageSize: imageSize).expanded(scale: 1.15).clamped()
+        // クロップ範囲は実装当初（Build 41）の計算と完全に一致させる（当初は輪郭の一致精度が
+        // 高かったため、Vision前景抽出への入力を当時と同じに保つ。v82で行った384px拡大入力は
+        // 当時うまく動いていた経路への入力を変えてしまう精度低下要因だったため廃止）。
+        // 回転ROIのみ、無回転rectでは対象物がクロップ外へ出るため回転後の外接矩形を基準にする。
+        let baseNormalized: NormalizedRect
+        if abs(roi.rotation) > 0.01 {
+            let baseRectPixels = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
+            let rotatedBoundsPixels = Self.rotatedBoundingBox(of: baseRectPixels, rotationDegrees: roi.rotation)
+            baseNormalized = NormalizedRect(rotatedBoundsPixels, imageSize: imageSize)
+        } else {
+            baseNormalized = roi.rect
+        }
+        let expanded = baseNormalized.expanded(scale: 1.15).clamped()
         let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
         guard cropRect.width >= 16, cropRect.height >= 16,
-              var crop = image.cropping(to: cropRect) else { return nil }
-
-        // 小さいクロップ（小さな部位ROI）はVisionの前景抽出・顕著領域の解像度が不足して
-        // 輪郭が取れないため、短辺が384px以上になるよう整数倍へ拡大してから推論する
-        // （「性器の対象形状がきれいに認識できない」報告への精度向上策。マスクは後段で
-        // クロップ実サイズへスケールされるため座標系への影響はない）。
-        let shortSide = min(crop.width, crop.height)
-        if shortSide < 384, shortSide > 0 {
-            let scale = Int((384.0 / Double(shortSide)).rounded(.up))
-            if scale > 1, let upscaled = Self.upscaled(crop, scale: scale) {
-                crop = upscaled
-            }
-        }
+              let crop = image.cropping(to: cropRect) else { return nil }
 
         var localMask = Self.foregroundMask(in: crop)
         // 前景がクロップのほぼ全面を覆う場合（ROI周辺が人物で埋まっていて対象物を分離できていない）
@@ -316,10 +310,9 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         return CIImage(cvPixelBuffer: buffer)
     }
 
-    /// クロップ画像の顕著領域（オブジェクトネス）マスク。
-    /// ヒートマップのままでは輪郭がぼやけた「なんとなくの塊」にしかならず対象の形が出ないため、
-    /// しきい値で二値化してから軽くぼかし、対象物の形がはっきり出る硬めのマスクにする
-    /// （「対象形状がきれいに認識できない」報告への精度向上策）。
+    /// クロップ画像の顕著領域（オブジェクトネス）マスク。ヒートマップを強調して軟マスク化する。
+    /// 実装当初（Build 41）のパラメータを維持する（v82で試したしきい値二値化は、当初の
+    /// ソフトなマスクを角張った塊に変えてしまう精度低下要因だったため廃止）。
     static func saliencyMask(in crop: CGImage) -> CIImage? {
         let request = VNGenerateObjectnessBasedSaliencyImageRequest()
         try? VNImageRequestHandler(cgImage: crop, options: [:]).perform([request])
@@ -332,28 +325,9 @@ public final class RegionForegroundSegmentEngine: Segmenting {
                 kCIInputContrastKey: 2.2,
                 kCIInputBrightnessKey: -0.05
             ])
-            .applyingFilter("CIColorThreshold", parameters: ["inputThreshold": 0.35])
             .clampedToExtent()
-            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.0])
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: 1.5])
             .cropped(to: heat.extent)
-    }
-
-    /// クロップ画像を整数倍へ拡大する（Vision推論の実効解像度を上げるための前処理）。
-    static func upscaled(_ image: CGImage, scale: Int) -> CGImage? {
-        let width = image.width * scale
-        let height = image.height * scale
-        guard let context = CGContext(
-            data: nil,
-            width: width,
-            height: height,
-            bitsPerComponent: 8,
-            bytesPerRow: 0,
-            space: CGColorSpaceCreateDeviceRGB(),
-            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
-        ) else { return nil }
-        context.interpolationQuality = .high
-        context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
-        return context.makeImage()
     }
 
     /// マスクの白領域被覆率（0〜1）。前景抽出が対象物を分離できているかの判定に使う。

@@ -1,8 +1,68 @@
 import AppKit
+import CoreImage
 import ImageIO
 import MosaicCore
 import OSLog
 import UniformTypeIdentifiers
+
+/// 人物レイヤ由来のROI（source "person-layer-N"）を、候補生成時の人物シルエットマスクで
+/// マスクするラッパー。人物ROIを矩形のままモザイクすると人物矩形全体が塗られてしまうため、
+/// 選択中のマスク生成方式に関係なく人物の輪郭に沿ったマスクを適用する。
+/// それ以外のROIは内包する基エンジンへそのまま委譲する。
+private final class PersonLayerSegmentEngine: Segmenting {
+    static let sourcePrefix = "person-layer-"
+    private let base: Segmenting
+    private let personMasks: [CGImage?]
+
+    init(base: Segmenting, personMasks: [CGImage?]) {
+        self.base = base
+        self.personMasks = personMasks
+    }
+
+    func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        var results = [CIImage?](repeating: nil, count: rois.count)
+        var baseIndices: [Int] = []
+        for (index, roi) in rois.enumerated() {
+            if let mask = personSilhouetteMask(for: roi, extent: extent) {
+                results[index] = mask
+            } else {
+                baseIndices.append(index)
+            }
+        }
+        if !baseIndices.isEmpty {
+            let baseMasks = try base.createMasks(for: baseIndices.map { rois[$0] }, in: image, extent: extent)
+            for (position, index) in baseIndices.enumerated() {
+                results[index] = baseMasks[position]
+            }
+        }
+        return results.compactMap { $0 }
+    }
+
+    private func personSilhouetteMask(for roi: MosaicROI, extent: CGRect) -> CIImage? {
+        guard roi.source.hasPrefix(Self.sourcePrefix),
+              let personIndex = Int(roi.source.dropFirst(Self.sourcePrefix.count)),
+              personIndex >= 0, personIndex < personMasks.count,
+              let mask = personMasks[personIndex] else { return nil }
+        var silhouette = CIImage(cgImage: mask)
+        if silhouette.extent.width != extent.width || silhouette.extent.height != extent.height {
+            guard silhouette.extent.width > 0, silhouette.extent.height > 0 else { return nil }
+            silhouette = silhouette.transformed(by: CGAffineTransform(
+                scaleX: extent.width / silhouette.extent.width,
+                y: extent.height / silhouette.extent.height
+            ))
+        }
+        // ROI（移動後の矩形）内へ制限する（シルエットの他の部分へモザイクが漏れないようにする）
+        let black = CIImage(color: .black).cropped(to: extent)
+        let boundsMask = ShapeSegmentEngine.rectangleMask(
+            rect: roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft),
+            extent: extent,
+            rotation: roi.rotation
+        )
+        return silhouette.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: boundsMask
+        ]).cropped(to: extent)
+    }
+}
 
 /// アプリ側（NewMosaicApp）のUnified Loggingラッパー。`MosaicCore`側の検出診断ログ
 /// （subsystem `com.yoshikawa.newMosaic`、category `Detection`）と同一subsystemで統一し、
@@ -355,25 +415,21 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
             } else {
                 persons = []
             }
-            // キャラクターセグメンテーションで人物シルエットを付与する（実写のVisionシルエット相当）
+            // キャラクターセグメンテーションで人物シルエットを付与する（実写のVisionシルエット相当）。
+            // 全体画像1回の推論では2人目以降の小さい人物のマスクが取れないことがあるため、
+            // 人物範囲ごとにクロップして個別推論する（複数人物対応。「人物3のマスクが
+            // 作成されない」報告への修正）。
             var personsWithMasks = persons
             if !persons.isEmpty, let segmenter = animeSegmenter {
-                do {
-                    if let fullMask = try segmenter.characterMask(in: input.image) {
-                        let imageSize = CGSize(width: input.image.width, height: input.image.height)
-                        personsWithMasks = persons.map { person in
-                            PersonDetection(
-                                bounds: person.bounds,
-                                maskImage: AnimeSegmenter.personMask(
-                                    fullMask: fullMask,
-                                    bounds: person.bounds,
-                                    imageSize: imageSize
-                                )
-                            )
-                        }
+                personsWithMasks = persons.map { person in
+                    let mask: CGImage?
+                    do {
+                        mask = try segmenter.personMaskByCrop(in: input.image, bounds: person.bounds)
+                    } catch {
+                        detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
+                        mask = nil
                     }
-                } catch {
-                    detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
+                    return PersonDetection(bounds: person.bounds, maskImage: mask)
                 }
             }
             // アニメ骨格検出（DWPose）。関節が取れた人物は骨格レイヤ+骨格ベースの候補ROIも生成する
@@ -783,6 +839,10 @@ final class MosaicWindowController: NSObject {
     /// フラッシュパターンの中心位置（ROIローカル正規化座標）。画像上のハンドルドラッグで更新される。
     /// nilはROI中心を使う。`customPatternImage`同様、コントロール化していない実行時状態。
     private var pendingFlashCenter: NormalizedPoint?
+    /// 候補生成時の人物シルエット（未着色・全体フレーム）。人物レイヤ由来ROI（source
+    /// "person-layer-N"）のモザイクを人物の輪郭に沿わせるために使う。表示用の着色版
+    /// （canvas.personLayerMasks）とは別に保持し、レイヤ移動時は同じ量だけ平行移動する。
+    private var personMaskImages: [CGImage?] = []
     private var patternImageCache: [String: CGImage] = [:]
     /// `patternImageCache`のLRU順（末尾が最新）。ファイル選択のたびに新規UUIDでキャッシュへ
     /// 追加され続け際限なく増える不具合があったため、上限を超えたら古いものから破棄する
@@ -884,6 +944,7 @@ final class MosaicWindowController: NSObject {
         var mosaicPreviewOn: Bool
         var personLayerRects: [NormalizedRect]
         var personLayerMasks: [CGImage?]
+        var personMaskImages: [CGImage?]
         var poseLayerRects: [NormalizedRect]
         var poseLayerBones: [[(from: CGPoint, to: CGPoint)]]
         var poseLayerJointPoints: [[CGPoint]]
@@ -3033,10 +3094,12 @@ final class MosaicWindowController: NSObject {
         pushUndoSnapshot(currentEditorState())
         suspendMosaicPreview()
         for index in validIndices {
+            // sourceへ人物インデックスを埋め込み、モザイク適用時に該当シルエットで
+            // マスクできるようにする（PersonLayerSegmentEngine参照）
             canvas.rois.append(MosaicROI(
                 rect: canvas.personLayerRects[index],
                 confidence: 1,
-                source: "person-layer",
+                source: "person-layer-\(index)",
                 shape: .rectangle,
                 category: .other
             ))
@@ -3198,6 +3261,11 @@ final class MosaicWindowController: NSObject {
         case .person(let index):
             if index < canvas.personLayerMasks.count, let mask = canvas.personLayerMasks[index] {
                 canvas.personLayerMasks[index] = Self.translatedMask(mask, dx: dx, dy: dy)
+            }
+            // モザイク用の未着色シルエットも同じ量だけ追従させる（人物レイヤ由来ROIの
+            // マスクが移動後の位置とずれないようにする）
+            if index < personMaskImages.count, let untinted = personMaskImages[index] {
+                personMaskImages[index] = Self.translatedMask(untinted, dx: dx, dy: dy)
             }
             updateStatus("人物\(index + 1) レイヤを移動しました")
         case .pose(let index):
@@ -3760,6 +3828,8 @@ final class MosaicWindowController: NSObject {
         canvas.personLayerMasks = includePersonLayers
             ? snapshot.persons.map { $0.maskImage.flatMap { self.tintedMask(from: $0) } }
             : []
+        // 未着色の人物シルエット（人物レイヤ由来ROIのモザイクマスク用。表示用の着色版とは別に保持）
+        personMaskImages = includePersonLayers ? snapshot.persons.map(\.maskImage) : []
         canvas.poseLayerRects = includePoseLayers ? snapshot.poseHints.map { Self.poseDisplayRect(for: $0) } : []
         canvas.poseLayerBones = includePoseLayers ? snapshot.poseHints.map { Self.boneSegments(for: $0) } : []
         canvas.poseLayerJointPoints = includePoseLayers
@@ -3903,13 +3973,21 @@ final class MosaicWindowController: NSObject {
     private func currentSegmentEngine() -> Segmenting {
         let index = segmentEngineControl.indexOfSelectedItem
         let kinds = SegmentEngineKind.allCases
-        guard index >= 0, index < kinds.count else { return ShapeSegmentEngine() }
-        switch kinds[index] {
-        case .shape: return ShapeSegmentEngine()
-        case .visionPersonSegmentation: return VisionPersonSegmentEngine()
-        case .foregroundObjects: return ForegroundSegmentEngine()
-        case .regionForeground: return RegionForegroundSegmentEngine()
+        let base: Segmenting
+        if index >= 0, index < kinds.count {
+            switch kinds[index] {
+            case .shape: base = ShapeSegmentEngine()
+            case .visionPersonSegmentation: base = VisionPersonSegmentEngine()
+            case .foregroundObjects: base = ForegroundSegmentEngine()
+            case .regionForeground: base = RegionForegroundSegmentEngine()
+            }
+        } else {
+            base = ShapeSegmentEngine()
         }
+        // 人物レイヤ由来のROIは、選択中のマスク生成方式に関係なく候補生成時の人物シルエットで
+        // マスクする（「人物矩形全体がモザイクされてしまう」報告への修正。人物の輪郭に沿った
+        // モザイクにする）。
+        return PersonLayerSegmentEngine(base: base, personMasks: personMaskImages)
     }
 
     @objc private func applyMosaic() {
@@ -3956,6 +4034,7 @@ final class MosaicWindowController: NSObject {
         canvas.personLayerRects = []
         canvas.poseLayerRects = []
         canvas.personLayerMasks = []
+        personMaskImages = []
         canvas.poseLayerBones = []
         canvas.poseLayerJointPoints = []
         rebuildDetectionLayers(personCount: 0, poseAvailability: [])
@@ -4471,6 +4550,7 @@ final class MosaicWindowController: NSObject {
                 canvas.personLayerRects = []
                 canvas.poseLayerRects = []
                 canvas.personLayerMasks = []
+        personMaskImages = []
                 canvas.poseLayerBones = []
                 canvas.poseLayerJointPoints = []
                 rebuildDetectionLayers(personCount: 0, poseAvailability: [])
@@ -4656,6 +4736,7 @@ final class MosaicWindowController: NSObject {
             mosaicPreviewOn: mosaicPreviewCheckbox.state == .on,
             personLayerRects: canvas.personLayerRects,
             personLayerMasks: canvas.personLayerMasks,
+            personMaskImages: personMaskImages,
             poseLayerRects: canvas.poseLayerRects,
             poseLayerBones: canvas.poseLayerBones,
             poseLayerJointPoints: canvas.poseLayerJointPoints,
@@ -4704,6 +4785,7 @@ final class MosaicWindowController: NSObject {
             canvas.rois = saved.rois
             canvas.personLayerRects = saved.personLayerRects
             canvas.personLayerMasks = saved.personLayerMasks
+            personMaskImages = saved.personMaskImages
             canvas.poseLayerRects = saved.poseLayerRects
             canvas.poseLayerBones = saved.poseLayerBones
             canvas.poseLayerJointPoints = saved.poseLayerJointPoints
@@ -4732,6 +4814,7 @@ final class MosaicWindowController: NSObject {
         canvas.personLayerRects = []
         canvas.poseLayerRects = []
         canvas.personLayerMasks = []
+        personMaskImages = []
         canvas.poseLayerBones = []
         canvas.poseLayerJointPoints = []
         canvas.selectedROIID = nil
@@ -6765,21 +6848,26 @@ final class ImageCanvasView: NSView {
             return
         }
 
-        // 表示中の人物/骨格レイヤの「枠線付近」クリックで選択+ドラッグ移動（モザイク対象と
-        // 同じ操作感）。人物矩形は画面の大部分を覆うことがあるため、内側クリックまで奪うと
-        // ROIの新規作成ドラッグができなくなる。枠の帯（±8px）だけを掴めるようにする。
-        if let kind = detectionLayerEdgeHit(at: point, imageRect: imageRect) {
+        // Optionキーを押しながらの場合、このドラッグ限定でモードを一時的に入れ替える
+        // （Photoshopのスペースキー一時パン切替と同様の考え方）。
+        let wantsMarquee = event.modifierFlags.contains(.option)
+            ? interactionMode == .edit
+            : interactionMode == .marqueeSelect
+
+        // 表示中の人物/骨格レイヤのクリックで選択+ドラッグ移動（モザイク対象と同じ操作感）。
+        // 編集モードでは、人物矩形が画面の大部分を覆うことがあり内側クリックまで奪うと
+        // ROIの新規作成ドラッグができなくなるため、枠の帯（±8px）のみを掴む。
+        // 範囲選択モードでは新規作成と競合しないため、矩形内側のどこでも掴んで移動できる。
+        let detectionKind = wantsMarquee
+            ? detectionLayerHit(at: point, imageRect: imageRect)
+            : detectionLayerEdgeHit(at: point, imageRect: imageRect)
+        if let kind = detectionKind {
             selectedDetectionLayer = kind
             onDetectionLayerSelected?(kind)
             detectionMoveState = DetectionMoveState(kind: kind, lastPoint: point)
             return
         }
 
-        // Optionキーを押しながらの場合、このドラッグ限定でモードを一時的に入れ替える
-        // （Photoshopのスペースキー一時パン切替と同様の考え方）。
-        let wantsMarquee = event.modifierFlags.contains(.option)
-            ? interactionMode == .edit
-            : interactionMode == .marqueeSelect
         dragIsMarqueeSelect = wantsMarquee
         selectedROIID = nil
         if !wantsMarquee {
