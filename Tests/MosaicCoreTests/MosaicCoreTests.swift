@@ -1459,3 +1459,67 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(decoded.videoDurationSeconds == 12.5)
     #expect(decoded.isLinked)
 }
+
+/// 楕円ROIでの「形状マスク乗算（現行）」と「矩形クロップ（初期実装）」の差を実測する。
+/// 現行は楕円マスクが放射グラデーションのため、ROI矩形の隅へ向かってマスクが薄くなる
+/// （＝対象物の輪郭が縁で欠ける）。初期実装は矩形で切るため輪郭がそのまま残る。
+/// 「対象形状の精度が落ちた」報告の切り分け根拠として恒久化する。
+@Test func ellipseShapeRestrictionAttenuatesMaskNearROICorners() throws {
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
+        confidence: 1,
+        source: "test",
+        shape: .ellipse
+    )
+    // 対象物が範囲いっぱいに取れた想定の全面白マスク
+    let fullWhite = CIImage(color: .white).cropped(to: extent)
+
+    // 現行方式: ROI形状（楕円=放射グラデーション）で制限する
+    let shapeRestricted = ShapeSegmentEngine.restrict(fullWhite, to: roi, extent: extent)
+    // 初期実装方式: ROIの矩形でクロップする
+    let black = CIImage(color: .black).cropped(to: extent)
+    let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+    let rectRestricted = fullWhite.cropped(to: roiRect).composited(over: black)
+
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func luminance(_ image: CIImage, x: Int, y: Int) -> Int {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            image,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Int(pixel[0])
+    }
+
+    // ROI中心はどちらの方式でも白（マスクが効く）
+    #expect(luminance(shapeRestricted, x: 50, y: 50) > 200)
+    #expect(luminance(rectRestricted, x: 50, y: 50) > 200)
+
+    // ROI矩形の隅付近（楕円の外側）: 現行は減衰して暗く、初期実装は白のまま残る
+    #expect(luminance(shapeRestricted, x: 24, y: 24) < 100)
+    #expect(luminance(rectRestricted, x: 24, y: 24) > 200)
+}
+
+@Test func legacyRegionForegroundEngineReturnsOneMaskPerROI() throws {
+    // 初期実装エンジンが現行と同じ契約（ROIと同数・同順のマスクを返す）を満たすこと。
+    // 平坦な画像ではVisionが前景を返さないため、図形ベースへフォールバックする経路も通る。
+    let image = try makeSolidImage(width: 120, height: 90)
+    let rois = [
+        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3),
+                  confidence: 1, source: "test", shape: .ellipse),
+        MosaicROI(rect: NormalizedRect(x: 0.5, y: 0.5, width: 0.3, height: 0.3),
+                  confidence: 1, source: "test", shape: .rectangle)
+    ]
+    let extent = CGRect(x: 0, y: 0, width: 120, height: 90)
+    let masks = try LegacyRegionForegroundSegmentEngine().createMasks(for: rois, in: image, extent: extent)
+    #expect(masks.count == rois.count)
+    for mask in masks {
+        #expect(mask.extent.width > 0)
+        #expect(mask.extent.height > 0)
+    }
+}

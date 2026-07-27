@@ -3909,6 +3909,7 @@ final class MosaicWindowController: NSObject {
                 case .visionPersonSegmentation: return VisionPersonSegmentEngine()
                 case .foregroundObjects: return ForegroundSegmentEngine()
                 case .regionForeground: return RegionForegroundSegmentEngine()
+                case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
                 }
             }
 
@@ -4852,6 +4853,7 @@ final class MosaicWindowController: NSObject {
             case .visionPersonSegmentation: base = VisionPersonSegmentEngine()
             case .foregroundObjects: base = ForegroundSegmentEngine()
             case .regionForeground: base = RegionForegroundSegmentEngine(maskThreshold: maskThresholdSlider.doubleValue)
+            case .regionForegroundLegacy: base = LegacyRegionForegroundSegmentEngine()
             }
         } else {
             base = ShapeSegmentEngine()

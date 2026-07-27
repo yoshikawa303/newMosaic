@@ -17,6 +17,8 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case visionPersonSegmentation
     case foregroundObjects
     case regionForeground
+    /// 「対象形状」のリリース初期（Build 41）実装。現行実装との精度比較用（デバッグ・検証目的）。
+    case regionForegroundLegacy
 
     public var displayName: String {
         switch self {
@@ -24,6 +26,7 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
         case .visionPersonSegmentation: return "人物の輪郭（AI自動認識）"
         case .foregroundObjects: return "物体の輪郭（自動抽出）"
         case .regionForeground: return "対象形状"
+        case .regionForegroundLegacy: return "対象形状（初期実装・比較用）"
         }
     }
 }
@@ -353,6 +356,71 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             colorSpace: CGColorSpaceCreateDeviceRGB()
         )
         return Double(pixel[0]) / 255.0
+    }
+}
+
+
+/// 「対象形状」のリリース初期（Build 41相当）実装。現行の`RegionForegroundSegmentEngine`との
+/// 精度比較用に残す（マスク生成の選択肢からデバッグ目的で選べる）。
+///
+/// 現行実装との違いは最終段の制限方法のみ:
+/// - 初期実装（本クラス）: 前景マスクをROIの**矩形**へクロップする。楕円ROIでも矩形で切るため、
+///   取れた対象物の輪郭がそのまま残る。
+/// - 現行実装: `ShapeSegmentEngine.restrict`でROIの**形状マスク**（楕円は放射グラデーション）を
+///   乗算する。ROI外へのはみ出しは防げるが、楕円ROIでは境界へ向かってマスクが薄くなり、
+///   対象物の輪郭が縁で欠けることがある。
+///
+/// クロップ範囲・前景抽出・顕著領域マスクの処理は現行と共通（v0.0.00083で当時と同一へ復元済み）。
+public final class LegacyRegionForegroundSegmentEngine: Segmenting {
+    private let fallback = ShapeSegmentEngine()
+    private let core = RegionForegroundSegmentEngine()
+
+    public init() {}
+
+    public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        var results: [CIImage] = []
+        for roi in rois {
+            if let mask = legacyRegionMask(for: roi, in: image, imageSize: imageSize, extent: extent) {
+                results.append(mask)
+            } else {
+                let fallbackMasks = try fallback.createMasks(for: [roi], in: image, extent: extent)
+                results.append(fallbackMasks[0])
+            }
+        }
+        return results
+    }
+
+    private func legacyRegionMask(
+        for roi: MosaicROI,
+        in image: CGImage,
+        imageSize: CGSize,
+        extent: CGRect
+    ) -> CIImage? {
+        let expanded = roi.rect.expanded(scale: 1.15).clamped()
+        let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
+        guard cropRect.width >= 16, cropRect.height >= 16,
+              let crop = image.cropping(to: cropRect) else { return nil }
+
+        var localMask = RegionForegroundSegmentEngine.foregroundMask(in: crop)
+        // 前景がクロップのほぼ全面を覆う場合は顕著領域マスクへ切り替える（当時と同じ判定）
+        if localMask.map({ core.coverageRatio(of: $0) > 0.85 }) ?? true {
+            localMask = RegionForegroundSegmentEngine.saliencyMask(in: crop) ?? localMask
+        }
+        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
+
+        // クロップ実サイズへスケールし、CI座標（下原点）でクロップ位置に配置する
+        let scaleX = cropRect.width / mask.extent.width
+        let scaleY = cropRect.height / mask.extent.height
+        let cropRectCI = expanded.cgRect(imageSize: imageSize, origin: .bottomLeft)
+        mask = mask
+            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
+            .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
+
+        let black = CIImage(color: .black).cropped(to: extent)
+        // ★初期実装の要: ROIの矩形でクロップする（形状マスクの乗算はしない）
+        let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        return mask.composited(over: black).cropped(to: roiRect).composited(over: black)
     }
 }
 
