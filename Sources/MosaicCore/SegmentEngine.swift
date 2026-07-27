@@ -1,7 +1,13 @@
 import CoreGraphics
 import CoreImage
 import Foundation
+import OSLog
 import Vision
+
+/// マスク生成の診断ログ（ヘルプ＞デバッグ＞デバッグログで確認できる）。
+/// 「対象形状」がどの経路（前景抽出／顕著領域／図形フォールバック）を通ったかを、
+/// 画像内容を一切含めない数値のみで記録する（精度問題の切り分け用）。
+let segmentLogger = Logger(subsystem: "com.yoshikawa.newMosaic", category: "SegmentMask")
 
 public extension CIImage {
     /// CVPixelBuffer 由来の CIImage を CGImage ラスタ（行0=上）系の他画像と合成・表示するための垂直反転補正。
@@ -253,15 +259,41 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         let expanded = baseNormalized.expanded(scale: 1.15).clamped()
         let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
         guard cropRect.width >= 16, cropRect.height >= 16,
-              let crop = image.cropping(to: cropRect) else { return nil }
+              let crop = image.cropping(to: cropRect) else {
+            segmentLogger.info("""
+                regionMask fallback=shape reason=cropTooSmall \
+                crop=\(Int(cropRect.width))x\(Int(cropRect.height)) \
+                category=\(roi.category.rawValue, privacy: .public)
+                """)
+            return nil
+        }
 
         var localMask = Self.foregroundMask(in: crop)
+        let foregroundFound = localMask != nil
+        let foregroundCoverage = localMask.map { coverageRatio(of: $0) }
         // 前景がクロップのほぼ全面を覆う場合（ROI周辺が人物で埋まっていて対象物を分離できていない）
         // や前景が得られない場合は、顕著領域マスクでROI内の対象物の形状を取る
-        if localMask.map({ coverageRatio(of: $0) > 0.85 }) ?? true {
-            localMask = Self.saliencyMask(in: crop) ?? localMask
+        var usedSaliency = false
+        if foregroundCoverage.map({ $0 > 0.85 }) ?? true {
+            if let saliency = Self.saliencyMask(in: crop) {
+                localMask = saliency
+                usedSaliency = true
+            }
         }
-        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
+        let finalCoverage = localMask.map { coverageRatio(of: $0) }
+        segmentLogger.info("""
+            regionMask category=\(roi.category.rawValue, privacy: .public) \
+            crop=\(Int(cropRect.width))x\(Int(cropRect.height)) \
+            rotation=\(Int(roi.rotation)) \
+            foreground=\(foregroundFound ? "yes" : "no", privacy: .public) \
+            fgCoverage=\(foregroundCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
+            saliency=\(usedSaliency ? "used" : "no", privacy: .public) \
+            finalCoverage=\(finalCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public)
+            """)
+        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else {
+            segmentLogger.info("regionMask fallback=shape reason=noMask category=\(roi.category.rawValue, privacy: .public)")
+            return nil
+        }
 
         // 補助設定: しきい値が指定されている場合のみ二値化してマスクを締める（既定は無効=当初挙動）
         if maskThreshold > 0.01 {
@@ -417,11 +449,30 @@ public final class LegacyRegionForegroundSegmentEngine: Segmenting {
               let crop = image.cropping(to: cropRect) else { return nil }
 
         var localMask = RegionForegroundSegmentEngine.foregroundMask(in: crop)
+        let foregroundFound = localMask != nil
+        let foregroundCoverage = localMask.map { core.coverageRatio(of: $0) }
         // 前景がクロップのほぼ全面を覆う場合は顕著領域マスクへ切り替える（当時と同じ判定）
-        if localMask.map({ core.coverageRatio(of: $0) > 0.85 }) ?? true {
-            localMask = RegionForegroundSegmentEngine.saliencyMask(in: crop) ?? localMask
+        var usedSaliency = false
+        if foregroundCoverage.map({ $0 > 0.85 }) ?? true {
+            if let saliency = RegionForegroundSegmentEngine.saliencyMask(in: crop) {
+                localMask = saliency
+                usedSaliency = true
+            }
         }
-        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
+        let finalCoverage = localMask.map { core.coverageRatio(of: $0) }
+        segmentLogger.info("""
+            legacyRegionMask category=\(roi.category.rawValue, privacy: .public) \
+            crop=\(Int(cropRect.width))x\(Int(cropRect.height)) \
+            rotation=\(Int(roi.rotation)) \
+            foreground=\(foregroundFound ? "yes" : "no", privacy: .public) \
+            fgCoverage=\(foregroundCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
+            saliency=\(usedSaliency ? "used" : "no", privacy: .public) \
+            finalCoverage=\(finalCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public)
+            """)
+        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else {
+            segmentLogger.info("legacyRegionMask fallback=shape reason=noMask category=\(roi.category.rawValue, privacy: .public)")
+            return nil
+        }
 
         // クロップ実サイズへスケールし、CI座標（下原点）でクロップ位置に配置する
         let scaleX = cropRect.width / mask.extent.width

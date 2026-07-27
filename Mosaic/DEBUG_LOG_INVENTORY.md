@@ -27,6 +27,19 @@
 - 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "AnimePose"' --last 10m`
 - 削除: アプリ独自ファイルは作成しない。OSのUnified Logging保持方針に従う。
 
+## マスク生成診断（v0.0.00092〜）
+
+- 経路: macOS Unified Logging（subsystem `com.yoshikawa.newMosaic`、category `SegmentMask`。他の診断と同一subsystem）。
+- 対象: マスク生成「対象形状」および「対象形状（初期実装・比較用）」の分岐判断。
+- 内容: ROIごとの `category`（カテゴリ名）／`crop`（切り出しピクセル寸法）／`rotation`（度）／
+  `foreground`（前景抽出の成否）／`fgCoverage`（前景の被覆率）／`saliency`（顕著領域へ切り替えたか）／
+  `finalCoverage`（最終マスクの被覆率）と、図形フォールバック時の理由（`noMask`／`cropTooSmall`）。
+  **画像内容・ROI座標・ファイル名は記録しない**（数値と分岐名のみ）。
+- 目的: 「輪郭が取れず選択範囲を丸ごと塗っている」のか「輪郭は取れているが制限方法で欠けている」のかを、
+  推測ではなく実動作で切り分けるため。
+- 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "SegmentMask"' --last 10m`
+- 削除: アプリ独自ファイルは作成しない。OSのUnified Logging保持方針に従う。
+
 ## アプリ側イベントログ・デバッグログ画面（2026-07-25〜）
 
 - 経路: macOS Unified Logging。`Sources/NewMosaicApp/main.swift` の `enum AppLog`（subsystem

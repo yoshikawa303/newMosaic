@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00092 - 2026-07-28
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 追加（調査用）: マスク生成「対象形状」がどう判断したかをデバッグログへ記録するようにした。ヘルプ＞デバッグ＞デバッグログで、選択範囲ごとに「切り出しサイズ／回転角／前景抽出できたか／被覆率／顕著領域へ切り替えたか／図形へフォールバックしたか」が確認できる（画像内容は一切記録しない）。
+- これにより「輪郭が取れずに選択範囲を丸ごと塗っている」のか「輪郭は取れているが制限方法で欠けている」のかを、推測ではなく実際の動作で切り分けられる。
+
+■更新履歴
+
+- `SegmentEngine.swift`へ`segmentLogger`（subsystem `com.yoshikawa.newMosaic` / category `SegmentMask`）を追加。現行・初期実装の両エンジンで、ROIごとに `crop`／`rotation`／`foreground`／`fgCoverage`／`saliency`／`finalCoverage` と、図形フォールバック時の理由（`noMask`／`cropTooSmall`）を記録する。
+- 記録内容は数値・分岐名のみ。画像・ROI座標・ファイル名は含めない（DEBUG_LOG_INVENTORYのプライバシー方針を踏襲）。
+
 ## v0.0.00091 - 2026-07-28
 
 ■更新履歴（Readme / ChangeLog 用）
