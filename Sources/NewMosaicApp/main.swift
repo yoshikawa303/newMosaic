@@ -127,6 +127,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard controller.confirmCurrentChangesBeforeLeaving() else { return .terminateCancel }
+        // 分割位置はリサイズ通知経由の保存に依存せず、終了直前に現在値を明示的に保存する
+        // （「終了時にサイドツールパネル状態が保存されない」報告への対応）。
+        controller.saveSplitPositionsNow()
         // AppSettingsは連続書き込み対策で0.3秒デバウンスしているため、その待機中に終了すると
         // 直前の変更（ウィンドウ枠・分割位置等）が保存されないまま失われることがあった。
         // 終了直前に必ず同期保存する。
@@ -421,13 +424,31 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
             // 作成されない」報告への修正）。
             var personsWithMasks = persons
             if !persons.isEmpty, let segmenter = animeSegmenter {
+                // クロップ推論が「ほぼ全面」を返した（=人物と背景を分離できなかった）人物は、
+                // 全体画像1回の推論結果から該当矩形を切り出す方式へフォールバックする
+                // （背景まで巻き込むマスクを避ける。全体マスクは必要になった時だけ1回計算）。
+                var wholeImageMask: CGImage??
+                func fallbackMask(for bounds: NormalizedRect) -> CGImage? {
+                    if wholeImageMask == nil {
+                        wholeImageMask = .some(try? segmenter.characterMask(in: input.image))
+                    }
+                    guard let full = wholeImageMask ?? nil else { return nil }
+                    return AnimeSegmenter.personMask(
+                        fullMask: full,
+                        bounds: bounds,
+                        imageSize: CGSize(width: input.image.width, height: input.image.height)
+                    )
+                }
                 personsWithMasks = persons.map { person in
-                    let mask: CGImage?
+                    var mask: CGImage?
                     do {
                         mask = try segmenter.personMaskByCrop(in: input.image, bounds: person.bounds)
                     } catch {
                         detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
                         mask = nil
+                    }
+                    if mask == nil {
+                        mask = fallbackMask(for: person.bounds)
                     }
                     return PersonDetection(bounds: person.bounds, maskImage: mask)
                 }
@@ -791,6 +812,10 @@ final class MosaicWindowController: NSObject {
     private let groinPositionSlider = NSSlider(value: 0.45, minValue: 0.2, maxValue: 0.8, target: nil, action: nil)
     private let groinPositionValueLabel = NSTextField(labelWithString: "45%")
     private static let groinPositionDefaultsKey = "GroinPositionRatio"
+    /// マスク生成「対象形状」の補助しきい値（0=自動のみ。上げるほどマスクを締める）
+    private let maskThresholdSlider = NSSlider(value: 0, minValue: 0, maxValue: 0.9, target: nil, action: nil)
+    private let maskThresholdValueLabel = NSTextField(labelWithString: "自動")
+    private static let maskThresholdDefaultsKey = "RegionMaskThreshold"
 
     // モザイク描画スタイル設定（右側インスペクタへ常設。選択ROIごとに個別保持）
     /// 選択中レイヤの設定継承状態（下部ステータスバーへ表示。nilなら選択なし＝表示しない）。
@@ -1683,6 +1708,21 @@ final class MosaicWindowController: NSObject {
             setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
         }
 
+        // 保険（逆方向）: サイドペインがウィンドウの大半を占めてキャンバスが見えない状態も
+        // 既定幅へ強制する（「初期値の幅がおかしく画面全体を覆う」報告への対応。保存値が
+        // 無い初回起動で左ペインが全幅で解決されるケースがあった）。
+        mainSplit.layoutSubtreeIfNeeded()
+        let totalWidth = mainSplit.bounds.width
+        if totalWidth > 400 {
+            if !leftPane.isHidden, leftPane.frame.width > totalWidth * 0.5 {
+                mainSplit.setPosition(280, ofDividerAt: 0)
+                mainSplit.layoutSubtreeIfNeeded()
+            }
+            if !rightPane.isHidden, rightPane.frame.width > totalWidth * 0.5 {
+                setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
+            }
+        }
+
         // 右ペイン幅の既定化（工場既定レイアウト）は、右ペイン「内部」のライブラリ/レイヤ/
         // インスペクタの高さ配分（下記、ウィンドウの縦幅に依存）とは独立した話のため、
         // 縦幅が足りない場合に早期returnするガードの影響を受けないようここで確定させる。
@@ -1698,6 +1738,22 @@ final class MosaicWindowController: NSObject {
         let layerHeight = max(170, min(230, total * 0.30))
         rightPane.setPosition(libraryHeight, ofDividerAt: 0)
         rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
+    }
+
+    /// 終了時などに現在の分割位置を明示的に保存する（リサイズ通知経由の保存に依存しない確実な保存）。
+    func saveSplitPositionsNow() {
+        guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView else { return }
+        let settings = AppSettings.shared
+        if !leftPane.isHidden, leftPane.frame.width > 50 {
+            settings.set(Double(leftPane.frame.width), forKey: "Layout.leftPaneWidth")
+        }
+        if !rightPane.isHidden, rightPane.frame.width > 50 {
+            settings.set(Double(rightPane.frame.width), forKey: "Layout.rightPaneWidth")
+        }
+        for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
+            guard !pane.isHidden, pane.bounds.height > 0, !pane.arrangedSubviews.isEmpty else { continue }
+            settings.set(pane.arrangedSubviews.map { Double($0.frame.height) }, forKey: key)
+        }
     }
 
     /// 保存済みの分割位置（左右サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
@@ -2070,6 +2126,24 @@ final class MosaicWindowController: NSObject {
 
         let shapeRow = inspectorRow("追加形状", control: shapeControl)
         let maskRow = inspectorRow("マスク生成", control: segmentEngineControl)
+        // 「対象形状」の補助しきい値。自動一発の結果が広すぎる画像でマスクを締めるための任意設定
+        maskThresholdSlider.target = self
+        maskThresholdSlider.action = #selector(maskThresholdChanged)
+        maskThresholdSlider.translatesAutoresizingMaskIntoConstraints = false
+        maskThresholdSlider.widthAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+        maskThresholdSlider.widthAnchor.constraint(lessThanOrEqualToConstant: 220).isActive = true
+        let thresholdPreferred = maskThresholdSlider.widthAnchor.constraint(equalToConstant: 160)
+        thresholdPreferred.priority = NSLayoutConstraint.Priority(400)
+        thresholdPreferred.isActive = true
+        maskThresholdSlider.toolTip = "対象形状マスクのしきい値（自動=0。上げるほどマスクが締まり、広がりすぎを抑える）"
+        maskThresholdValueLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
+        maskThresholdValueLabel.alignment = .left
+        maskThresholdValueLabel.translatesAutoresizingMaskIntoConstraints = false
+        maskThresholdValueLabel.widthAnchor.constraint(equalToConstant: 48).isActive = true
+        maskThresholdSlider.doubleValue = AppSettings.shared.double(forKey: Self.maskThresholdDefaultsKey)
+        maskThresholdValueLabel.stringValue = maskThresholdSlider.doubleValue < 0.01
+            ? "自動" : "\(Int(maskThresholdSlider.doubleValue * 100)) %"
+        let maskThresholdRow = inspectorRow("形状しきい値", control: maskThresholdSlider, trailing: maskThresholdValueLabel)
         let domainRow = inspectorRow("画像種別", control: domainModeControl)
         let generateLayerRow = NSStackView(views: [generatePersonCheckbox, generatePoseCheckbox])
         generateLayerRow.orientation = .horizontal
@@ -2139,7 +2213,7 @@ final class MosaicWindowController: NSObject {
         let content = NSStackView(views: [
             title,
             inspectorHeading("選択範囲"), shapeRow,
-            inspectorHeading("検出"), domainRow, maskRow,
+            inspectorHeading("検出"), domainRow, maskRow, maskThresholdRow,
             NSTextField(labelWithString: "候補カテゴリ"), categories,
             NSTextField(labelWithString: "表示レイヤ生成"), generateLayerRow, groinRow,
             inspectorHeading("モザイク"), styleGrid, applyStyleToAllButton,
@@ -3970,6 +4044,14 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    @objc private func maskThresholdChanged() {
+        let value = maskThresholdSlider.doubleValue
+        maskThresholdValueLabel.stringValue = value < 0.01 ? "自動" : "\(Int(value * 100)) %"
+        AppSettings.shared.set(value, forKey: Self.maskThresholdDefaultsKey)
+        // モザイク表示中は変更を即時反映する
+        resumeMosaicPreviewIfNeeded()
+    }
+
     private func currentSegmentEngine() -> Segmenting {
         let index = segmentEngineControl.indexOfSelectedItem
         let kinds = SegmentEngineKind.allCases
@@ -3979,7 +4061,7 @@ final class MosaicWindowController: NSObject {
             case .shape: base = ShapeSegmentEngine()
             case .visionPersonSegmentation: base = VisionPersonSegmentEngine()
             case .foregroundObjects: base = ForegroundSegmentEngine()
-            case .regionForeground: base = RegionForegroundSegmentEngine()
+            case .regionForeground: base = RegionForegroundSegmentEngine(maskThreshold: maskThresholdSlider.doubleValue)
             }
         } else {
             base = ShapeSegmentEngine()

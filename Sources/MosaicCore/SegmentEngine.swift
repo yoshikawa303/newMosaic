@@ -207,8 +207,13 @@ public final class ForegroundSegmentEngine: Segmenting {
 public final class RegionForegroundSegmentEngine: Segmenting {
     private let fallback = ShapeSegmentEngine()
     private let measureContext = CIContext(options: [.cacheIntermediates: false])
+    /// マスク検出しきい値（0=無効）。0より大きい場合、得られたマスクをこの値で二値化して
+    /// 「なんとなくの塊」を締める。自動一発の結果が広すぎる画像向けの補助設定（UIのスライダーから指定）。
+    public var maskThreshold: Double
 
-    public init() {}
+    public init(maskThreshold: Double = 0) {
+        self.maskThreshold = maskThreshold
+    }
 
     public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
         let imageSize = CGSize(width: image.width, height: image.height)
@@ -255,6 +260,13 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         }
         guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else { return nil }
 
+        // 補助設定: しきい値が指定されている場合のみ二値化してマスクを締める（既定は無効=当初挙動）
+        if maskThreshold > 0.01 {
+            mask = mask
+                .applyingFilter("CIColorThreshold", parameters: ["inputThreshold": min(maskThreshold, 0.95)])
+                .cropped(to: mask.extent)
+        }
+
         // クロップ実サイズへスケールし、CI座標（下原点）でクロップ位置に配置する
         let scaleX = cropRect.width / mask.extent.width
         let scaleY = cropRect.height / mask.extent.height
@@ -264,15 +276,11 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
 
         let black = CIImage(color: .black).cropped(to: extent)
-        // 前景マスクの制限はROIの「（回転を含む）矩形範囲」のみとする。ROIの図形（楕円等）で
-        // 制限すると、せっかく取れた対象物の輪郭が楕円形に切り取られ「対象形状の輪郭でマスク
-        // できない」精度低下になる（GUI報告で確定したデグレ。対象形状の目的は対象物の実形状の
-        // ままマスクすることのため、ROI形状は検索範囲としてのみ扱う）。
-        let boundsRect = roi.rect.cgRect(imageSize: imageSize, origin: .bottomLeft)
-        let boundsMask = ShapeSegmentEngine.rectangleMask(rect: boundsRect, extent: extent, rotation: roi.rotation)
-        return mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
-            kCIInputBackgroundImageKey: boundsMask
-        ]).cropped(to: extent)
+        // 制限はROIの形状（矩形/楕円+回転）で行う。矩形のみの制限だと、Visionがクロップ全面に
+        // 近い塊しか返せなかった場合に楕円ROIの外（回転した矩形の四隅）までモザイクが広がって
+        // しまう（「不要な部分までマスクが広がる」GUI報告）。輪郭が取れている場合は楕円内の
+        // 輪郭形状がそのまま残るため、スピル防止を優先して形状制限へ戻す。
+        return ShapeSegmentEngine.restrict(mask.composited(over: black), to: roi, extent: extent)
     }
 
     /// 矩形を中心周りに回転させた場合の軸並行外接矩形。ROIのクロップ範囲が回転後の

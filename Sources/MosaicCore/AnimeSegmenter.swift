@@ -132,6 +132,11 @@ public final class AnimeSegmenter {
         guard cropRect.width >= 16, cropRect.height >= 16,
               let crop = image.cropping(to: cropRect),
               let cropMask = try characterMask(in: crop) else { return nil }
+        // クロップ内を人物が占める割合が高いと、モデルがクロップほぼ全面を「キャラクター」と
+        // 返して背景まで巻き込むことがある（「人物以外の背景もマスクされる」GUI報告）。
+        // 全面に近いマスクは分離失敗とみなしてnilを返し、呼び出し側の全体画像推論へ
+        // フォールバックさせる。
+        if Self.coverageRatio(of: cropMask) > 0.92 { return nil }
         // クロップ位置へ配置した全体フレームのマスクを作り、さらに元のbounds内へ制限する
         guard let context = CGContext(
             data: nil,
@@ -149,6 +154,30 @@ public final class AnimeSegmenter {
         context.draw(cropMask, in: cropRectBottomLeft)
         guard let fullMask = context.makeImage() else { return nil }
         return Self.personMask(fullMask: fullMask, bounds: bounds, imageSize: imageSize)
+    }
+
+    /// 8bitグレースケールマスクの白被覆率（0〜1）。クロップ推論の分離失敗判定に使う。
+    static func coverageRatio(of mask: CGImage) -> Double {
+        let width = max(1, mask.width / 4)
+        let height = max(1, mask.height / 4)
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let ok = pixels.withUnsafeMutableBytes { pointer -> Bool in
+            guard let context = CGContext(
+                data: pointer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .low
+            context.draw(mask, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard ok else { return 0 }
+        let sum = pixels.reduce(0) { $0 + Int($1) }
+        return Double(sum) / Double(pixels.count * 255)
     }
 
     /// 全体キャラクターマスクを人物矩形内へ制限した per-person マスクを返す（矩形外は黒）。
