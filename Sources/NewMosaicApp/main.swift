@@ -245,6 +245,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         videoMenu.addItem(shortcutMenuItem("removeVideoKeyframe", target: target))
         videoMenu.addItem(.separator())
         videoMenu.addItem(shortcutMenuItem("runTrackingPreview", target: target))
+        videoMenu.addItem(.separator())
+        videoMenu.addItem(shortcutMenuItem("exportVideoWithMosaic", target: target))
         videoItem.submenu = videoMenu
 
         let viewItem = NSMenuItem()
@@ -955,6 +957,11 @@ final class MosaicWindowController: NSObject {
     private var currentVideoTimeSeconds: Double = 0
     /// 追跡プレビューで見失ったROIのID（キャンバス上で警告表示するため保持）。
     private var videoTrackingLostIDs: Set<UUID> = []
+    // MARK: 動画書き出し（V4）
+    private var videoExportSheet: NSWindow?
+    private var videoExportCancellation: VideoMosaicExporter.CancellationFlag?
+    private let videoExportProgressBar = NSProgressIndicator()
+    private let videoExportProgressLabel = NSTextField(labelWithString: "")
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -1290,6 +1297,9 @@ final class MosaicWindowController: NSObject {
                     key: "k", modifiers: [.command], isRecommended: true, action: #selector(addVideoKeyframe)),
         AppShortcut(id: "removeVideoKeyframe", category: "動画", title: "キーフレーム削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(removeVideoKeyframe)),
+        AppShortcut(id: "exportVideoWithMosaic", category: "動画", title: "動画を書き出す",
+                    key: "e", modifiers: [.command, .shift], isRecommended: true,
+                    action: #selector(exportVideoWithMosaic)),
         AppShortcut(id: "runTrackingPreview", category: "動画", title: "追跡を確認",
                     key: "t", modifiers: [.command], isRecommended: true, action: #selector(runTrackingPreview)),
         AppShortcut(id: "previewSelectedVideo", category: "ライブラリ", title: "動画をプレビュー再生",
@@ -4065,6 +4075,149 @@ final class MosaicWindowController: NSObject {
     }
 
 
+
+    // MARK: - 動画書き出し（V4）
+
+    /// 動画へモザイクを適用して書き出す。キーフレームのROIを起点に、その間のフレームは
+    /// 追跡で追随させる（ROI移動追随マスク）。進捗シートで経過表示・キャンセルができる。
+    @objc private func exportVideoWithMosaic() {
+        guard let item = currentVideoItem, let info = currentVideoInfo else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        guard !currentVideoEditState.keyframes.isEmpty else {
+            updateStatus("キーフレームがありません（ROIを設定して「キーフレーム追加」を実行してください）")
+            return
+        }
+
+        let panel = NSSavePanel()
+        panel.allowedContentTypes = [.mpeg4Movie]
+        panel.nameFieldStringValue = (item.sourceName as NSString).deletingPathExtension + "_mosaic.mp4"
+        panel.message = "モザイクを適用した動画の保存先を選択してください"
+        guard panel.runModal() == .OK, let outputURL = panel.url else { return }
+
+        let inputURL = libraryEngine.originalURL(for: item)
+        let style = defaultMosaicStyleForRendering()
+        let segmentEngine = currentSegmentEngine()
+        let editState = currentVideoEditState
+        let frameRate = max(1, info.frameRate)
+        let cancellation = VideoMosaicExporter.CancellationFlag()
+
+        let sheet = makeVideoExportProgressSheet(cancellation: cancellation)
+        view.window?.beginSheet(sheet, completionHandler: nil)
+        videoExportSheet = sheet
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            // フレーム番号→ROIの解決。キーフレームでは保存済みROIで追跡をやり直し、
+            // 間のフレームは追跡結果を使う（キーフレームが「追跡の起点」になる）。
+            let tracker = VideoROITracker()
+            var activeKeyframeTime: Double = .infinity
+            var currentROIs: [MosaicROI] = []
+
+            let exporter = VideoMosaicExporter(
+                style: style,
+                segmentEngine: segmentEngine,
+                patternImageProvider: nil
+            )
+            do {
+                try exporter.export(
+                    from: inputURL,
+                    to: outputURL,
+                    roiProvider: { index, frame in
+                        let timeSeconds = Double(index) / frameRate
+                        guard let keyframe = editState.keyframe(at: timeSeconds) else { return [] }
+                        if keyframe.timeSeconds != activeKeyframeTime {
+                            // 新しいキーフレーム区間に入った：そのROIで追跡を開始し直す
+                            activeKeyframeTime = keyframe.timeSeconds
+                            currentROIs = keyframe.rois
+                            try tracker.start(with: keyframe.rois, on: frame)
+                            return currentROIs
+                        }
+                        currentROIs = tracker.track(next: frame)
+                        return currentROIs
+                    },
+                    includeAudio: true,
+                    cancellation: cancellation,
+                    progress: { value in
+                        DispatchQueue.main.async { [weak self] in
+                            self?.videoExportProgressBar.doubleValue = value * 100
+                            self?.videoExportProgressLabel.stringValue = "書き出し中… \(Int(value * 100))%"
+                        }
+                    }
+                )
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishVideoExport(outputURL: outputURL, item: item, error: nil)
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.finishVideoExport(outputURL: outputURL, item: item, error: error)
+                }
+            }
+        }
+    }
+
+    /// 書き出し進捗シート（進捗バー＋キャンセル）。
+    private func makeVideoExportProgressSheet(cancellation: VideoMosaicExporter.CancellationFlag) -> NSWindow {
+        videoExportCancellation = cancellation
+        videoExportProgressBar.isIndeterminate = false
+        videoExportProgressBar.minValue = 0
+        videoExportProgressBar.maxValue = 100
+        videoExportProgressBar.doubleValue = 0
+        videoExportProgressBar.translatesAutoresizingMaskIntoConstraints = false
+        videoExportProgressLabel.stringValue = "書き出しを準備中…"
+        applyScaledFont(videoExportProgressLabel, size: 12)
+
+        let cancelButton = NSButton(title: "キャンセル", target: self, action: #selector(cancelVideoExport))
+        cancelButton.bezelStyle = .rounded
+        applyScaledFont(cancelButton, size: 12)
+
+        let content = NSStackView(views: [videoExportProgressLabel, videoExportProgressBar, cancelButton])
+        content.orientation = .vertical
+        content.alignment = .leading
+        content.spacing = 10
+        content.edgeInsets = NSEdgeInsets(top: 18, left: 20, bottom: 18, right: 20)
+        content.translatesAutoresizingMaskIntoConstraints = false
+        videoExportProgressBar.widthAnchor.constraint(equalToConstant: 320).isActive = true
+
+        let sheet = NSWindow(
+            contentRect: NSRect(x: 0, y: 0, width: 360, height: 120),
+            styleMask: [.titled],
+            backing: .buffered,
+            defer: false
+        )
+        sheet.title = "動画の書き出し"
+        sheet.contentView = content
+        return sheet
+    }
+
+    @objc private func cancelVideoExport() {
+        videoExportCancellation?.isCancelled = true
+        videoExportProgressLabel.stringValue = "キャンセルしています…"
+    }
+
+    /// 書き出し完了/失敗/キャンセルの後始末。成功時はライブラリへ加工後動画として登録する。
+    private func finishVideoExport(outputURL: URL, item: MosaicLibraryItem, error: Error?) {
+        if let sheet = videoExportSheet {
+            view.window?.endSheet(sheet)
+            sheet.orderOut(nil)
+        }
+        videoExportSheet = nil
+        videoExportCancellation = nil
+
+        if let error {
+            if case VideoMosaicExporterError.cancelled = error {
+                updateStatus("動画の書き出しをキャンセルしました")
+                return
+            }
+            showError(error)
+            AppLog.export.error("Video export failed: \(error.localizedDescription, privacy: .public)")
+            return
+        }
+        AppLog.export.info("Video export finished")
+        updateStatus("動画を書き出しました: \(outputURL.lastPathComponent)")
+        reloadLibrary()
+    }
+
     // MARK: - 動画編集タイムライン（V3）
 
     /// キャンバス下部の動画タイムラインを構築する。静止画編集中は非表示（高さ0）にする。
@@ -4082,6 +4235,7 @@ final class MosaicWindowController: NSObject {
         let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle")
         let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle")
         let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope")
+        let exportVideoButton = shortcutToolbarButton("exportVideoWithMosaic", symbol: "square.and.arrow.up.on.square")
 
         videoTimeSlider.target = self
         videoTimeSlider.action = #selector(videoTimeSliderChanged)
@@ -4098,7 +4252,7 @@ final class MosaicWindowController: NSObject {
         videoKeyframeLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
         let row = NSStackView(views: [
-            prevButton, nextButton, addButton, removeButton, trackButton,
+            prevButton, nextButton, addButton, removeButton, trackButton, exportVideoButton,
             videoTimeSlider, videoTimeLabel, videoKeyframeLabel
         ])
         row.orientation = .horizontal

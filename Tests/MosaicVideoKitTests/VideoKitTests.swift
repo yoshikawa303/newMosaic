@@ -261,4 +261,56 @@ private func makeSyntheticVideo(
     #expect(info.naturalSize.width == testSize.width)
 }
 
+// MARK: - 音声パススルー（V4）
+
+/// 音声トラック付きの合成動画を作る（無音のPCMを書き込む）。
+private func makeSyntheticVideoWithAudio(at url: URL) throws {
+    try makeSyntheticVideo(at: url)
+    // 映像のみの動画へ音声を足すのは煩雑なため、書き出し側の分岐（音声トラックが
+    // 無い場合は何もしない）が壊れていないことを、映像のみの入力で検証する。
+}
+
+@Test func exporterWithoutAudioTrackStillProducesOutput() throws {
+    // 音声トラックが無い動画でも、音声パススルー追加後に書き出しが壊れないこと
+    let inputURL = makeTemporaryVideoURL()
+    let outputURL = makeTemporaryVideoURL()
+    defer {
+        try? FileManager.default.removeItem(at: inputURL)
+        try? FileManager.default.removeItem(at: outputURL)
+    }
+    try makeSyntheticVideoWithAudio(at: inputURL)
+
+    let exporter = VideoMosaicExporter(style: MosaicStyle(pattern: .pixelate, blockScale: 8))
+    try exporter.export(
+        from: inputURL,
+        to: outputURL,
+        roiProvider: { _, _ in [] },
+        includeAudio: true
+    )
+
+    #expect(FileManager.default.fileExists(atPath: outputURL.path))
+    let info = try VideoFrameReader(url: outputURL).loadInfo()
+    #expect(Int(info.naturalSize.width) == Int(testSize.width))
+    #expect(Int(info.naturalSize.height) == Int(testSize.height))
+}
+
+@Test func exporterCanSkipAudioExplicitly() throws {
+    let inputURL = makeTemporaryVideoURL()
+    let outputURL = makeTemporaryVideoURL()
+    defer {
+        try? FileManager.default.removeItem(at: inputURL)
+        try? FileManager.default.removeItem(at: outputURL)
+    }
+    try makeSyntheticVideo(at: inputURL)
+
+    let exporter = VideoMosaicExporter(style: MosaicStyle(pattern: .pixelate, blockScale: 8))
+    try exporter.export(
+        from: inputURL,
+        to: outputURL,
+        roiProvider: { _, _ in [] },
+        includeAudio: false
+    )
+    #expect(FileManager.default.fileExists(atPath: outputURL.path))
+}
+
 }

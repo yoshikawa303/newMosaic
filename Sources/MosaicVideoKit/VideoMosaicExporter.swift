@@ -53,6 +53,59 @@ public enum VideoMosaicExporterError: Error, LocalizedError {
 ///   - 出力コーデックはH.264固定。解像度・各フレームの提示時刻（フレームレート相当）は
 ///     入力動画のものをそのまま保持する。
 ///   - 可変フレームレート入力でも提示時刻をそのまま引き継ぐため、実質的な再生速度は変化しない。
+/// 音声トラックを再エンコードせず複製する（V4）。
+/// モザイク処理は映像のみが対象のため、音声は`passthrough`（出力設定nil）で
+/// サンプルバッファをそのまま書き写す。
+private final class AudioPassthrough {
+    private let reader: AVAssetReader
+    private let output: AVAssetReaderTrackOutput
+    private let input: AVAssetWriterInput
+
+    init(asset: AVAsset, track: AVAssetTrack, writer: AVAssetWriter) throws {
+        do {
+            reader = try AVAssetReader(asset: asset)
+        } catch {
+            throw VideoMosaicExporterError.writerCreationFailed("音声リーダーの作成に失敗: \(error.localizedDescription)")
+        }
+        // outputSettings: nil で無変換（パススルー）読み出しになる
+        output = AVAssetReaderTrackOutput(track: track, outputSettings: nil)
+        guard reader.canAdd(output) else {
+            throw VideoMosaicExporterError.writerCreationFailed("音声出力を追加できません")
+        }
+        reader.add(output)
+
+        input = AVAssetWriterInput(mediaType: .audio, outputSettings: nil)
+        input.expectsMediaDataInRealTime = false
+        guard writer.canAdd(input) else {
+            throw VideoMosaicExporterError.writerCreationFailed("音声入力を追加できません")
+        }
+        writer.add(input)
+    }
+
+    /// 音声サンプルを全て書き写す。待機は全てタイムアウト付き（無期限待機はハングの原因）。
+    func transfer(isCancelled: () -> Bool) throws {
+        guard reader.startReading() else {
+            throw VideoMosaicExporterError.writerCreationFailed(
+                reader.error?.localizedDescription ?? "音声の読み出しを開始できません"
+            )
+        }
+        while let sample = output.copyNextSampleBuffer() {
+            if isCancelled() { throw VideoMosaicExporterError.cancelled }
+            let deadline = Date().addingTimeInterval(30)
+            while !input.isReadyForMoreMediaData {
+                if Date() >= deadline { throw VideoMosaicExporterError.writingFailed(nil) }
+                if isCancelled() { throw VideoMosaicExporterError.cancelled }
+                Thread.sleep(forTimeInterval: 0.005)
+            }
+            guard input.append(sample) else {
+                throw VideoMosaicExporterError.appendFailed
+            }
+        }
+        reader.cancelReading()
+        input.markAsFinished()
+    }
+}
+
 public final class VideoMosaicExporter {
     /// 別スレッドから書き出しを中断させるためのフラグ。`export`実行中に`isCancelled`を
     /// `true`にすると、次のフレーム処理タイミングで中断し、出力ファイルは削除される。
@@ -101,6 +154,7 @@ public final class VideoMosaicExporter {
     ///   - roiProvider: フレーム番号（0始まり）とそのフレーム画像を受け取り、そのフレームへ
     ///     適用するROI群を返すクロージャ。呼び出し側が検出結果・追跡結果（`VideoROITracker`等）
     ///     をここへ差し込む。空配列を返すとそのフレームは無加工のまま書き出す。
+    ///   - includeAudio: 入力の音声トラックを再エンコードせずそのまま複製するか（既定true）。
     ///   - cancellation: 途中キャンセル用フラグ。
     ///   - progress: 進捗（0.0〜1.0）を都度通知するコールバック。
     /// - Throws: `VideoMosaicExporterError`、または`roiProvider`/`MosaicEngine.applyMosaic`が
@@ -109,6 +163,7 @@ public final class VideoMosaicExporter {
         from inputURL: URL,
         to outputURL: URL,
         roiProvider: @escaping (_ frameIndex: Int, _ frame: CGImage) throws -> [MosaicROI],
+        includeAudio: Bool = true,
         cancellation: CancellationFlag? = nil,
         progress: ((Double) -> Void)? = nil
     ) throws {
@@ -150,6 +205,15 @@ public final class VideoMosaicExporter {
             throw VideoMosaicExporterError.writerCreationFailed("映像入力を追加できません")
         }
         writer.add(input)
+
+        // 音声はモザイク処理の対象外のため、デコード/再エンコードせずそのまま複製する
+        // （パススルー）。音声トラックが無い動画では何もしない。
+        let audioAsset = AVURLAsset(url: inputURL)
+        var audioTransfer: AudioPassthrough?
+        if includeAudio, let audioTrack = audioAsset.tracks(withMediaType: .audio).first {
+            audioTransfer = try AudioPassthrough(asset: audioAsset, track: audioTrack, writer: writer)
+        }
+
         guard writer.startWriting() else {
             throw VideoMosaicExporterError.writerCreationFailed(writer.error?.localizedDescription ?? "unknown")
         }
