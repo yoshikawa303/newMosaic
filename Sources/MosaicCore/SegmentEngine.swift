@@ -268,30 +268,49 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             return nil
         }
 
-        var localMask = Self.foregroundMask(in: crop)
-        let foregroundFound = localMask != nil
-        let foregroundCoverage = localMask.map { coverageRatio(of: $0) }
-        // 前景がクロップのほぼ全面を覆う場合（ROI周辺が人物で埋まっていて対象物を分離できていない）
-        // や前景が得られない場合は、顕著領域マスクでROI内の対象物の形状を取る
-        var usedSaliency = false
-        if foregroundCoverage.map({ $0 > 0.85 }) ?? true {
-            if let saliency = Self.saliencyMask(in: crop) {
-                localMask = saliency
-                usedSaliency = true
-            }
+        // マスク候補を順に試し、被覆率が有効帯に入る最初のものを採用する。
+        // 「空に近い（何も取れていない）」「全面に近い（分離できていない）」マスクは、
+        // どちらもROI全体を塗るのと同じ結果になるため採用しない（実測で0.00や0.80前後が頻出）。
+        func coverageOf(_ mask: CIImage?) -> Double? { mask.map { coverageRatio(of: $0) } }
+        func isUsable(_ coverage: Double?) -> Bool {
+            guard let coverage else { return false }
+            return coverage >= Self.minimumUsableCoverage && coverage <= Self.maximumUsableCoverage
         }
-        let finalCoverage = localMask.map { coverageRatio(of: $0) }
+
+        // 3方式のマスクを作り、有効帯に入るもののうち**最も選択的な（被覆率の低い）**ものを採る。
+        // 実測では前景抽出が「クロップのほぼ全面」を返すことが多く、先着順だとそれが採用されて
+        // ROIを丸ごと塗る結果になっていたため、より対象を絞り込めている候補を優先する。
+        let foreground = Self.foregroundMask(in: crop)
+        let foregroundCoverage = coverageOf(foreground)
+        let ink = Self.inkDensityMask(in: crop)
+        let inkCoverage = coverageOf(ink)
+        let saliency = Self.saliencyMask(in: crop)
+        let saliencyCoverage = coverageOf(saliency)
+
+        let candidates: [(name: String, mask: CIImage?, coverage: Double?)] = [
+            ("foreground", foreground, foregroundCoverage),
+            ("inkDensity", ink, inkCoverage),
+            ("saliency", saliency, saliencyCoverage)
+        ]
+        let best = candidates
+            .filter { isUsable($0.coverage) }
+            .min { ($0.coverage ?? 1) < ($1.coverage ?? 1) }
+        let localMask = best?.mask
+        let source = best?.name ?? "none"
+
         segmentLogger.info("""
             regionMask category=\(roi.category.rawValue, privacy: .public) \
             crop=\(Int(cropRect.width))x\(Int(cropRect.height)) \
             rotation=\(Int(roi.rotation)) \
-            foreground=\(foregroundFound ? "yes" : "no", privacy: .public) \
             fgCoverage=\(foregroundCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
-            saliency=\(usedSaliency ? "used" : "no", privacy: .public) \
-            finalCoverage=\(finalCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public)
+            inkCoverage=\(inkCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
+            salCoverage=\(saliencyCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
+            selected=\(source, privacy: .public)
             """)
         guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else {
-            segmentLogger.info("regionMask fallback=shape reason=noMask category=\(roi.category.rawValue, privacy: .public)")
+            // どの候補も使えない場合は図形ベースへフォールバックする。
+            // ROIが必ず塗られるため、モザイクが掛からない（検閲漏れ）事態は起きない。
+            segmentLogger.info("regionMask fallback=shape reason=noUsableMask category=\(roi.category.rawValue, privacy: .public)")
             return nil
         }
 
@@ -353,6 +372,47 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         return CIImage(cvPixelBuffer: buffer)
     }
 
+    /// マスクとして使える被覆率の下限。これ未満は「何も取れていない」とみなす。
+    /// 空マスクをそのまま採用するとモザイクが一切掛からない（検閲漏れ）ため、必ず弾く。
+    static let minimumUsableCoverage = 0.03
+    /// マスクとして使える被覆率の上限。これを超えるものは「クロップのほぼ全部が対象」で
+    /// 輪郭を分離できていないため使わない（ROIを丸ごと塗るのと変わらず、意味がない）。
+    ///
+    /// クロップはROIの1.15倍（面積で約1.32倍）のため、マスクがROIとぴったり一致する場合の
+    /// 被覆率は約0.76になる。その85%（＝ROI面積の85%以下しか覆わないマスク）を上限とし、
+    /// 「ROIをほぼ丸ごと塗るだけ」のマスクを弾く。
+    static let maximumUsableCoverage = 0.64
+
+    /// 漫画・イラスト（線画）向けの「描き込み密度」マスク。
+    ///
+    /// Visionの前景抽出・顕著領域は写真の「被写体 vs 背景」を想定しており、体の内部にある
+    /// 部位（性器・乳首）は背景が無いため分離できない（実測で被覆率0.8前後＝クロップのほぼ全面）。
+    /// 一方、漫画では対象部位は周囲の平坦な肌よりも線・網点の描き込みが密という性質があるため、
+    /// エッジ強度を面に広げて密度の高い塊を取り出すことで輪郭を得る。
+    static func inkDensityMask(in crop: CGImage) -> CIImage? {
+        let image = CIImage(cgImage: crop)
+        let extent = image.extent
+        guard extent.width > 0, extent.height > 0 else { return nil }
+        let shortSide = Double(min(crop.width, crop.height))
+        // 線を面へ広げる半径。小さすぎると線のまま、大きすぎると全面が潰れるため短辺基準で決める。
+        let spreadRadius = max(2.0, shortSide / 20)
+
+        let gray = image.applyingFilter("CIColorControls", parameters: [kCIInputSaturationKey: 0])
+        let edges = gray
+            .clampedToExtent()
+            .applyingFilter("CIEdges", parameters: [kCIInputIntensityKey: 6])
+            .cropped(to: extent)
+        let spread = edges
+            .clampedToExtent()
+            .applyingFilter("CIMorphologyMaximum", parameters: [kCIInputRadiusKey: spreadRadius])
+            .applyingFilter("CIGaussianBlur", parameters: [kCIInputRadiusKey: spreadRadius])
+            .cropped(to: extent)
+        // 密度の高い塊だけを残す（中間調を残すと縁がぼやけて輪郭が甘くなる）
+        return spread
+            .applyingFilter("CIColorThreshold", parameters: ["inputThreshold": 0.22])
+            .cropped(to: extent)
+    }
+
     /// クロップ画像の顕著領域（オブジェクトネス）マスク。ヒートマップを強調して軟マスク化する。
     /// 実装当初（Build 41）のパラメータを維持する（v82で試したしきい値二値化は、当初の
     /// ソフトなマスクを角張った塊に変えてしまう精度低下要因だったため廃止）。
@@ -379,13 +439,17 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             kCIInputExtentKey: CIVector(cgRect: mask.extent)
         ])
         var pixel = [UInt8](repeating: 0, count: 4)
+        // sRGB（ガンマあり）で読み出すと、平均値がガンマ補正されて実際の面積比より
+        // 大幅に大きく出る（白60%の二値マスクが0.80と読めてしまう）。しきい値判定が
+        // 意図した面積比で働かなくなるため、リニア色空間で読み出して面積比そのものを得る。
+        let linearSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
         measureContext.render(
             average,
             toBitmap: &pixel,
             rowBytes: 4,
             bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
             format: .RGBA8,
-            colorSpace: CGColorSpaceCreateDeviceRGB()
+            colorSpace: linearSpace
         )
         return Double(pixel[0]) / 255.0
     }

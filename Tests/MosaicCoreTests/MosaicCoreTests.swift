@@ -1569,3 +1569,64 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         .map { luminance(rotated, x: $0.0, y: $0.1) }
     #expect(samples.allSatisfy { $0 < 60 || $0 > 200 })
 }
+
+/// 線画向け「描き込み密度」マスクが、平坦な白地の中から線の密な領域を切り出せることを実測する。
+/// Visionの前景抽出は体の内部にある部位を分離できず被覆率0.8前後（＝クロップのほぼ全面）に
+/// なることが実機ログで判明したため、その代替として導入したアルゴリズムの妥当性を担保する。
+@Test func inkDensityMaskSelectsDenselyDrawnRegion() throws {
+    let width = 200
+    let height = 200
+    guard let context = CGContext(
+        data: nil, width: width, height: height, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ) else {
+        Issue.record("描画コンテキストを作成できません")
+        return
+    }
+    // 全面を白（平坦な肌の想定）で塗り、右半分だけに細かい横線を密に引く（描き込みの想定）
+    context.setFillColor(CGColor(gray: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+    context.setStrokeColor(CGColor(gray: 0, alpha: 1))
+    context.setLineWidth(1)
+    for y in stride(from: 10, to: height - 10, by: 4) {
+        context.beginPath()
+        context.move(to: CGPoint(x: CGFloat(width / 2 + 10), y: CGFloat(y)))
+        context.addLine(to: CGPoint(x: CGFloat(width - 10), y: CGFloat(y)))
+        context.strokePath()
+    }
+    let image = try #require(context.makeImage())
+
+    let mask = try #require(RegionForegroundSegmentEngine.inkDensityMask(in: image))
+    let ciContext = CIContext(options: [.cacheIntermediates: false])
+    func luminance(x: Int, y: Int) -> Int {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        ciContext.render(
+            mask, toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Int(pixel[0])
+    }
+
+    // 描き込みのある右側は白（マスクが立つ）、平坦な左側は黒（マスクが立たない）
+    #expect(luminance(x: 150, y: 100) > 200)
+    #expect(luminance(x: 40, y: 100) < 60)
+
+    // 被覆率が「有効帯」に収まる＝ROI全体を塗るのと変わらない結果にならないこと
+    let engine = RegionForegroundSegmentEngine()
+    let coverage = engine.coverageRatio(of: mask)
+    #expect(coverage >= RegionForegroundSegmentEngine.minimumUsableCoverage)
+    #expect(coverage <= RegionForegroundSegmentEngine.maximumUsableCoverage)
+}
+
+/// 空に近いマスク・全面に近いマスクはどちらも採用されないこと（有効帯の判定）。
+/// 空マスクを採用するとモザイクが一切掛からない（検閲漏れ）ため、必ず図形へフォールバックさせる。
+@Test func coverageValidityBandRejectsEmptyAndFullMasks() throws {
+    let extent = CGRect(x: 0, y: 0, width: 64, height: 64)
+    let engine = RegionForegroundSegmentEngine()
+    let emptyCoverage = engine.coverageRatio(of: CIImage(color: .black).cropped(to: extent))
+    let fullCoverage = engine.coverageRatio(of: CIImage(color: .white).cropped(to: extent))
+
+    #expect(emptyCoverage < RegionForegroundSegmentEngine.minimumUsableCoverage)
+    #expect(fullCoverage > RegionForegroundSegmentEngine.maximumUsableCoverage)
+}
