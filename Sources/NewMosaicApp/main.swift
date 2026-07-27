@@ -233,6 +233,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         processMenu.addItem(shortcutMenuItem("applyMosaic", target: target))
         processItem.submenu = processMenu
 
+        // 動画メニュー（V3。キーフレーム操作と追跡確認）
+        let videoItem = NSMenuItem()
+        mainMenu.addItem(videoItem)
+        let videoMenu = NSMenu(title: "動画")
+        videoMenu.addItem(shortcutMenuItem("previewSelectedVideo", target: target))
+        videoMenu.addItem(.separator())
+        videoMenu.addItem(shortcutMenuItem("jumpToPreviousKeyframe", target: target))
+        videoMenu.addItem(shortcutMenuItem("jumpToNextKeyframe", target: target))
+        videoMenu.addItem(shortcutMenuItem("addVideoKeyframe", target: target))
+        videoMenu.addItem(shortcutMenuItem("removeVideoKeyframe", target: target))
+        videoMenu.addItem(.separator())
+        videoMenu.addItem(shortcutMenuItem("runTrackingPreview", target: target))
+        videoItem.submenu = videoMenu
+
         let viewItem = NSMenuItem()
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "表示")
@@ -734,6 +748,12 @@ private final class LayerRowView: NSTableCellView {
     }
 }
 
+/// 追跡プレビューを目標フレームで打ち切るための内部シグナル
+/// （`readFrames`のハンドラから投げて走査を止める。エラーではない）。
+private enum TrackingPreviewStop: Error {
+    case reachedTarget
+}
+
 /// 動画プレビュー再生ビュー（V2）。
 /// AVKitの`AVPlayerView`はSwiftPMの実行ファイルターゲットからリンクできない（SwiftUICore依存）ため、
 /// `AVPlayerLayer`＋最小限の再生コントロール（再生/一時停止・シークバー・時刻表示）を自前で構成する。
@@ -921,6 +941,20 @@ final class MosaicWindowController: NSObject {
     private lazy var videoEditStore = VideoEditStore(libraryRootURL: libraryEngine.rootURL)
     /// 動画プレビュー再生ウィンドウ（V2。編集は行わない）。
     private var videoPreviewWindow: NSWindow?
+    // MARK: 動画編集（V3）
+    /// キャンバス＋タイムラインを縦に積むコンテナ（静止画ではタイムラインは非表示）。
+    private let canvasContainer = NSView()
+    private let videoTimelineBar = NSView()
+    private let videoTimeSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let videoTimeLabel = NSTextField(labelWithString: "0:00 / 0:00")
+    private let videoKeyframeLabel = NSTextField(labelWithString: "キーフレーム 0件")
+    /// 編集中の動画（nil=静止画編集中）。
+    private var currentVideoItem: MosaicLibraryItem?
+    private var currentVideoInfo: VideoInfo?
+    private var currentVideoEditState = VideoEditState()
+    private var currentVideoTimeSeconds: Double = 0
+    /// 追跡プレビューで見失ったROIのID（キャンバス上で警告表示するため保持）。
+    private var videoTrackingLostIDs: Set<UUID> = []
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -1248,6 +1282,16 @@ final class MosaicWindowController: NSObject {
                     key: "0", modifiers: [.command], isRecommended: false, action: #selector(zoomToFit)),
         AppShortcut(id: "openSelectedLibraryOriginal", category: "ライブラリ", title: "元画像を開く",
                     key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryOriginal)),
+        AppShortcut(id: "jumpToPreviousKeyframe", category: "動画", title: "前のキーフレームへ",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(jumpToPreviousKeyframe)),
+        AppShortcut(id: "jumpToNextKeyframe", category: "動画", title: "次のキーフレームへ",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(jumpToNextKeyframe)),
+        AppShortcut(id: "addVideoKeyframe", category: "動画", title: "キーフレーム追加",
+                    key: "k", modifiers: [.command], isRecommended: true, action: #selector(addVideoKeyframe)),
+        AppShortcut(id: "removeVideoKeyframe", category: "動画", title: "キーフレーム削除",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(removeVideoKeyframe)),
+        AppShortcut(id: "runTrackingPreview", category: "動画", title: "追跡を確認",
+                    key: "t", modifiers: [.command], isRecommended: true, action: #selector(runTrackingPreview)),
         AppShortcut(id: "previewSelectedVideo", category: "ライブラリ", title: "動画をプレビュー再生",
                     key: "", modifiers: [], isRecommended: false, action: #selector(previewSelectedVideo)),
         AppShortcut(id: "openSelectedLibraryProcessed", category: "ライブラリ", title: "加工後画像を開く",
@@ -1432,7 +1476,22 @@ final class MosaicWindowController: NSObject {
         mainSplitView = splitView
         splitView.translatesAutoresizingMaskIntoConstraints = false
         splitView.addArrangedSubview(leftPane)
-        splitView.addArrangedSubview(canvas)
+        // キャンバス直下へ動画タイムライン（V3）を積む。静止画では非表示のため、
+        // 従来のレイアウト（キャンバスのみ）と見た目は変わらない。
+        canvasContainer.translatesAutoresizingMaskIntoConstraints = false
+        let timeline = makeVideoTimelineBar()
+        canvasContainer.addSubview(canvas)
+        canvasContainer.addSubview(timeline)
+        NSLayoutConstraint.activate([
+            canvas.topAnchor.constraint(equalTo: canvasContainer.topAnchor),
+            canvas.leadingAnchor.constraint(equalTo: canvasContainer.leadingAnchor),
+            canvas.trailingAnchor.constraint(equalTo: canvasContainer.trailingAnchor),
+            canvas.bottomAnchor.constraint(equalTo: timeline.topAnchor),
+            timeline.leadingAnchor.constraint(equalTo: canvasContainer.leadingAnchor),
+            timeline.trailingAnchor.constraint(equalTo: canvasContainer.trailingAnchor),
+            timeline.bottomAnchor.constraint(equalTo: canvasContainer.bottomAnchor)
+        ])
+        splitView.addArrangedSubview(canvasContainer)
         splitView.addArrangedSubview(rightPane)
         splitView.setHoldingPriority(.defaultHigh, forSubviewAt: 0)
         splitView.setHoldingPriority(.defaultLow, forSubviewAt: 1)
@@ -4005,6 +4064,284 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+
+    // MARK: - 動画編集タイムライン（V3）
+
+    /// キャンバス下部の動画タイムラインを構築する。静止画編集中は非表示（高さ0）にする。
+    private func makeVideoTimelineBar() -> NSView {
+        videoTimelineBar.translatesAutoresizingMaskIntoConstraints = false
+        videoTimelineBar.wantsLayer = true
+        videoTimelineBar.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        let separator = NSBox()
+        separator.boxType = .separator
+        separator.translatesAutoresizingMaskIntoConstraints = false
+
+        let prevButton = shortcutToolbarButton("jumpToPreviousKeyframe", symbol: "backward.end")
+        let nextButton = shortcutToolbarButton("jumpToNextKeyframe", symbol: "forward.end")
+        let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle")
+        let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle")
+        let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope")
+
+        videoTimeSlider.target = self
+        videoTimeSlider.action = #selector(videoTimeSliderChanged)
+        videoTimeSlider.translatesAutoresizingMaskIntoConstraints = false
+        videoTimeSlider.toolTip = "再生位置（ドラッグでそのフレームへ移動）"
+        videoTimeSlider.setAccessibilityLabel("再生位置")
+
+        for label in [videoTimeLabel, videoKeyframeLabel] {
+            label.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
+            label.textColor = .secondaryLabelColor
+            label.translatesAutoresizingMaskIntoConstraints = false
+        }
+        videoTimeLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        videoKeyframeLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
+
+        let row = NSStackView(views: [
+            prevButton, nextButton, addButton, removeButton, trackButton,
+            videoTimeSlider, videoTimeLabel, videoKeyframeLabel
+        ])
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        row.spacing = 8
+        row.edgeInsets = NSEdgeInsets(top: 4, left: 8, bottom: 4, right: 8)
+        row.translatesAutoresizingMaskIntoConstraints = false
+
+        videoTimelineBar.addSubview(separator)
+        videoTimelineBar.addSubview(row)
+        NSLayoutConstraint.activate([
+            separator.topAnchor.constraint(equalTo: videoTimelineBar.topAnchor),
+            separator.leadingAnchor.constraint(equalTo: videoTimelineBar.leadingAnchor),
+            separator.trailingAnchor.constraint(equalTo: videoTimelineBar.trailingAnchor),
+            separator.heightAnchor.constraint(equalToConstant: 1),
+            row.topAnchor.constraint(equalTo: separator.bottomAnchor),
+            row.leadingAnchor.constraint(equalTo: videoTimelineBar.leadingAnchor),
+            row.trailingAnchor.constraint(equalTo: videoTimelineBar.trailingAnchor),
+            row.bottomAnchor.constraint(equalTo: videoTimelineBar.bottomAnchor)
+        ])
+        videoTimelineBar.isHidden = true
+        return videoTimelineBar
+    }
+
+    /// 動画をキーフレーム編集モードで開く（V3）。先頭（または最初のキーフレーム）を
+    /// キャンバスへ表示し、以後は静止画と同じ操作でROIを編集できる。
+    private func openVideoForEditing(_ item: MosaicLibraryItem) {
+        guard item.isVideo else { return }
+        let url = libraryEngine.originalURL(for: item)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            updateStatus("動画ファイルが見つかりません: \(item.sourceName)（リンク切れ修正をお試しください）")
+            return
+        }
+        guard confirmCurrentChangesBeforeLeaving() else { return }
+
+        updateStatus("動画を開いています: \(item.sourceName)")
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            do {
+                let info = try VideoFrameReader(url: url).loadInfo()
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.currentVideoItem = item
+                    self.currentVideoInfo = info
+                    self.currentVideoEditState = self.videoEditStore.load(for: item.id) ?? VideoEditState()
+                    self.videoTimelineBar.isHidden = false
+                    self.videoTimeSlider.minValue = 0
+                    self.videoTimeSlider.maxValue = max(0.001, info.durationSeconds)
+                    // 既存キーフレームがあればその先頭、無ければ動画先頭を開く
+                    let startTime = self.currentVideoEditState.keyframes.first?.timeSeconds ?? 0
+                    self.seekVideo(to: startTime, reason: "動画を開きました")
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in self?.showError(error) }
+            }
+        }
+    }
+
+    /// 動画編集モードを終了する（静止画を開いた場合など）。
+    private func exitVideoEditingMode() {
+        currentVideoItem = nil
+        currentVideoInfo = nil
+        currentVideoEditState = VideoEditState()
+        currentVideoTimeSeconds = 0
+        videoTrackingLostIDs = []
+        videoTimelineBar.isHidden = true
+    }
+
+    /// 指定時刻のフレームをキャンバスへ読み込み、その時刻に適用されるROIを表示する。
+    private func seekVideo(to seconds: Double, reason: String? = nil) {
+        guard let item = currentVideoItem, let info = currentVideoInfo else { return }
+        let clamped = min(max(0, seconds), max(0, info.durationSeconds))
+        let url = libraryEngine.originalURL(for: item)
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let frame = try? VideoFrameReader(url: url)
+                .frame(at: CMTime(seconds: clamped, preferredTimescale: 600))
+            DispatchQueue.main.async {
+                guard let self, let frame else {
+                    self?.updateStatus("フレームを取得できませんでした（\(VideoPreviewView.timeText(clamped))）")
+                    return
+                }
+                self.currentVideoTimeSeconds = clamped
+                self.videoTimeSlider.doubleValue = clamped
+                self.loadedImage = LoadedImage(url: url, cgImage: frame)
+                self.renderedImage = nil
+                self.mosaicPreviewCheckbox.state = .off
+                self.canvas.setImage(frame)
+                // その時刻に効くキーフレームのROIを表示（無ければ空）
+                let keyframe = self.currentVideoEditState.keyframe(at: clamped)
+                self.canvas.rois = keyframe?.rois ?? []
+                self.canvas.selectedROIID = nil
+                self.videoTrackingLostIDs = []
+                self.canvas.trackingLostROIIDs = []
+                self.resetUndoHistory()
+                self.editorRevision += 1
+                self.reloadLayerList()
+                self.updateVideoTimelineLabels()
+                self.updateStatsBar()
+                if let reason {
+                    self.updateStatus("\(reason): \(item.sourceName) \(VideoPreviewView.timeText(clamped))")
+                }
+            }
+        }
+    }
+
+    private func updateVideoTimelineLabels() {
+        guard let info = currentVideoInfo else { return }
+        videoTimeLabel.stringValue = "\(VideoPreviewView.timeText(currentVideoTimeSeconds))"
+            + " / \(VideoPreviewView.timeText(info.durationSeconds))"
+        let isKeyframe = currentVideoEditState.keyframes.contains {
+            abs($0.timeSeconds - currentVideoTimeSeconds) < 0.01
+        }
+        videoKeyframeLabel.stringValue = "キーフレーム \(currentVideoEditState.keyframes.count)件"
+            + (isKeyframe ? "（現在）" : "")
+    }
+
+    @objc private func videoTimeSliderChanged() {
+        seekVideo(to: videoTimeSlider.doubleValue)
+    }
+
+    /// 現在のフレームのROIをキーフレームとして保存する。
+    @objc private func addVideoKeyframe() {
+        guard let item = currentVideoItem else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        currentVideoEditState.upsertKeyframe(
+            VideoKeyframe(timeSeconds: currentVideoTimeSeconds, rois: canvas.rois)
+        )
+        saveCurrentVideoEditState(item: item)
+        updateVideoTimelineLabels()
+        updateStatus(
+            "キーフレームを保存: \(VideoPreviewView.timeText(currentVideoTimeSeconds))"
+            + "（ROI \(canvas.rois.count)件）"
+        )
+    }
+
+    @objc private func removeVideoKeyframe() {
+        guard let item = currentVideoItem else { return }
+        currentVideoEditState.removeKeyframe(atTime: currentVideoTimeSeconds)
+        saveCurrentVideoEditState(item: item)
+        updateVideoTimelineLabels()
+        updateStatus("キーフレームを削除: \(VideoPreviewView.timeText(currentVideoTimeSeconds))")
+    }
+
+    private func saveCurrentVideoEditState(item: MosaicLibraryItem) {
+        do {
+            try videoEditStore.save(currentVideoEditState, for: item.id)
+        } catch {
+            showError(error)
+        }
+    }
+
+    @objc private func jumpToPreviousKeyframe() {
+        let previous = currentVideoEditState.keyframes
+            .filter { $0.timeSeconds < currentVideoTimeSeconds - 0.01 }
+            .max { $0.timeSeconds < $1.timeSeconds }
+        guard let previous else {
+            updateStatus("これより前のキーフレームはありません")
+            return
+        }
+        seekVideo(to: previous.timeSeconds, reason: "前のキーフレーム")
+    }
+
+    @objc private func jumpToNextKeyframe() {
+        let next = currentVideoEditState.keyframes
+            .filter { $0.timeSeconds > currentVideoTimeSeconds + 0.01 }
+            .min { $0.timeSeconds < $1.timeSeconds }
+        guard let next else {
+            updateStatus("これより後のキーフレームはありません")
+            return
+        }
+        seekVideo(to: next.timeSeconds, reason: "次のキーフレーム")
+    }
+
+    /// 直前のキーフレームから現在時刻までROIを追跡し、追随後の位置をキャンバスへ表示する。
+    /// 見失ったROIはステータスへ件数を出し、ユーザーが修正して新しいキーフレームにできる。
+    @objc private func runTrackingPreview() {
+        guard let item = currentVideoItem, let info = currentVideoInfo else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        guard let keyframe = currentVideoEditState.keyframe(at: currentVideoTimeSeconds),
+              !keyframe.rois.isEmpty else {
+            updateStatus("追跡の起点となるキーフレーム（ROIあり）がありません")
+            return
+        }
+        let targetTime = currentVideoTimeSeconds
+        guard targetTime > keyframe.timeSeconds + 0.001 else {
+            updateStatus("キーフレーム上のため追跡は不要です")
+            return
+        }
+        let url = libraryEngine.originalURL(for: item)
+        let frameRate = max(1, info.frameRate)
+        let startIndex = Int((keyframe.timeSeconds * frameRate).rounded())
+        let endIndex = Int((targetTime * frameRate).rounded())
+        updateStatus("追跡中… \(VideoPreviewView.timeText(keyframe.timeSeconds)) → \(VideoPreviewView.timeText(targetTime))")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            let tracker = VideoROITracker()
+            var trackedROIs = keyframe.rois
+            var lostIDs: Set<UUID> = []
+            var started = false
+            do {
+                try VideoFrameReader(url: url).readFrames(shouldContinue: { true }) { index, image, _ in
+                    guard index >= startIndex else { return }
+                    guard index <= endIndex else { throw TrackingPreviewStop.reachedTarget }
+                    if !started {
+                        try tracker.start(with: keyframe.rois, on: image)
+                        started = true
+                        return
+                    }
+                    trackedROIs = tracker.track(next: image)
+                    lostIDs = tracker.lostIDs
+                }
+            } catch is TrackingPreviewStop {
+                // 目標フレームへ到達したので正常終了
+            } catch {
+                DispatchQueue.main.async { [weak self] in self?.showError(error) }
+                return
+            }
+            let resultROIs = trackedROIs
+            let resultLost = lostIDs
+            DispatchQueue.main.async {
+                guard let self, self.currentVideoItem?.id == item.id,
+                      abs(self.currentVideoTimeSeconds - targetTime) < 0.01 else { return }
+                self.canvas.rois = resultROIs
+                self.videoTrackingLostIDs = resultLost
+                self.canvas.trackingLostROIIDs = resultLost
+                self.editorRevision += 1
+                self.reloadLayerList()
+                self.updateStatsBar()
+                if resultLost.isEmpty {
+                    self.updateStatus("追跡完了: ROI \(resultROIs.count)件が追随しました（修正後「キーフレーム追加」で確定できます）")
+                } else {
+                    self.updateStatus(
+                        "追跡完了: ROI \(resultROIs.count)件中 \(resultLost.count)件を見失いました"
+                        + "（直前の位置を保持しています。修正後「キーフレーム追加」で確定してください）"
+                    )
+                }
+            }
+        }
+    }
+
     /// 動画プレビュー再生ウィンドウを開く（V2。確認用の再生のみで編集は行わない）。
     /// 既に開いている場合は作り直して選択中の動画へ差し替える。
     private func openVideoPreview(for item: MosaicLibraryItem) {
@@ -5056,9 +5393,10 @@ final class MosaicWindowController: NSObject {
     }
 
     private func loadLibraryItemAsWorking(_ item: MosaicLibraryItem) {
-        // 動画は静止画として読み込めないため、プレビュー再生へ回す（V2）。
+        // 動画はキーフレーム編集モードで開く（V3。再生確認はライブラリの
+        // 「動画をプレビュー再生」から別途行える）。
         if item.isVideo {
-            openVideoPreview(for: item)
+            openVideoForEditing(item)
             return
         }
         if let processedURL = libraryEngine.processedURL(for: item) {
@@ -5161,6 +5499,8 @@ final class MosaicWindowController: NSObject {
     /// 作業画像を切り替える。退避済みの編集状態があれば復元し true を返す。
     @discardableResult
     private func setWorkingImage(_ image: CGImage, sourceURL: URL, item: MosaicLibraryItem) -> Bool {
+        // 静止画を開いたら動画編集モード（タイムライン表示）を終了する
+        if !item.isVideo { exitVideoEditingMode() }
         editorRevision += 1
         if let currentID = currentLibraryItem?.id, discardedEditStateID == currentID {
             imageEditStates[currentID] = nil
@@ -6410,7 +6750,7 @@ extension MosaicWindowController: NSSplitViewDelegate {
     /// プレビュータイル（44pt×4列＋ラベル列）が必須制約で圧縮できないため、他のペインより
     /// 広い下限を与える（狭めるとAuto Layoutの制約違反やタイルのはみ出しが起きるため）。
     private func minimumWidth(forPane pane: NSView) -> CGFloat {
-        if pane === canvas { return 200 }
+        if pane === canvasContainer { return 200 }
         if let inspector = sidePanels[.inspector],
            let split = pane as? NSSplitView,
            split.arrangedSubviews.contains(where: { $0 === inspector }) {
@@ -6426,7 +6766,7 @@ extension MosaicWindowController: NSSplitViewDelegate {
         guard dividerIndex + 1 >= 0, dividerIndex + 1 < subviews.count else { return proposedMaximumPosition }
         let trailingView = subviews[dividerIndex + 1]
         guard !trailingView.isHidden else { return proposedMaximumPosition }
-        let minWidth: CGFloat = trailingView === canvas ? 200 : 160
+        let minWidth: CGFloat = trailingView === canvasContainer ? 200 : minimumWidth(forPane: trailingView)
         return trailingView.frame.maxX - minWidth
     }
 
@@ -6646,6 +6986,9 @@ final class ImageCanvasView: NSView {
     /// レイヤ一覧で選択中の人物検出/骨格検出レイヤ（画像上に強調枠を表示するため）。
     /// レイヤ一覧側の選択状態と画像上の表示を一致させる。
     fileprivate var selectedDetectionLayer: LayerKind? { didSet { needsDisplay = true } }
+    /// 追跡プレビューで見失ったROIのID。該当ROIは警告色の枠で強調し、
+    /// ユーザーが位置を直して新しいキーフレームにできることを示す（V3）。
+    var trackingLostROIIDs: Set<UUID> = [] { didSet { needsDisplay = true } }
     /// レイヤ一覧でROIグループ（`ROIListGroup`）を選択したときの、そのグループに属するROIのID集合。
     /// 画像上でまとめて強調表示し、いずれか1つをドラッグするとグループ全体を一括移動できる
     /// （レイヤ一覧のグループ選択と画像上の一括範囲選択・一括移動を一致させる）。
@@ -7631,6 +7974,9 @@ final class ImageCanvasView: NSView {
             if showROITags {
                 drawCategoryLabel(roi, near: rect, color: color)
             }
+            if trackingLostROIIDs.contains(roi.id) {
+                drawTrackingLostWarning(rect)
+            }
             if roi.id == selectedROIID {
                 drawSelectionHandles(rect, rotation: roi.rotation)
                 drawRotationHandle(rect: rect, rotation: roi.rotation)
@@ -7723,6 +8069,15 @@ final class ImageCanvasView: NSView {
         NSColor.controlAccentColor.setStroke()
         circle.lineWidth = 1.5
         circle.stroke()
+    }
+
+    /// 追跡で見失ったROIの警告枠（黄色の破線）。位置が直前フレームのまま保持されていることを示す。
+    private func drawTrackingLostWarning(_ rect: NSRect) {
+        let path = NSBezierPath(rect: rect.insetBy(dx: -3, dy: -3))
+        path.lineWidth = 2.5
+        path.setLineDash([6, 4], count: 2, phase: 0)
+        NSColor.systemYellow.setStroke()
+        path.stroke()
     }
 
     /// フラッシュパターンの中心ハンドル（ドラッグして放射の中心位置を指定できる、十字マーク付きの丸）。

@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.0.00088 - 2026-07-27（動画対応 V3: キーフレーム編集UI）
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 新機能: ライブラリの動画を開くと、その時刻のフレームがキャンバスへ表示され、**静止画とまったく同じ操作**（自動候補生成・手動追加・モザイク設定）でROIを編集できるようになった。
+- 新機能: キャンバス下部にタイムラインを追加した（動画編集中のみ表示）。シークバーで任意の時刻へ移動でき、現在時刻・尺・キーフレーム件数が確認できる。
+- 新機能: キーフレーム操作を追加した。「キーフレーム追加」（⌘K）で現在のフレームのROIを確定保存し、「キーフレーム削除」「前/次のキーフレームへ」で行き来できる。
+- 新機能: 「追跡を確認」（⌘T）で、直前のキーフレームから現在の時刻までROIが自動追随した結果を表示する。見失ったROIは黄色い破線で警告表示され、直前の位置を保持したままなので、その場で位置を直して新しいキーフレームとして確定できる。
+- 新機能: メニューバーへ「動画」メニューを追加（プレビュー再生／キーフレーム操作／追跡確認）。
+- 内部: キーフレームのROIは動画本体を再エンコードせずに保存される（書き出しはV4で対応）。
+
+■更新履歴
+
+- キャンバスを`canvasContainer`（キャンバス＋タイムライン）へ包み、メイン分割へはコンテナを入れる。静止画ではタイムラインを`isHidden`にするため従来のレイアウトと見た目は同一。分割の最小/最大幅判定もコンテナ基準へ更新。
+- 動画編集状態（`currentVideoItem`/`currentVideoInfo`/`currentVideoEditState`/`currentVideoTimeSeconds`）と、`openVideoForEditing`/`exitVideoEditingMode`/`seekVideo(to:reason:)`/`addVideoKeyframe`/`removeVideoKeyframe`/`jumpTo*Keyframe`/`runTrackingPreview`を追加。
+- ショートカット: `addVideoKeyframe`（⌘K）・`runTrackingPreview`（⌘T）ほかを`AppShortcut`レジストリへ登録し、タイムラインのボタン・メニュー・ヘルプ一覧へ自動反映。
+- 追跡プレビューは`VideoROITracker`をバックグラウンドで直前キーフレーム→現在時刻まで進め、`readFrames`のハンドラから内部シグナル（`TrackingPreviewStop`）を投げて目標フレームで走査を打ち切る。
+- `ImageCanvasView.trackingLostROIIDs`と`drawTrackingLostWarning`を追加（黄色破線の警告枠）。
+- フレーム取得・動画情報取得は全てバックグラウンド実行し、UI更新のみメインへ戻す。
+
 ## v0.0.00087 - 2026-07-27（動画対応 V2: ライブラリ統合）
 
 ■更新履歴（Readme / ChangeLog 用）
