@@ -1523,3 +1523,49 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         #expect(mask.extent.height > 0)
     }
 }
+
+/// 回転ROIで、初期実装エンジンの制限矩形が「傾いた選択範囲」に追従することを実測する。
+/// 当時（Build 41）は回転機能が無く`roi.rect`（無回転）で切っていたため、回転ROIでは
+/// 軸並行の四角いブロックになってしまっていた（GUI報告の症状）。その回帰防止。
+@Test func rotatedRectangleMaskFollowsROIRotation() throws {
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    // 細長い横長ROIを45度回転させる
+    let rect = CGRect(x: 20, y: 40, width: 60, height: 20)
+
+    let unrotated = ShapeSegmentEngine.rectangleMask(rect: rect, extent: extent, rotation: 0)
+    let rotated = ShapeSegmentEngine.rectangleMask(rect: rect, extent: extent, rotation: 45)
+
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func luminance(_ image: CIImage, x: Int, y: Int) -> Int {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            image,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Int(pixel[0])
+    }
+
+    // 中心はどちらも白（マスクが効く）
+    #expect(luminance(unrotated, x: 50, y: 50) > 200)
+    #expect(luminance(rotated, x: 50, y: 50) > 200)
+
+    // 無回転時の左端付近は白だが、45度回転させると範囲外になり黒へ変わる
+    #expect(luminance(unrotated, x: 24, y: 50) > 200)
+    #expect(luminance(rotated, x: 24, y: 50) < 60)
+
+    // 逆に、無回転では範囲外だった斜め方向（回転後の長辺上）は、回転後に範囲内へ入り白になる
+    // 中心(50,50)からのオフセット(17,-17)は、45度回転後のローカル座標で(24,0)となり
+    // 半幅30・半高10の矩形内に収まる（無回転ではy=33が範囲[40,60]の外）
+    #expect(luminance(unrotated, x: 67, y: 33) < 60)
+    #expect(luminance(rotated, x: 67, y: 33) > 200)
+
+    // 矩形マスクは二値（中間調のグラデーションを持たない）ことも確認する
+    // ＝楕円マスクのように縁でマスクが薄くならない
+    let samples = [(30, 30), (45, 55), (70, 70), (10, 10)]
+        .map { luminance(rotated, x: $0.0, y: $0.1) }
+    #expect(samples.allSatisfy { $0 < 60 || $0 > 200 })
+}

@@ -397,7 +397,21 @@ public final class LegacyRegionForegroundSegmentEngine: Segmenting {
         imageSize: CGSize,
         extent: CGRect
     ) -> CIImage? {
-        let expanded = roi.rect.expanded(scale: 1.15).clamped()
+        // 当時（Build 41）は選択範囲の回転機能が無かったため、初期実装は`roi.rect`（無回転）
+        // だけを見ていた。回転ROIへそのまま適用すると、クロップからも最終の切り取りからも
+        // 実際の（傾いた）選択範囲が外れ、軸並行の四角いブロックになってしまう
+        // （GUI報告の症状）。回転ROIでは回転後の外接矩形でクロップする。
+        let baseNormalized: NormalizedRect
+        if abs(roi.rotation) > 0.01 {
+            let baseRectPixels = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
+            baseNormalized = NormalizedRect(
+                Self.rotatedBoundingBox(of: baseRectPixels, rotationDegrees: roi.rotation),
+                imageSize: imageSize
+            )
+        } else {
+            baseNormalized = roi.rect
+        }
+        let expanded = baseNormalized.expanded(scale: 1.15).clamped()
         let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
         guard cropRect.width >= 16, cropRect.height >= 16,
               let crop = image.cropping(to: cropRect) else { return nil }
@@ -418,9 +432,35 @@ public final class LegacyRegionForegroundSegmentEngine: Segmenting {
             .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
 
         let black = CIImage(color: .black).cropped(to: extent)
-        // ★初期実装の要: ROIの矩形でクロップする（形状マスクの乗算はしない）
+        // ★初期実装の要: ROIの「矩形」で制限する（形状マスクの乗算はしない）。
+        // 矩形マスクは白/黒の二値のため、楕円マスク（放射グラデーション）のように
+        // 縁へ向かってマスクが薄くならず、取れた対象物の輪郭がそのまま残る。
+        // 当時の`cropped(to:)`と違い回転に対応させ、傾いた選択範囲でも正しく切り取る。
         let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-        return mask.composited(over: black).cropped(to: roiRect).composited(over: black)
+        let boundsMask = ShapeSegmentEngine.rectangleMask(
+            rect: roiRect,
+            extent: extent,
+            rotation: roi.rotation
+        )
+        return mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: boundsMask
+        ]).cropped(to: extent)
+    }
+
+    /// 矩形を中心周りに回転させた場合の軸並行外接矩形（現行エンジンと同じ計算）。
+    private static func rotatedBoundingBox(of rect: CGRect, rotationDegrees: Double) -> CGRect {
+        guard abs(rotationDegrees) > 0.01 else { return rect }
+        let radians = rotationDegrees * .pi / 180
+        let cosA = abs(cos(radians))
+        let sinA = abs(sin(radians))
+        let newWidth = rect.width * cosA + rect.height * sinA
+        let newHeight = rect.width * sinA + rect.height * cosA
+        return CGRect(
+            x: rect.midX - newWidth / 2,
+            y: rect.midY - newHeight / 2,
+            width: newWidth,
+            height: newHeight
+        )
     }
 }
 
