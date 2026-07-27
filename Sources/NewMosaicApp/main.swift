@@ -102,10 +102,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         )
         window.title = Self.windowTitle()
         window.contentMinSize = NSSize(width: 760, height: 560)
-        // ウィンドウ枠はポータブル設定（AppSettings）を優先して復元する
+        // ウィンドウ枠はポータブル設定（AppSettings）を優先して復元する。
+        // 保存時と画面構成が変わっている（外部ディスプレイを外した・解像度変更）場合、
+        // そのまま復元すると画面外に開いて操作できなくなるため、可視領域へ収める。
         if let savedFrame = AppSettings.shared.string(forKey: "Layout.windowFrame"),
-           !savedFrame.isEmpty {
-            window.setFrame(NSRectFromString(savedFrame), display: true)
+           !savedFrame.isEmpty,
+           let clamped = Self.frameClampedToVisibleScreen(NSRectFromString(savedFrame)) {
+            window.setFrame(clamped, display: true)
         } else if !window.setFrameUsingName("newMosaicMainWindow") {
             window.center()
         }
@@ -125,10 +128,39 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         true
     }
 
+    /// 保存済みウィンドウ枠を、現在接続されている画面の可視領域へ収めて返す。
+    /// どの画面とも重ならない（外部ディスプレイを外した等）場合はnilを返し、呼び出し側で
+    /// 既定位置へフォールバックさせる。
+    private static func frameClampedToVisibleScreen(_ frame: NSRect) -> NSRect? {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return frame }
+        // 面積がもっとも重なる画面を復元先とする（複数ディスプレイ環境で元の画面を優先）
+        func overlapArea(_ screen: NSScreen) -> CGFloat {
+            let overlap = screen.visibleFrame.intersection(frame)
+            guard !overlap.isNull else { return 0 }
+            return overlap.width * overlap.height
+        }
+        let target = screens.max { overlapArea($0) < overlapArea($1) }
+        guard let visible = target?.visibleFrame else { return nil }
+        // まったく重なっていない場合は復元せず既定位置へ
+        guard visible.intersects(frame) else { return nil }
+        var clamped = frame
+        clamped.size.width = min(clamped.width, visible.width)
+        clamped.size.height = min(clamped.height, visible.height)
+        clamped.origin.x = min(max(clamped.minX, visible.minX), visible.maxX - clamped.width)
+        clamped.origin.y = min(max(clamped.minY, visible.minY), visible.maxY - clamped.height)
+        return clamped
+    }
+
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard controller.confirmCurrentChangesBeforeLeaving() else { return .terminateCancel }
-        // 分割位置はリサイズ通知経由の保存に依存せず、終了直前に現在値を明示的に保存する
-        // （「終了時にサイドツールパネル状態が保存されない」報告への対応）。
+        // 分割位置・ウィンドウ枠はリサイズ通知経由の保存に依存せず、終了直前に現在値を
+        // 明示的に保存する（「終了時にUIレイアウトが保存されない」報告への対応。
+        // 特にズーム（緑ボタン/タイトルバーのダブルクリック）はwindowDidEndLiveResizeが
+        // 発火しないため、通知だけに頼ると枠が保存されない）。
+        if let window {
+            AppSettings.shared.set(NSStringFromRect(window.frame), forKey: "Layout.windowFrame")
+        }
         controller.saveSplitPositionsNow()
         // AppSettingsは連続書き込み対策で0.3秒デバウンスしているため、その待機中に終了すると
         // 直前の変更（ウィンドウ枠・分割位置等）が保存されないまま失われることがあった。
@@ -1208,6 +1240,11 @@ final class MosaicWindowController: NSObject {
         applyScaledFont(mosaicPreviewCheckbox, size: 12)
         applyScaledFont(autoGenerateCheckbox, size: 12)
         applyScaledFont(autoSaveCheckbox, size: 12)
+        for checkbox in [autoGenerateCheckbox, autoSaveCheckbox] {
+            checkbox.target = self
+            checkbox.action = #selector(workflowOptionChanged)
+        }
+        loadWorkflowOptions()
         applyScaledFont(applyStyleToAllButton, size: 12)
         applyScaledFont(styleTintCheckbox, size: 12)
         applyScaledFont(styleCloudToneCheckbox, size: 12)
@@ -1488,6 +1525,20 @@ final class MosaicWindowController: NSObject {
         }
         defaults.set(generatePersonCheckbox.state == .on, forKey: "GenerateFilter.person")
         defaults.set(generatePoseCheckbox.state == .on, forKey: "GenerateFilter.pose")
+    }
+
+    /// ワークフロー設定（自動候補生成・自動保存）の保存。他のユーザー設定と同様に
+    /// 次回起動へ引き継ぐ（従来はセッション限りで、再起動すると既定へ戻っていた）。
+    @objc private func workflowOptionChanged() {
+        let defaults = AppSettings.shared
+        defaults.set(autoGenerateCheckbox.state == .on, forKey: "Workflow.autoGenerate")
+        defaults.set(autoSaveCheckbox.state == .on, forKey: "Workflow.autoSave")
+    }
+
+    private func loadWorkflowOptions() {
+        let defaults = AppSettings.shared
+        autoGenerateCheckbox.state = (defaults.object(forKey: "Workflow.autoGenerate") as? Bool ?? false) ? .on : .off
+        autoSaveCheckbox.state = (defaults.object(forKey: "Workflow.autoSave") as? Bool ?? false) ? .on : .off
     }
 
     /// 保存済みの生成対象フィルタを復元する（未保存キーは既定ON）。
@@ -1935,8 +1986,8 @@ final class MosaicWindowController: NSObject {
         statsLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
         zoomLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
         for label in [styleOpacityValueLabel, styleBlockScaleValueLabel, styleFeatherValueLabel,
-                      styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleCloudDensityValueLabel,
-                      groinPositionValueLabel] {
+                      styleStripeWidthValueLabel, styleStripeSpacingValueLabel, styleStripeWobbleValueLabel,
+                      styleCloudDensityValueLabel, maskThresholdValueLabel, groinPositionValueLabel] {
             label.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
         }
         stylePatternImageLabel.font = Self.scaledFont(11)
@@ -1990,6 +2041,23 @@ final class MosaicWindowController: NSObject {
         for slider in [styleOpacitySlider, styleBlockScaleSlider, styleFeatherSlider, styleStripeWidthSlider, styleStripeSpacingSlider, styleStripeWobbleSlider, styleCloudDensitySlider] {
             slider.action = #selector(mosaicStyleChanged)
         }
+        // 数値スライダーはツールチップ・VoiceOverラベルの有無がばらついていたため、
+        // 行ラベルと同じ名称でまとめて設定する（設定行ごとの体験差をなくす）。
+        let sliderDescriptions: [(NSSlider, String)] = [
+            (styleOpacitySlider, "透明度（下げるほど元画像が透ける）"),
+            (styleBlockScaleSlider, "細かさ（モザイクのブロックサイズ・ノイズ粒度・ボケ半径）"),
+            (styleFeatherSlider, "輪郭ぼかし（選択範囲の境界をぼかす量）"),
+            (styleStripeWidthSlider, "帯の太さ（ボーダーの各線の太さ）"),
+            (styleStripeSpacingSlider, "帯の間隔（間隔部分は元画像が見える）"),
+            (styleStripeWobbleSlider, "並行揺れ（ランダムON時に各線を中央軸で傾ける度合い）"),
+            (styleCloudDensitySlider, "密度（トーンの塗り面積・フラッシュの放射線の本数）"),
+            (groinPositionSlider, "鼠径部位置（腰から膝へ向かう線分上の比率）")
+        ]
+        for (slider, description) in sliderDescriptions {
+            slider.toolTip = description
+            slider.setAccessibilityLabel(description)
+        }
+        styleTintColorWell.setAccessibilityLabel("塗りつぶし色")
         // 設定値ラベルは固定幅+等幅数字+左寄せ。右寄せだと数値が短い場合にスライダーとの間へ
         // 不要な空白が見えるため、スライダー直後から数値が始まる左寄せへ変更（GUI報告による）。
         // 固定幅は維持し、ドラッグ中に幅が変わってレイアウトが揺れるのを防ぐ。
@@ -2159,6 +2227,10 @@ final class MosaicWindowController: NSObject {
         ])
         categories.rowSpacing = 3
         categories.columnSpacing = 12
+        categories.translatesAutoresizingMaskIntoConstraints = false
+        // NSGridViewは内容から一意な幅が決まらず、親のcontentスタック（alignment=.leading）内で
+        // 幅いっぱいに引き伸ばされてチェックボックス列の間隔が広がる（styleGridと同じ再発防止策）。
+        categories.widthAnchor.constraint(lessThanOrEqualToConstant: 362).isActive = true
         let groinRow = inspectorRow("鼠径部位置", control: groinPositionSlider, trailing: groinPositionValueLabel)
 
         let tintRow = NSStackView(views: [styleTintCheckbox, styleTintColorWell])
@@ -2214,8 +2286,8 @@ final class MosaicWindowController: NSObject {
             title,
             inspectorHeading("選択範囲"), shapeRow,
             inspectorHeading("検出"), domainRow, maskRow, maskThresholdRow,
-            NSTextField(labelWithString: "候補カテゴリ"), categories,
-            NSTextField(labelWithString: "表示レイヤ生成"), generateLayerRow, groinRow,
+            inspectorHeading("候補カテゴリ"), categories,
+            inspectorHeading("表示レイヤ生成"), generateLayerRow, groinRow,
             inspectorHeading("モザイク"), styleGrid, applyStyleToAllButton,
             inspectorHeading("ワークフロー"), options
         ])
@@ -2277,6 +2349,9 @@ final class MosaicWindowController: NSObject {
         // 固定幅（旧: equalToConstant）だと、幅より長いラベル文字列が隣接コントロールへ
         // はみ出して重なって見える不具合があったため、最小幅のみを指定して伸縮可能にする。
         label.widthAnchor.constraint(greaterThanOrEqualToConstant: 78).isActive = true
+        // 行ラベルは見た目の並びでしか意味が伝わらないため、VoiceOver向けに
+        // コントロール自身へも同じ名称を設定する（呼び出し側で個別に書かなくて済むようにする）。
+        control.setAccessibilityLabel(title)
         var views: [NSView] = [label, control]
         if let trailing { views.append(trailing) }
         let row = NSStackView(views: views)
@@ -2981,7 +3056,7 @@ final class MosaicWindowController: NSObject {
         panel.addSubview(buttons)
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
-            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
             togglesRow.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
             togglesRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
@@ -4358,7 +4433,7 @@ final class MosaicWindowController: NSObject {
         panel.addSubview(buttons)
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 12),
-            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
             modeRow.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
             modeRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
@@ -4972,6 +5047,13 @@ extension MosaicWindowController: NSWindowDelegate {
 
     /// ウィンドウ枠（位置・サイズ）をポータブル設定へ保存する。
     func windowDidEndLiveResize(_ notification: Notification) {
+        saveWindowFrame(notification)
+    }
+
+    /// ズーム（緑ボタン/タイトルバーのダブルクリック）やフルスクリーン復帰など、
+    /// ドラッグを伴わないサイズ変更では`windowDidEndLiveResize`が発火しないため、
+    /// `windowDidResize`でも保存する（AppSettings側で0.3秒デバウンスされる）。
+    func windowDidResize(_ notification: Notification) {
         saveWindowFrame(notification)
     }
 
@@ -6063,8 +6145,20 @@ extension MosaicWindowController: NSSplitViewDelegate {
         guard dividerIndex >= 0, dividerIndex < subviews.count else { return proposedMinimumPosition }
         let leadingView = subviews[dividerIndex]
         guard !leadingView.isHidden else { return proposedMinimumPosition }
-        let minWidth: CGFloat = leadingView === canvas ? 200 : 160
-        return leadingView.frame.minX + minWidth
+        return leadingView.frame.minX + minimumWidth(forPane: leadingView)
+    }
+
+    /// サイドペイン/キャンバスの最小幅。インスペクタを含むペインは、モザイクパターンの
+    /// プレビュータイル（44pt×4列＋ラベル列）が必須制約で圧縮できないため、他のペインより
+    /// 広い下限を与える（狭めるとAuto Layoutの制約違反やタイルのはみ出しが起きるため）。
+    private func minimumWidth(forPane pane: NSView) -> CGFloat {
+        if pane === canvas { return 200 }
+        if let inspector = sidePanels[.inspector],
+           let split = pane as? NSSplitView,
+           split.arrangedSubviews.contains(where: { $0 === inspector }) {
+            return 340
+        }
+        return 160
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
