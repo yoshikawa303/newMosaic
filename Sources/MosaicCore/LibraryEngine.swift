@@ -17,6 +17,12 @@ public enum MosaicLibraryError: Error, LocalizedError {
     }
 }
 
+/// ライブラリ項目の種別。既存JSONには存在しないため、読み込み時は`.image`を既定とする。
+public enum MosaicLibraryItemKind: String, Codable, Sendable {
+    case image
+    case video
+}
+
 public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
     public var id: UUID
     public var createdAt: Date
@@ -31,9 +37,16 @@ public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
     public var imagePixelWidth: Int
     public var imagePixelHeight: Int
     public var rois: [MosaicROI]
+    /// 種別（静止画/動画）。既存JSON（種別なし）は`.image`として読み込む。
+    public var kind: MosaicLibraryItemKind
+    /// 動画の尺（秒）。静止画ではnil。
+    public var videoDurationSeconds: Double?
 
     /// リンク登録されたアイテムか。
     public var isLinked: Bool { linkedOriginalPath != nil }
+
+    /// 動画項目か。
+    public var isVideo: Bool { kind == .video }
 
     public init(
         id: UUID = UUID(),
@@ -45,7 +58,9 @@ public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
         linkedOriginalPath: String? = nil,
         imagePixelWidth: Int,
         imagePixelHeight: Int,
-        rois: [MosaicROI] = []
+        rois: [MosaicROI] = [],
+        kind: MosaicLibraryItemKind = .image,
+        videoDurationSeconds: Double? = nil
     ) {
         self.id = id
         self.createdAt = createdAt
@@ -57,6 +72,30 @@ public struct MosaicLibraryItem: Codable, Equatable, Identifiable, Sendable {
         self.imagePixelWidth = imagePixelWidth
         self.imagePixelHeight = imagePixelHeight
         self.rois = rois
+        self.kind = kind
+        self.videoDurationSeconds = videoDurationSeconds
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case id, createdAt, updatedAt, sourceName, originalRelativePath, processedRelativePath
+        case linkedOriginalPath, imagePixelWidth, imagePixelHeight, rois, kind, videoDurationSeconds
+    }
+
+    /// 既存ライブラリJSON（`kind`/`videoDurationSeconds`が無い）をそのまま読めるようにする。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        id = try container.decode(UUID.self, forKey: .id)
+        createdAt = try container.decode(Date.self, forKey: .createdAt)
+        updatedAt = try container.decode(Date.self, forKey: .updatedAt)
+        sourceName = try container.decode(String.self, forKey: .sourceName)
+        originalRelativePath = try container.decode(String.self, forKey: .originalRelativePath)
+        processedRelativePath = try container.decodeIfPresent(String.self, forKey: .processedRelativePath)
+        linkedOriginalPath = try container.decodeIfPresent(String.self, forKey: .linkedOriginalPath)
+        imagePixelWidth = try container.decode(Int.self, forKey: .imagePixelWidth)
+        imagePixelHeight = try container.decode(Int.self, forKey: .imagePixelHeight)
+        rois = try container.decodeIfPresent([MosaicROI].self, forKey: .rois) ?? []
+        kind = try container.decodeIfPresent(MosaicLibraryItemKind.self, forKey: .kind) ?? .image
+        videoDurationSeconds = try container.decodeIfPresent(Double.self, forKey: .videoDurationSeconds)
     }
 }
 
@@ -204,6 +243,49 @@ public final class LibraryEngine {
             items.insert(item, at: 0)
             try saveItems(items)
             return item
+        }
+    }
+
+    /// 動画をリンク登録する（本体はコピーしない）。解像度・尺は呼び出し側（MosaicVideoKit）が
+    /// 取得して渡す。静止画のリンク登録（`importLinked`）と同じく、既に登録済みなら既存項目を返す。
+    public func importLinkedVideo(
+        url: URL,
+        pixelWidth: Int,
+        pixelHeight: Int,
+        durationSeconds: Double
+    ) throws -> MosaicLibraryItem {
+        try syncQueue.sync {
+            try ensureDirectories()
+            var items = try loadItemsUnsynchronized()
+            if let existing = items.first(where: { $0.linkedOriginalPath == url.path }) {
+                return existing
+            }
+            let item = MosaicLibraryItem(
+                sourceName: url.lastPathComponent,
+                originalRelativePath: "",
+                linkedOriginalPath: url.path,
+                imagePixelWidth: pixelWidth,
+                imagePixelHeight: pixelHeight,
+                kind: .video,
+                videoDurationSeconds: durationSeconds
+            )
+            items.insert(item, at: 0)
+            try saveItems(items)
+            return item
+        }
+    }
+
+    /// 動画へモザイク適用済みの出力を登録する（出力ファイルは呼び出し側が`Processed/`へ書き出す）。
+    public func attachProcessedVideo(relativePath: String, for itemID: UUID) throws -> MosaicLibraryItem {
+        try syncQueue.sync {
+            var items = try loadItemsUnsynchronized()
+            guard let index = items.firstIndex(where: { $0.id == itemID }) else {
+                throw MosaicLibraryError.itemNotFound(itemID)
+            }
+            items[index].processedRelativePath = relativePath
+            items[index].updatedAt = Date()
+            try saveItems(items)
+            return items[index]
         }
     }
 

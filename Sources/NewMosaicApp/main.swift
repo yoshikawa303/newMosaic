@@ -1,7 +1,10 @@
 import AppKit
+import AVFoundation
 import CoreImage
+import CoreMedia
 import ImageIO
 import MosaicCore
+import MosaicVideoKit
 import OSLog
 import UniformTypeIdentifiers
 
@@ -190,6 +193,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "ファイル")
         fileMenu.addItem(shortcutMenuItem("openImage", titleSuffix: "…", target: target))
+        fileMenu.addItem(shortcutMenuItem("openVideo", titleSuffix: "…", target: target))
         fileMenu.addItem(shortcutMenuItem("pasteImage", target: target))
         fileMenu.addItem(.separator())
         fileMenu.addItem(shortcutMenuItem("exportImage", titleSuffix: "…", target: target))
@@ -730,6 +734,129 @@ private final class LayerRowView: NSTableCellView {
     }
 }
 
+/// 動画プレビュー再生ビュー（V2）。
+/// AVKitの`AVPlayerView`はSwiftPMの実行ファイルターゲットからリンクできない（SwiftUICore依存）ため、
+/// `AVPlayerLayer`＋最小限の再生コントロール（再生/一時停止・シークバー・時刻表示）を自前で構成する。
+/// 編集は行わず、確認用の再生に徹する（編集はV3のキャンバス側で行う）。
+@MainActor
+private final class VideoPreviewView: NSView {
+    private let player: AVPlayer
+    private let playerLayer = AVPlayerLayer()
+    private let playPauseButton = NSButton(title: "▶", target: nil, action: nil)
+    private let slider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let timeLabel = NSTextField(labelWithString: "0:00 / 0:00")
+    private var timeObserver: Any?
+    private var durationSeconds: Double = 0
+
+    init(url: URL) {
+        player = AVPlayer(url: url)
+        super.init(frame: .zero)
+        wantsLayer = true
+        layer?.backgroundColor = NSColor.black.cgColor
+
+        playerLayer.player = player
+        playerLayer.videoGravity = .resizeAspect
+        layer?.addSublayer(playerLayer)
+
+        playPauseButton.target = self
+        playPauseButton.action = #selector(togglePlay)
+        playPauseButton.bezelStyle = .rounded
+        playPauseButton.translatesAutoresizingMaskIntoConstraints = false
+        playPauseButton.widthAnchor.constraint(equalToConstant: 44).isActive = true
+
+        slider.target = self
+        slider.action = #selector(sliderChanged)
+        slider.translatesAutoresizingMaskIntoConstraints = false
+
+        timeLabel.font = MosaicWindowController.scaledMonospacedDigitFont(11, weight: .regular)
+        timeLabel.textColor = .secondaryLabelColor
+        timeLabel.translatesAutoresizingMaskIntoConstraints = false
+        timeLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
+
+        let controls = NSStackView(views: [playPauseButton, slider, timeLabel])
+        controls.orientation = .horizontal
+        controls.alignment = .centerY
+        controls.spacing = 8
+        controls.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
+        controls.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(controls)
+        NSLayoutConstraint.activate([
+            controls.leadingAnchor.constraint(equalTo: leadingAnchor),
+            controls.trailingAnchor.constraint(equalTo: trailingAnchor),
+            controls.bottomAnchor.constraint(equalTo: bottomAnchor),
+            controls.heightAnchor.constraint(equalToConstant: 36)
+        ])
+
+        // 再生位置の追従（0.2秒間隔。シーク中はスライダーを更新しない）
+        timeObserver = player.addPeriodicTimeObserver(
+            forInterval: CMTime(seconds: 0.2, preferredTimescale: 600),
+            queue: .main
+        ) { [weak self] time in
+            MainActor.assumeIsolated { self?.updateProgress(currentSeconds: CMTimeGetSeconds(time)) }
+        }
+        let seconds = CMTimeGetSeconds(AVURLAsset(url: url).duration)
+        if seconds.isFinite, seconds > 0 {
+            durationSeconds = seconds
+            slider.maxValue = seconds
+        }
+        updateProgress(currentSeconds: 0)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    /// 再生停止＋時刻オブザーバの解除。ウィンドウを閉じる際に必ず呼ぶ
+    /// （deinitからは`@MainActor`隔離のプロパティへ触れられないため、明示的な後始末とする）。
+
+    override func layout() {
+        super.layout()
+        // 下部36ptはコントロール用に空ける
+        playerLayer.frame = CGRect(x: 0, y: 36, width: bounds.width, height: max(0, bounds.height - 36))
+    }
+
+    func stop() {
+        player.pause()
+        if let timeObserver {
+            player.removeTimeObserver(timeObserver)
+            self.timeObserver = nil
+        }
+    }
+
+    @objc private func togglePlay() {
+        if player.timeControlStatus == .playing {
+            player.pause()
+            playPauseButton.title = "▶"
+        } else {
+            player.play()
+            playPauseButton.title = "❚❚"
+        }
+    }
+
+    @objc private func sliderChanged() {
+        player.seek(
+            to: CMTime(seconds: slider.doubleValue, preferredTimescale: 600),
+            toleranceBefore: .zero,
+            toleranceAfter: .zero
+        )
+        updateProgress(currentSeconds: slider.doubleValue)
+    }
+
+    private func updateProgress(currentSeconds: Double) {
+        if !slider.isHighlighted, currentSeconds.isFinite {
+            slider.doubleValue = currentSeconds
+        }
+        timeLabel.stringValue = "\(Self.timeText(currentSeconds)) / \(Self.timeText(durationSeconds))"
+        if player.timeControlStatus != .playing, playPauseButton.title != "▶" {
+            playPauseButton.title = "▶"
+        }
+    }
+
+    static func timeText(_ seconds: Double) -> String {
+        guard seconds.isFinite, seconds >= 0 else { return "0:00" }
+        let total = Int(seconds.rounded())
+        return String(format: "%d:%02d", total / 60, total % 60)
+    }
+}
+
 /// ライブラリ一覧で上下（左右）矢印キーによる画像切替と、Deleteキーによる削除を可能にするテーブルビュー。
 @MainActor
 private final class NavigableTableView: NSTableView {
@@ -787,6 +914,13 @@ final class MosaicWindowController: NSObject {
     private let libraryEngine: LibraryEngine = (try? LibraryEngine.defaultLibrary())
         ?? LibraryEngine(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("newMosaic/Library"))
     private let learningEngine: LearningEngine? = try? LearningEngine.defaultStore()
+    // MARK: 動画対応（MosaicVideoKitプラグイン）
+    /// 動画サムネイル（LRUキャッシュ付き）。
+    private let videoThumbnailProvider = VideoThumbnailProvider()
+    /// 動画のキーフレームROI保存（ライブラリ配下のサイドカーJSON）。
+    private lazy var videoEditStore = VideoEditStore(libraryRootURL: libraryEngine.rootURL)
+    /// 動画プレビュー再生ウィンドウ（V2。編集は行わない）。
+    private var videoPreviewWindow: NSWindow?
     private let canvas = ImageCanvasView()
     private let statusLabel = NSTextField(labelWithString: "画像を開いてください")
     private let tableView = NavigableTableView()
@@ -1088,6 +1222,8 @@ final class MosaicWindowController: NSObject {
     static let appShortcuts: [AppShortcut] = [
         AppShortcut(id: "openImage", category: "ファイル", title: "画像を開く",
                     key: "o", modifiers: [.command], isRecommended: true, action: #selector(openImage)),
+        AppShortcut(id: "openVideo", category: "ファイル", title: "動画を開く",
+                    key: "o", modifiers: [.command, .shift], isRecommended: true, action: #selector(openVideo)),
         AppShortcut(id: "pasteImage", category: "ファイル", title: "クリップボードから読み込む",
                     key: "v", modifiers: [.command], isRecommended: false, action: #selector(pasteImage)),
         AppShortcut(id: "exportImage", category: "ファイル", title: "画像出力",
@@ -1112,6 +1248,8 @@ final class MosaicWindowController: NSObject {
                     key: "0", modifiers: [.command], isRecommended: false, action: #selector(zoomToFit)),
         AppShortcut(id: "openSelectedLibraryOriginal", category: "ライブラリ", title: "元画像を開く",
                     key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryOriginal)),
+        AppShortcut(id: "previewSelectedVideo", category: "ライブラリ", title: "動画をプレビュー再生",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(previewSelectedVideo)),
         AppShortcut(id: "openSelectedLibraryProcessed", category: "ライブラリ", title: "加工後画像を開く",
                     key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryProcessed)),
         AppShortcut(id: "deleteSelectedLibraryItems", category: "ライブラリ", title: "選択画像を削除",
@@ -3828,6 +3966,92 @@ final class MosaicWindowController: NSObject {
         AppLog.library.info("一括処理終了: 処理済み=\(processed) 失敗=\(failed) キャンセル=\(cancelled)")
     }
 
+    /// 動画をライブラリへリンク登録して開く（本体はコピーしない）。
+    /// 解像度・尺の取得はデコードを伴うためバックグラウンドで行い、完了後にUIを更新する。
+    @objc private func openVideo() {
+        let panel = NSOpenPanel()
+        panel.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
+        panel.allowsMultipleSelection = false
+        panel.canChooseDirectories = false
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard confirmCurrentChangesBeforeLeaving() else { return }
+
+        updateStatus("動画を読み込み中: \(url.lastPathComponent)")
+        // 動画情報の取得はデコードを伴うためバックグラウンドで行い、UI更新はメインへ戻す
+        let engine = libraryEngine
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                let info = try VideoFrameReader(url: url).loadInfo()
+                let item = try engine.importLinkedVideo(
+                    url: url,
+                    pixelWidth: Int(info.naturalSize.width),
+                    pixelHeight: Int(info.naturalSize.height),
+                    durationSeconds: info.durationSeconds
+                )
+                DispatchQueue.main.async { [weak self] in
+                    guard let self else { return }
+                    self.reloadLibrary()
+                    self.selectLibraryItemInUI(item)
+                    self.openVideoPreview(for: item)
+                    self.updateStatus(
+                        "動画を登録: \(item.sourceName) "
+                        + "\(Int(info.naturalSize.width))x\(Int(info.naturalSize.height)) "
+                        + "\(String(format: "%.1f", info.durationSeconds))秒"
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in self?.showError(error) }
+            }
+        }
+    }
+
+    /// 動画プレビュー再生ウィンドウを開く（V2。確認用の再生のみで編集は行わない）。
+    /// 既に開いている場合は作り直して選択中の動画へ差し替える。
+    private func openVideoPreview(for item: MosaicLibraryItem) {
+        guard item.isVideo else { return }
+        let url = libraryEngine.originalURL(for: item)
+        guard FileManager.default.fileExists(atPath: url.path) else {
+            updateStatus("動画ファイルが見つかりません: \(item.sourceName)（リンク切れ修正をお試しください）")
+            return
+        }
+        closeVideoPreview()
+        let preview = VideoPreviewView(url: url)
+        preview.translatesAutoresizingMaskIntoConstraints = false
+        let size = NSSize(
+            width: max(480, min(960, CGFloat(item.imagePixelWidth))),
+            height: max(320, min(640, CGFloat(item.imagePixelHeight))) + 36
+        )
+        let window = NSWindow(
+            contentRect: NSRect(origin: .zero, size: size),
+            styleMask: [.titled, .closable, .resizable],
+            backing: .buffered,
+            defer: false
+        )
+        window.title = "動画プレビュー: \(item.sourceName)"
+        window.contentView = preview
+        window.isReleasedWhenClosed = false
+        window.center()
+        window.makeKeyAndOrderFront(nil)
+        videoPreviewWindow = window
+    }
+
+    /// 動画プレビューを閉じる（再生を止めてから破棄する）。
+    private func closeVideoPreview() {
+        (videoPreviewWindow?.contentView as? VideoPreviewView)?.stop()
+        videoPreviewWindow?.orderOut(nil)
+        videoPreviewWindow = nil
+    }
+
+    /// ライブラリで選択中の動画をプレビュー再生する（静止画では何もしない）。
+    @objc private func previewSelectedVideo() {
+        guard let item = selectedLibraryItem() else { return }
+        guard item.isVideo else {
+            updateStatus("選択項目は静止画です（動画を選択してください）")
+            return
+        }
+        openVideoPreview(for: item)
+    }
+
     @objc private func openImage() {
         let panel = NSOpenPanel()
         panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
@@ -4418,8 +4642,9 @@ final class MosaicWindowController: NSObject {
         let repairLinksButton = shortcutToolbarButton("repairBrokenLinksAction", symbol: "link.badge.plus")
         let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
         let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
+        let previewVideoButton = shortcutToolbarButton("previewSelectedVideo", symbol: "play.rectangle")
         let buttons = NSStackView(views: [
-            openOriginalButton, openProcessedButton, repairLinksButton,
+            openOriginalButton, openProcessedButton, previewVideoButton, repairLinksButton,
             saveButton, revealButton, exportButton, deleteButton
         ])
         buttons.orientation = .horizontal
@@ -4614,7 +4839,15 @@ final class MosaicWindowController: NSObject {
             return cached
         }
         let url = libraryEngine.processedURL(for: item) ?? libraryEngine.originalURL(for: item)
-        guard let source = NSImage(contentsOf: url), source.size.width > 0, source.size.height > 0 else {
+        let loaded: NSImage?
+        if item.isVideo {
+            // 動画は静止画として読めないため、代表フレームをサムネイルにする
+            loaded = videoThumbnailProvider.thumbnail(for: url)
+                .map { NSImage(cgImage: $0, size: NSSize(width: $0.width, height: $0.height)) }
+        } else {
+            loaded = NSImage(contentsOf: url)
+        }
+        guard let source = loaded, source.size.width > 0, source.size.height > 0 else {
             return NSImage(size: NSSize(width: maxDimension, height: maxDimension))
         }
         let size = source.size
@@ -4670,6 +4903,13 @@ final class MosaicWindowController: NSObject {
     }
 
     /// 選択中の画像をライブラリから一括削除する（確認ダイアログあり。元画像・加工後画像とも完全削除）。
+    /// ライブラリ項目の削除に合わせて、動画のキーフレーム編集状態（サイドカーJSON）も破棄する。
+    private func deleteVideoEditStates(for items: [MosaicLibraryItem]) {
+        for item in items where item.isVideo {
+            videoEditStore.delete(for: item.id)
+        }
+    }
+
     @objc private func deleteSelectedLibraryItems() {
         let items = selectedLibraryItems()
         guard !items.isEmpty else {
@@ -4691,6 +4931,7 @@ final class MosaicWindowController: NSObject {
 
         do {
             try libraryEngine.deleteItems(ids: items.map(\.id))
+            deleteVideoEditStates(for: items)
             let deletedIDs = Set(items.map(\.id))
             for id in deletedIDs {
                 imageEditStates[id] = nil
@@ -4815,6 +5056,11 @@ final class MosaicWindowController: NSObject {
     }
 
     private func loadLibraryItemAsWorking(_ item: MosaicLibraryItem) {
+        // 動画は静止画として読み込めないため、プレビュー再生へ回す（V2）。
+        if item.isVideo {
+            openVideoPreview(for: item)
+            return
+        }
         if let processedURL = libraryEngine.processedURL(for: item) {
             loadLibraryImage(at: processedURL, item: item, useProcessed: true)
         } else {
@@ -6062,12 +6308,24 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
             switch columnID {
             case "name":
                 let linkMark = isBroken ? "⚠️ " : (item.isLinked ? "🔗" : "")
-                label.stringValue = linkMark + item.sourceName
+                // 動画は一覧で静止画と一目で区別できるようバッジを付ける
+                let kindMark = item.isVideo ? "🎬 " : ""
+                label.stringValue = kindMark + linkMark + item.sourceName
                 label.toolTip = isBroken ? "リンク切れ: \(item.sourceName)" : item.sourceName
             case "status":
-                label.stringValue = item.processedRelativePath == nil ? "元" : "済"
+                if item.isVideo {
+                    label.stringValue = item.processedRelativePath == nil ? "動画" : "動画済"
+                } else {
+                    label.stringValue = item.processedRelativePath == nil ? "元" : "済"
+                }
             case "resolution":
-                label.stringValue = "\(item.imagePixelWidth)×\(item.imagePixelHeight)"
+                // 動画は解像度に加えて尺も表示する（一覧から長さを把握できるようにする）
+                if item.isVideo, let duration = item.videoDurationSeconds {
+                    label.stringValue = "\(item.imagePixelWidth)×\(item.imagePixelHeight) "
+                        + VideoPreviewView.timeText(duration)
+                } else {
+                    label.stringValue = "\(item.imagePixelWidth)×\(item.imagePixelHeight)"
+                }
             case "roi":
                 label.stringValue = "\(item.rois.count)"
             case "updated":

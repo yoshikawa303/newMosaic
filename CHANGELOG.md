@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.0.00087 - 2026-07-27（動画対応 V2: ライブラリ統合）
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 新機能: 動画をライブラリへ登録できるようにした（ファイル＞動画を開く…／⇧⌘O）。動画本体はコピーせずリンク登録するため、ライブラリ容量が増えない。
+- 新機能: ライブラリ一覧に動画が静止画と並んで表示される。動画は🎬バッジ・代表フレームのサムネイル・尺（分:秒）付きで表示され、一目で区別できる。
+- 新機能: 動画のプレビュー再生ウィンドウを追加した（再生/一時停止・シークバー・時刻表示）。ライブラリの「動画をプレビュー再生」ボタン、または動画項目を開く操作で表示される。
+- 内部: 動画のキーフレームROIはライブラリ配下の別ファイルへ保存する方式とし、既存の静止画ライブラリのデータ形式は一切変更していない（既存ライブラリはそのまま読み込める）。
+
+■更新履歴
+
+- `MosaicLibraryItem`へ`kind`（image/video）・`videoDurationSeconds`を追加。カスタム`init(from:)`で既存JSON（両フィールドなし）を`.image`として読む後方互換を担保（回帰テスト2件追加）。
+- `LibraryEngine.importLinkedVideo(url:pixelWidth:pixelHeight:durationSeconds:)`／`attachProcessedVideo(relativePath:for:)`を追加。
+- `NewMosaicApp`が`MosaicVideoKit`へ依存（Package.swift）。`openVideo`（⇧⌘O）・`previewSelectedVideo`をショートカットレジストリへ登録し、メニュー／ライブラリ操作行へ追加。
+- `VideoPreviewView`（`AVPlayerLayer`＋自前コントロール）を新設。AVKitの`AVPlayerView`はSwiftPM実行ファイルからリンクできない（SwiftUICore依存）ため使用しない。
+- 動画情報の取得・ライブラリ登録はバックグラウンドで実行し、UI更新のみメインへ戻す。サムネイルは`VideoThumbnailProvider`経由。ライブラリ削除時は`VideoEditStore`のサイドカーJSONも破棄する。
+
 ## v0.0.00086 - 2026-07-27
 
 ■更新履歴（Readme / ChangeLog 用）

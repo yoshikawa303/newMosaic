@@ -317,6 +317,14 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
   以後の新規UIは `Docs/QC/CodeReview/QC_CodeReview_v0.0.00086.md` の「推奨統一ルール」に従う。
 - **動画V2基盤**: 動画のキーフレームROIは、静止画ライブラリの`index.json`へ埋め込まず、ライブラリ配下の`VideoEdits/<itemID>.json`へ`VideoEditStore`が保存する（既存スキーマ・読み書き経路へ影響を与えないプラグイン方式）。`VideoThumbnailProvider`はファイル更新日時込みキーのLRUキャッシュでサムネイルを提供し、ディスクへは書き出さない。
 
+## 5.32 動画対応 V2: ライブラリ統合（2026-07-27 v0.0.00087〜）
+
+- **データモデル**: `MosaicLibraryItem`へ`kind`（image/video）と`videoDurationSeconds`のみを追加し、キーフレームROI等の動画固有情報は`index.json`へ入れない（`MosaicVideoKit.VideoEditStore`のサイドカーJSONが持つ）。カスタム`init(from:)`で既存JSONを`.image`として読む後方互換を担保する。
+- **登録方式**: 動画は常にリンク登録（`importLinkedVideo`）。本体をライブラリへコピーしないため容量が増えず、リンク切れ修正の既存導線がそのまま使える。解像度・尺は`MosaicVideoKit.VideoFrameReader.loadInfo()`で取得する（デコードを伴うためバックグラウンド実行）。
+- **一覧表示**: 動画は🎬バッジ＋代表フレームのサムネイル（`VideoThumbnailProvider`。ディスクへは書き出さない）＋解像度欄に尺を併記。状態欄は「動画」「動画済」。
+- **プレビュー再生**: AVKitの`AVPlayerView`はSwiftPMの実行ファイルターゲットからリンクできない（SwiftUICoreへの暗黙依存）ため使用せず、`AVPlayerLayer`＋自前の最小コントロール（再生/一時停止・シーク・時刻）で`VideoPreviewView`を構成する。時刻オブザーバはdeinitから`@MainActor`隔離プロパティへ触れられないため、ウィンドウを閉じる際の`stop()`で明示解除する。
+- **編集導線の分離**: V2では動画を作業画像として開かず（静止画として読めないため）プレビューへ回す。キャンバスでのキーフレーム編集はV3で追加する。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

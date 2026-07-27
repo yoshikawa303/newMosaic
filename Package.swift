@@ -46,10 +46,11 @@ let package = Package(
         ),
         .executableTarget(
             name: "NewMosaicApp",
-            dependencies: ["MosaicCore"],
+            dependencies: ["MosaicCore", "MosaicVideoKit"],
             linkerSettings: [
                 .linkedFramework("AppKit"),
                 .linkedFramework("CoreImage"),
+                .linkedFramework("AVFoundation"),
                 .linkedFramework("UniformTypeIdentifiers")
             ]
         ),

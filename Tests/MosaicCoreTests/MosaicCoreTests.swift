@@ -1420,3 +1420,42 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         alpha: Double(pixel[3]) / 255
     )
 }
+
+@Test func libraryItemDecodesLegacyJSONWithoutKindAsImage() throws {
+    // v0.0.00087で`kind`/`videoDurationSeconds`を追加した。既存ライブラリのindex.json
+    // （両フィールドなし）がそのまま静止画として読めることを担保する。
+    let json = """
+    {
+      "id": "\(UUID().uuidString)",
+      "createdAt": 763000000,
+      "updatedAt": 763000000,
+      "sourceName": "legacy.png",
+      "originalRelativePath": "Originals/legacy.png",
+      "imagePixelWidth": 800,
+      "imagePixelHeight": 600,
+      "rois": []
+    }
+    """.data(using: .utf8)!
+    let item = try JSONDecoder().decode(MosaicLibraryItem.self, from: json)
+    #expect(item.kind == .image)
+    #expect(!item.isVideo)
+    #expect(item.videoDurationSeconds == nil)
+    #expect(item.imagePixelWidth == 800)
+}
+
+@Test func libraryItemRoundTripsVideoKindAndDuration() throws {
+    let original = MosaicLibraryItem(
+        sourceName: "clip.mp4",
+        originalRelativePath: "",
+        linkedOriginalPath: "/tmp/clip.mp4",
+        imagePixelWidth: 1920,
+        imagePixelHeight: 1080,
+        kind: .video,
+        videoDurationSeconds: 12.5
+    )
+    let data = try JSONEncoder().encode(original)
+    let decoded = try JSONDecoder().decode(MosaicLibraryItem.self, from: data)
+    #expect(decoded.isVideo)
+    #expect(decoded.videoDurationSeconds == 12.5)
+    #expect(decoded.isLinked)
+}

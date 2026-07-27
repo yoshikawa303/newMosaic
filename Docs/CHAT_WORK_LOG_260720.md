@@ -2105,3 +2105,27 @@
   検証は swift build / swift test 84/84 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00086で再パッケージ。QC記録（Docs/QC/CodeReview/QC_CodeReview_v0.0.00086.md）とCHANGELOG/ARCHITECTURE §5.31/QUALITY_STATSを同期。
 
 - 作業時間: 約90分
+
+### 2026-07-27 21:00 JST - Claude Code - 種別: 依頼内容 - V2〜V4を停止せず実装
+
+```
+★V2移行を実装して。V4実装完了まで、作業停止、確認は不要。状況のみ都度、運用ルールに従いチャット履歴に残して。
+```
+
+### 2026-07-27 22:00 JST - Claude Code - 種別: 経過 - 動画対応V2（ライブラリ統合）完了（v0.0.00087）
+
+- 内容:
+
+  詳細設計書のV2（ライブラリ統合）を実装した。
+
+  **データモデル**: `MosaicLibraryItem`へ`kind`（image/video）と`videoDurationSeconds`のみを追加。キーフレームROIはサイドカーJSON側が持つ設計のため`index.json`へは入れない。カスタム`init(from:)`で既存JSON（両フィールドなし）を静止画として読む後方互換を担保し、回帰テスト2件を追加した。
+
+  **登録**: 動画はリンク登録（本体をコピーしない）。ファイル＞動画を開く…（⇧⌘O）を追加。解像度・尺の取得はデコードを伴うためバックグラウンドで実行し、UI更新のみメインへ戻す。
+
+  **一覧表示**: 🎬バッジ・代表フレームのサムネイル・尺の併記・状態欄「動画/動画済」で静止画と区別できるようにした。
+
+  **プレビュー再生**: AVKitの`AVPlayerView`はSwiftPMの実行ファイルターゲットからリンクできない（SwiftUICoreへの暗黙依存でリンクエラー）ことが判明したため、`AVPlayerLayer`＋自前の最小コントロール（再生/一時停止・シーク・時刻表示）で`VideoPreviewView`を実装した。時刻オブザーバはdeinitから`@MainActor`隔離プロパティへ触れられないため、ウィンドウを閉じる際の`stop()`で明示解除する構成とした。
+
+  検証は swift build / swift test 86/86 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00087で再パッケージ。CHANGELOG/ARCHITECTURE §5.32/QUALITY_STATSを同期。次はV3（キーフレーム編集UI）へ進む。
+
+- 作業時間: 約60分
