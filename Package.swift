@@ -9,6 +9,7 @@ let package = Package(
     ],
     products: [
         .library(name: "MosaicCore", targets: ["MosaicCore"]),
+        .library(name: "MosaicVideoKit", targets: ["MosaicVideoKit"]),
         .executable(name: "NewMosaicApp", targets: ["NewMosaicApp"])
     ],
     dependencies: [
@@ -55,6 +56,24 @@ let package = Package(
         .testTarget(
             name: "MosaicCoreTests",
             dependencies: ["MosaicCore"]
+        ),
+        // 動画対応のプラグイン境界。既存のMosaicCore/NewMosaicAppは変更せず、
+        // MosaicCoreへ依存する独立ターゲットとして動画I/O・追跡・書き出しを提供する
+        // （UIとの結線は別途行う想定の土台実装）。
+        .target(
+            name: "MosaicVideoKit",
+            dependencies: ["MosaicCore"],
+            linkerSettings: [
+                .linkedFramework("AVFoundation"),
+                .linkedFramework("CoreImage"),
+                .linkedFramework("CoreMedia"),
+                .linkedFramework("CoreVideo"),
+                .linkedFramework("Vision")
+            ]
+        ),
+        .testTarget(
+            name: "MosaicVideoKitTests",
+            dependencies: ["MosaicVideoKit", "MosaicCore"]
         )
     ]
 )
