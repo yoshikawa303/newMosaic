@@ -277,9 +277,12 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             return coverage >= Self.minimumUsableCoverage && coverage <= Self.maximumUsableCoverage
         }
 
-        // 3方式のマスクを作り、有効帯に入るもののうち**最も選択的な（被覆率の低い）**ものを採る。
-        // 実測では前景抽出が「クロップのほぼ全面」を返すことが多く、先着順だとそれが採用されて
-        // ROIを丸ごと塗る結果になっていたため、より対象を絞り込めている候補を優先する。
+        // 候補を優先順に評価し、有効帯に入る最初のものを採る。
+        // 漫画・イラストでは「輪郭線で囲まれた領域」が意味的に最も正しいため最優先とする。
+        // 写真では輪郭線が閉じず領域が外へ漏れる（被覆率が跳ね上がる）ため有効帯で自然に外れ、
+        // 従来のVision前景抽出が採用される。
+        let bounded = Self.inkBoundedRegionMask(in: crop)
+        let boundedCoverage = coverageOf(bounded)
         let foreground = Self.foregroundMask(in: crop)
         let foregroundCoverage = coverageOf(foreground)
         let ink = Self.inkDensityMask(in: crop)
@@ -288,13 +291,12 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         let saliencyCoverage = coverageOf(saliency)
 
         let candidates: [(name: String, mask: CIImage?, coverage: Double?)] = [
+            ("inkBounded", bounded, boundedCoverage),
             ("foreground", foreground, foregroundCoverage),
             ("inkDensity", ink, inkCoverage),
             ("saliency", saliency, saliencyCoverage)
         ]
-        let best = candidates
-            .filter { isUsable($0.coverage) }
-            .min { ($0.coverage ?? 1) < ($1.coverage ?? 1) }
+        let best = candidates.first { isUsable($0.coverage) }
         let localMask = best?.mask
         let source = best?.name ?? "none"
 
@@ -302,6 +304,7 @@ public final class RegionForegroundSegmentEngine: Segmenting {
             regionMask category=\(roi.category.rawValue, privacy: .public) \
             crop=\(Int(cropRect.width))x\(Int(cropRect.height)) \
             rotation=\(Int(roi.rotation)) \
+            boundedCoverage=\(boundedCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
             fgCoverage=\(foregroundCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
             inkCoverage=\(inkCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
             salCoverage=\(saliencyCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
@@ -335,6 +338,121 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         // しまう（「不要な部分までマスクが広がる」GUI報告）。輪郭が取れている場合は楕円内の
         // 輪郭形状がそのまま残るため、スピル防止を優先して形状制限へ戻す。
         return ShapeSegmentEngine.restrict(mask.composited(over: black), to: roi, extent: extent)
+    }
+
+    /// 漫画・イラスト（線画）向けの「輪郭線で囲まれた領域」マスク。
+    ///
+    /// 漫画では対象部位が輪郭線（濃い線）で囲まれて描かれる。この性質を使い、ROI中心から
+    /// 線を越えない範囲で領域を広げる（塗りつぶす）ことで、描かれた形そのものを取り出す。
+    /// 描き込み密度方式と違い、周囲の陰影・しずくのような「線は多いが別物」の領域を巻き込まない。
+    ///
+    /// - 線の判定はクロップ内の明暗レンジに対する相対しきい値で行う（紙の白さに依存しない）。
+    /// - 輪郭が途切れて外へ漏れた場合は被覆率が跳ね上がるため、呼び出し側の有効帯で弾かれる。
+    /// - 写真では輪郭線が存在せず領域が全面へ広がるため、同様に有効帯で自然に外れる。
+    static func inkBoundedRegionMask(in crop: CGImage) -> CIImage? {
+        let width = crop.width
+        let height = crop.height
+        guard width >= 8, height >= 8 else { return nil }
+
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let drawn = pixels.withUnsafeMutableBytes { pointer -> Bool in
+            guard let context = CGContext(
+                data: pointer.baseAddress,
+                width: width,
+                height: height,
+                bitsPerComponent: 8,
+                bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn else { return nil }
+
+        // 線のしきい値はクロップ内の明暗レンジから決める（紙の白さ・トーンの濃さに依存しない）
+        let minValue = Int(pixels.min() ?? 0)
+        let maxValue = Int(pixels.max() ?? 255)
+        // 明暗差が小さい＝線が無い領域は対象外（写真の平坦部などで誤って全面を塗らないため）
+        guard maxValue - minValue > 24 else { return nil }
+        let inkThreshold = UInt8(minValue + Int(Double(maxValue - minValue) * 0.45))
+
+        // ROI中心を種として、線を越えない範囲へ広げる（4近傍。斜めを含めると線の隙間から漏れやすい）
+        var filled = [Bool](repeating: false, count: width * height)
+        var queue: [Int] = []
+        let centerIndex = (height / 2) * width + (width / 2)
+        if pixels[centerIndex] > inkThreshold {
+            filled[centerIndex] = true
+            queue.append(centerIndex)
+        } else {
+            // 中心が線の上に乗っていた場合は、近傍から線でない画素を種にする
+            let radius = max(2, min(width, height) / 10)
+            var found = false
+            for dy in -radius...radius where !found {
+                for dx in -radius...radius where !found {
+                    let x = width / 2 + dx
+                    let y = height / 2 + dy
+                    guard x >= 0, x < width, y >= 0, y < height else { continue }
+                    let index = y * width + x
+                    if pixels[index] > inkThreshold {
+                        filled[index] = true
+                        queue.append(index)
+                        found = true
+                    }
+                }
+            }
+            guard found else { return nil }
+        }
+
+        var head = 0
+        while head < queue.count {
+            let index = queue[head]
+            head += 1
+            let x = index % width
+            let y = index / width
+            let neighbors = [
+                x > 0 ? index - 1 : -1,
+                x < width - 1 ? index + 1 : -1,
+                y > 0 ? index - width : -1,
+                y < height - 1 ? index + width : -1
+            ]
+            for neighbor in neighbors where neighbor >= 0 {
+                guard !filled[neighbor], pixels[neighbor] > inkThreshold else { continue }
+                filled[neighbor] = true
+                queue.append(neighbor)
+            }
+        }
+
+        // 塗りつぶした領域を1画素太らせ、囲っていた輪郭線自体もモザイク対象へ含める
+        var mask = [UInt8](repeating: 0, count: width * height)
+        for index in 0..<filled.count where filled[index] {
+            mask[index] = 255
+        }
+        var dilated = mask
+        for y in 0..<height {
+            for x in 0..<width where mask[y * width + x] == 255 {
+                if x > 0 { dilated[y * width + x - 1] = 255 }
+                if x < width - 1 { dilated[y * width + x + 1] = 255 }
+                if y > 0 { dilated[(y - 1) * width + x] = 255 }
+                if y < height - 1 { dilated[(y + 1) * width + x] = 255 }
+            }
+        }
+
+        guard let provider = CGDataProvider(data: Data(dilated) as CFData),
+              let image = CGImage(
+                  width: width,
+                  height: height,
+                  bitsPerComponent: 8,
+                  bitsPerPixel: 8,
+                  bytesPerRow: width,
+                  space: CGColorSpaceCreateDeviceGray(),
+                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+                  provider: provider,
+                  decode: nil,
+                  shouldInterpolate: false,
+                  intent: .defaultIntent
+              ) else { return nil }
+        return CIImage(cgImage: image)
     }
 
     /// 矩形を中心周りに回転させた場合の軸並行外接矩形。ROIのクロップ範囲が回転後の

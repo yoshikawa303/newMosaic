@@ -1630,3 +1630,67 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(emptyCoverage < RegionForegroundSegmentEngine.minimumUsableCoverage)
     #expect(fullCoverage > RegionForegroundSegmentEngine.maximumUsableCoverage)
 }
+
+/// 線画向け「輪郭線で囲まれた領域」マスクが、描かれた輪郭の内側だけを塗ることを実測する。
+/// 描き込み密度方式は周囲の陰影・しずく等（線は多いが別物）を巻き込むというGUI報告への対応。
+@Test func inkBoundedRegionMaskFillsOnlyInsideOutline() throws {
+    let size = 200
+    guard let context = CGContext(
+        data: nil, width: size, height: size, bitsPerComponent: 8, bytesPerRow: 0,
+        space: CGColorSpaceCreateDeviceGray(), bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ) else {
+        Issue.record("描画コンテキストを作成できません")
+        return
+    }
+    // 白地に、中央の閉じた円（輪郭線）と、外側に無関係な短い線（しずく・陰影の想定）を描く
+    context.setFillColor(CGColor(gray: 1, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: size, height: size))
+    context.setStrokeColor(CGColor(gray: 0, alpha: 1))
+    context.setLineWidth(3)
+    context.strokeEllipse(in: CGRect(x: 60, y: 60, width: 80, height: 80))
+    for offset in stride(from: 10, to: 50, by: 6) {
+        context.beginPath()
+        context.move(to: CGPoint(x: CGFloat(offset), y: 20))
+        context.addLine(to: CGPoint(x: CGFloat(offset), y: 45))
+        context.strokePath()
+    }
+    let image = try #require(context.makeImage())
+
+    let mask = try #require(RegionForegroundSegmentEngine.inkBoundedRegionMask(in: image))
+    let ciContext = CIContext(options: [.cacheIntermediates: false])
+    func luminance(x: Int, y: Int) -> Int {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        ciContext.render(
+            mask, toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return Int(pixel[0])
+    }
+
+    // 円の内側は塗られる
+    #expect(luminance(x: 100, y: 100) > 200)
+    // 円の外側（無関係な線の領域を含む）は塗られない＝輪郭を越えて漏れていない
+    #expect(luminance(x: 20, y: 30) < 60)
+    #expect(luminance(x: 180, y: 180) < 60)
+    #expect(luminance(x: 100, y: 20) < 60)
+
+    // 被覆率が有効帯に入る（＝ROIを丸ごと塗るのでも空でもない）
+    let coverage = RegionForegroundSegmentEngine().coverageRatio(of: mask)
+    #expect(coverage >= RegionForegroundSegmentEngine.minimumUsableCoverage)
+    #expect(coverage <= RegionForegroundSegmentEngine.maximumUsableCoverage)
+}
+
+/// 輪郭が無い（平坦な）画像では領域が全面へ広がるか、そもそも線が無いと判定され、
+/// 有効帯で弾かれること。写真など線画でない入力を誤って全面マスクにしないための担保。
+@Test func inkBoundedRegionMaskRejectsFlatImage() throws {
+    let image = try makeSolidImage(width: 100, height: 100)
+    let mask = RegionForegroundSegmentEngine.inkBoundedRegionMask(in: image)
+    if let mask {
+        let coverage = RegionForegroundSegmentEngine().coverageRatio(of: mask)
+        #expect(coverage > RegionForegroundSegmentEngine.maximumUsableCoverage)
+    } else {
+        // 明暗差が無く「線が無い」と判定されnilが返るのが期待動作
+        #expect(mask == nil)
+    }
+}
