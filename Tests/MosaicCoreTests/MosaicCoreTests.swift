@@ -1694,3 +1694,37 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         #expect(mask == nil)
     }
 }
+
+/// ROI個別のマスク生成設定が保存・復元されること、および旧ライブラリJSON（当該キーなし）が
+/// 「全体設定を継承（nil）」として読めること。「個別」設定が保存されないと、次回起動時に
+/// 他レイヤのマスクまで全体設定で作り直されてしまう。
+@Test func roiPerLayerMaskSettingRoundTripsAndLegacyJSONInherits() throws {
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2),
+        confidence: 0.9,
+        source: "test",
+        category: .maleGenital,
+        maskEngine: "regionForegroundLegacy",
+        maskThreshold: 0.5
+    )
+    let encoded = try JSONEncoder().encode(roi)
+    let decoded = try JSONDecoder().decode(MosaicROI.self, from: encoded)
+    #expect(decoded.maskEngine == "regionForegroundLegacy")
+    #expect(decoded.maskThreshold == 0.5)
+
+    let legacyJSON = """
+    {"id":"\(UUID().uuidString)","rect":{"x":0.1,"y":0.1,"width":0.2,"height":0.2},
+     "confidence":0.9,"source":"legacy"}
+    """
+    let legacy = try JSONDecoder().decode(MosaicROI.self, from: Data(legacyJSON.utf8))
+    #expect(legacy.maskEngine == nil)
+    #expect(legacy.maskThreshold == nil)
+}
+
+/// 個別設定に使うマスク生成方式の識別子が `SegmentEngineKind` のrawValueと往復すること。
+/// （UIはrawValueをROIへ保存するため、名称変更で保存済みROIの設定が失われないことを固定する）
+@Test func segmentEngineKindRoundTripsThroughRawValue() throws {
+    for kind in SegmentEngineKind.allCases {
+        #expect(SegmentEngineKind(rawValue: kind.rawValue) == kind)
+    }
+}

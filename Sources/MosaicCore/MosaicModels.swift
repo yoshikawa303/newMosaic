@@ -303,6 +303,11 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     /// レイヤパネルのROI選択リスト上でのグループ名。同じ値のROIが1つのグループにまとまる。
     /// nilは未グループ化（フラット表示）。
     public var roiGroupName: String?
+    /// このROI個別のマスク生成方式（`SegmentEngineKind`のrawValue）。nilはインスペクタの全体設定を継承する。
+    /// 「個別」ONで設定を変更したとき、選択中レイヤにだけ書き込まれる（他レイヤのマスクを変えないため）。
+    public var maskEngine: String?
+    /// このROI個別の形状しきい値。nilは全体設定を継承する。
+    public var maskThreshold: Double?
 
     /// 多角形の既定形状（矩形に内接する六角形。上頂点から時計回り）
     public static let defaultPolygonPoints: [NormalizedPoint] = (0..<6).map { index in
@@ -320,7 +325,9 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         rotation: Double = 0,
         polygonPoints: [NormalizedPoint]? = nil,
         style: MosaicROIStyle? = nil,
-        roiGroupName: String? = nil
+        roiGroupName: String? = nil,
+        maskEngine: String? = nil,
+        maskThreshold: Double? = nil
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -332,10 +339,13 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.polygonPoints = polygonPoints
         self.style = style
         self.roiGroupName = roiGroupName
+        self.maskEngine = maskEngine
+        self.maskThreshold = maskThreshold
     }
 
     private enum CodingKeys: String, CodingKey {
         case id, rect, confidence, source, shape, category, rotation, polygonPoints, style, roiGroupName
+        case maskEngine, maskThreshold
     }
 
     public init(from decoder: Decoder) throws {
@@ -350,6 +360,9 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         polygonPoints = try container.decodeIfPresent([NormalizedPoint].self, forKey: .polygonPoints)
         style = try container.decodeIfPresent(MosaicROIStyle.self, forKey: .style)
         roiGroupName = try container.decodeIfPresent(String.self, forKey: .roiGroupName)
+        // 旧ライブラリJSONには個別マスク設定が無いため、欠落時はnil（全体設定を継承）とする
+        maskEngine = try container.decodeIfPresent(String.self, forKey: .maskEngine)
+        maskThreshold = try container.decodeIfPresent(Double.self, forKey: .maskThreshold)
     }
 }
 

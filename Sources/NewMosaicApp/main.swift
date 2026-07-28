@@ -12,6 +12,51 @@ import UniformTypeIdentifiers
 /// マスクするラッパー。人物ROIを矩形のままモザイクすると人物矩形全体が塗られてしまうため、
 /// 選択中のマスク生成方式に関係なく人物の輪郭に沿ったマスクを適用する。
 /// それ以外のROIは内包する基エンジンへそのまま委譲する。
+/// ROIが個別のマスク生成方式（`MosaicROI.maskEngine` / `maskThreshold`）を持つ場合に、
+/// そのROIだけ専用エンジンでマスクを作る。持たないROIは全体設定のエンジンへ委譲する。
+///
+/// 「個別」ONでマスク生成方式やしきい値を変えたとき、選択中レイヤ以外のマスクが
+/// 巻き添えで作り直されないようにするために使う。
+private final class PerROISegmentEngine: Segmenting {
+    private let base: Segmenting
+    private let engineForOverride: (String, Double?) -> Segmenting
+
+    init(base: Segmenting, engineForOverride: @escaping (String, Double?) -> Segmenting) {
+        self.base = base
+        self.engineForOverride = engineForOverride
+    }
+
+    func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        var results = [CIImage?](repeating: nil, count: rois.count)
+        var baseIndices: [Int] = []
+        // 同じ方式・しきい値のROIはまとめて1回の推論に渡す（ROIごとに呼ぶと検出が重くなるため）
+        var overrideGroups: [String: [Int]] = [:]
+        for (index, roi) in rois.enumerated() {
+            guard let kind = roi.maskEngine else {
+                baseIndices.append(index)
+                continue
+            }
+            let key = "\(kind)|\(roi.maskThreshold.map { String($0) } ?? "-")"
+            overrideGroups[key, default: []].append(index)
+        }
+        for (_, indices) in overrideGroups {
+            guard let first = indices.first, let kind = rois[first].maskEngine else { continue }
+            let engine = engineForOverride(kind, rois[first].maskThreshold)
+            let masks = try engine.createMasks(for: indices.map { rois[$0] }, in: image, extent: extent)
+            for (position, index) in indices.enumerated() where position < masks.count {
+                results[index] = masks[position]
+            }
+        }
+        if !baseIndices.isEmpty {
+            let baseMasks = try base.createMasks(for: baseIndices.map { rois[$0] }, in: image, extent: extent)
+            for (position, index) in baseIndices.enumerated() where position < baseMasks.count {
+                results[index] = baseMasks[position]
+            }
+        }
+        return results.compactMap { $0 }
+    }
+}
+
 private final class PersonLayerSegmentEngine: Segmenting {
     static let sourcePrefix = "person-layer-"
     private let base: Segmenting
@@ -1016,10 +1061,18 @@ final class MosaicWindowController: NSObject {
     private let autoGenerateCheckbox = NSButton(checkboxWithTitle: "自動候補生成", target: nil, action: nil)
     private let autoSaveCheckbox = NSButton(checkboxWithTitle: "自動保存", target: nil, action: nil)
     private let mosaicPreviewCheckbox = NSButton(checkboxWithTitle: "モザイク", target: nil, action: nil)
+    /// レイヤパネル「表示:」の「モザイク」既定値。ONのとき、画像を開いた直後からモザイク表示で始まる。
+    private static let mosaicPreviewDefaultKey = "Layer.mosaicVisibleDefault"
+    private var mosaicPreviewDefaultOn: Bool {
+        AppSettings.shared.object(forKey: Self.mosaicPreviewDefaultKey) as? Bool ?? true
+    }
     private let groinPositionSlider = NSSlider(value: 0.45, minValue: 0.2, maxValue: 0.8, target: nil, action: nil)
     private let groinPositionValueLabel = NSTextField(labelWithString: "45%")
     private static let groinPositionDefaultsKey = "GroinPositionRatio"
     /// マスク生成「対象形状」の補助しきい値（0=自動のみ。上げるほどマスクを締める）
+    /// 「検出」設定を選択中レイヤだけに適用するか（ONで他レイヤのマスク・モザイクへ影響を与えない）。
+    private let individualDetectionCheckbox = NSButton(checkboxWithTitle: "個別", target: nil, action: nil)
+    private static let individualDetectionDefaultsKey = "Detection.individual"
     private let maskThresholdSlider = NSSlider(value: 0, minValue: 0, maxValue: 0.9, target: nil, action: nil)
     private let maskThresholdValueLabel = NSTextField(labelWithString: "自動")
     private static let maskThresholdDefaultsKey = "RegionMaskThreshold"
@@ -1414,7 +1467,16 @@ final class MosaicWindowController: NSObject {
         let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .regionForeground) ?? 0
         segmentEngineControl.selectItem(at: defaultEngineIndex)
         segmentEngineControl.toolTip = "選択範囲から実際の処理マスクを生成する方式"
+        segmentEngineControl.target = self
+        segmentEngineControl.action = #selector(segmentEngineChanged)
         applyScaledFont(segmentEngineControl, size: 13)
+        applyScaledFont(individualDetectionCheckbox, size: 12)
+        individualDetectionCheckbox.toolTip =
+            "ONのとき、検出設定（マスク生成・形状しきい値）は選択中のレイヤにだけ適用する。他レイヤのマスクとモザイクは変化しない"
+        individualDetectionCheckbox.target = self
+        individualDetectionCheckbox.action = #selector(individualDetectionChanged)
+        individualDetectionCheckbox.state =
+            (AppSettings.shared.object(forKey: Self.individualDetectionDefaultsKey) as? Bool ?? true) ? .on : .off
 
         // 画像種別（自動判定の誤りを手動で上書きできるようにする）
         domainModeControl.removeAllItems()
@@ -1636,6 +1698,7 @@ final class MosaicWindowController: NSObject {
                 }
             }
             self.loadMosaicStyleForSelection(roi)
+            self.loadDetectionSettingForSelection(roi)
             self.syncROIListSelectionFromCanvas()
         }
         canvas.onROIGroupSelectionByMarquee = { [weak self] ids in
@@ -1744,8 +1807,9 @@ final class MosaicWindowController: NSObject {
 
     private func loadWorkflowOptions() {
         let defaults = AppSettings.shared
-        autoGenerateCheckbox.state = (defaults.object(forKey: "Workflow.autoGenerate") as? Bool ?? false) ? .on : .off
-        autoSaveCheckbox.state = (defaults.object(forKey: "Workflow.autoSave") as? Bool ?? false) ? .on : .off
+        // 既定はON（初回起動時に候補生成・保存まで自動で進む運用を標準とする）
+        autoGenerateCheckbox.state = (defaults.object(forKey: "Workflow.autoGenerate") as? Bool ?? true) ? .on : .off
+        autoSaveCheckbox.state = (defaults.object(forKey: "Workflow.autoSave") as? Bool ?? true) ? .on : .off
     }
 
     /// 保存済みの生成対象フィルタを復元する（未保存キーは既定ON）。
@@ -2492,7 +2556,7 @@ final class MosaicWindowController: NSObject {
         let content = NSStackView(views: [
             title,
             inspectorHeading("選択範囲"), shapeRow,
-            inspectorHeading("検出"), domainRow, maskRow, maskThresholdRow,
+            inspectorHeading("検出"), individualDetectionCheckbox, domainRow, maskRow, maskThresholdRow,
             inspectorHeading("候補カテゴリ"), categories,
             inspectorHeading("表示レイヤ生成"), generateLayerRow, groinRow,
             inspectorHeading("モザイク"), styleGrid, applyStyleToAllButton,
@@ -4765,6 +4829,7 @@ final class MosaicWindowController: NSObject {
     /// 「モザイク表示」チェックのON/OFF。ONで現在のROIにモザイクを適用した見た目を表示し、
     /// OFFで元画像+ROI表示に戻す（ROI・レイヤ情報は保持され再編集可能。ライブラリ保存はしない）。
     @objc private func toggleMosaicPreview() {
+        AppSettings.shared.set(mosaicPreviewCheckbox.state == .on, forKey: Self.mosaicPreviewDefaultKey)
         guard let loadedImage else {
             mosaicPreviewCheckbox.state = .off
             return
@@ -4838,25 +4903,104 @@ final class MosaicWindowController: NSObject {
     @objc private func maskThresholdChanged() {
         let value = maskThresholdSlider.doubleValue
         maskThresholdValueLabel.stringValue = value < 0.01 ? "自動" : "\(Int(value * 100)) %"
+        if applyDetectionSettingToSelectedLayers() { return }
         AppSettings.shared.set(value, forKey: Self.maskThresholdDefaultsKey)
         // モザイク表示中は変更を即時反映する
         resumeMosaicPreviewIfNeeded()
     }
 
+    /// 「マスク生成」方式の変更。「個別」ONで選択中レイヤがあれば、そのレイヤにだけ方式を書き込む。
+    @objc private func segmentEngineChanged() {
+        if applyDetectionSettingToSelectedLayers() { return }
+        resumeMosaicPreviewIfNeeded()
+    }
+
+    @objc private func individualDetectionChanged() {
+        AppSettings.shared.set(individualDetectionCheckbox.state == .on, forKey: Self.individualDetectionDefaultsKey)
+        updateStatus(individualDetectionCheckbox.state == .on
+            ? "検出設定を個別適用にしました（変更は選択中のレイヤにだけ反映されます）"
+            : "検出設定を全体適用にしました（個別設定を持たないレイヤすべてに反映されます）")
+    }
+
+    /// 「個別」ONかつレイヤ選択がある場合に、現在の検出設定（マスク生成方式・形状しきい値）を
+    /// 選択中ROIへ書き込んで再生成する。書き込んだ場合はtrueを返し、呼び出し側は
+    /// 全体設定の更新を行わない（他レイヤのマスク・モザイク状態を変えないため）。
+    @discardableResult
+    private func applyDetectionSettingToSelectedLayers() -> Bool {
+        guard individualDetectionCheckbox.state == .on else { return false }
+        let targetIDs = selectedROIIDsForIndividualSettings()
+        guard !targetIDs.isEmpty else { return false }
+
+        let index = segmentEngineControl.indexOfSelectedItem
+        let kinds = SegmentEngineKind.allCases
+        guard index >= 0, index < kinds.count else { return false }
+        let kind = kinds[index].rawValue
+        let threshold = maskThresholdSlider.doubleValue
+
+        let previousState = currentEditorState()
+        var changed = false
+        canvas.rois = canvas.rois.map { roi in
+            guard targetIDs.contains(roi.id) else { return roi }
+            var updated = roi
+            updated.maskEngine = kind
+            updated.maskThreshold = threshold
+            if updated != roi { changed = true }
+            return updated
+        }
+        guard changed else { return true }
+        pushUndoSnapshot(previousState)
+        hasUnsavedChanges = true
+        resumeMosaicPreviewIfNeeded()
+        updateStatus("検出設定を選択中レイヤ \(targetIDs.count)件に適用しました（他レイヤは変更していません）")
+        return true
+    }
+
+    /// 選択されたROIが個別のマスク生成設定を持つ場合、インスペクタの表示をその値へ合わせる。
+    /// （合わせておかないと、次に別項目を触ったときに画面表示と違う値が書き込まれてしまう）
+    private func loadDetectionSettingForSelection(_ roi: MosaicROI?) {
+        guard individualDetectionCheckbox.state == .on, let roi else { return }
+        if let rawValue = roi.maskEngine,
+           let kind = SegmentEngineKind(rawValue: rawValue),
+           let index = SegmentEngineKind.allCases.firstIndex(of: kind) {
+            segmentEngineControl.selectItem(at: index)
+        }
+        if let threshold = roi.maskThreshold {
+            maskThresholdSlider.doubleValue = threshold
+            maskThresholdValueLabel.stringValue = threshold < 0.01 ? "自動" : "\(Int(threshold * 100)) %"
+        }
+    }
+
+    /// 「個別」適用の対象ROI。複数選択（グループ選択）があればそれを、無ければ単一選択を使う。
+    private func selectedROIIDsForIndividualSettings() -> Set<UUID> {
+        if !canvas.selectedROIGroupIDs.isEmpty { return canvas.selectedROIGroupIDs }
+        if let id = canvas.selectedROIID { return [id] }
+        return []
+    }
+
+    /// マスク生成方式としきい値から実際のエンジンを作る。全体設定・ROI個別設定の双方から使う。
+    private func makeSegmentEngine(kind: SegmentEngineKind, threshold: Double) -> Segmenting {
+        switch kind {
+        case .shape: return ShapeSegmentEngine()
+        case .visionPersonSegmentation: return VisionPersonSegmentEngine()
+        case .foregroundObjects: return ForegroundSegmentEngine()
+        case .regionForeground: return RegionForegroundSegmentEngine(maskThreshold: threshold)
+        case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
+        }
+    }
+
     private func currentSegmentEngine() -> Segmenting {
         let index = segmentEngineControl.indexOfSelectedItem
         let kinds = SegmentEngineKind.allCases
-        let base: Segmenting
+        var base: Segmenting
         if index >= 0, index < kinds.count {
-            switch kinds[index] {
-            case .shape: base = ShapeSegmentEngine()
-            case .visionPersonSegmentation: base = VisionPersonSegmentEngine()
-            case .foregroundObjects: base = ForegroundSegmentEngine()
-            case .regionForeground: base = RegionForegroundSegmentEngine(maskThreshold: maskThresholdSlider.doubleValue)
-            case .regionForegroundLegacy: base = LegacyRegionForegroundSegmentEngine()
-            }
+            base = makeSegmentEngine(kind: kinds[index], threshold: maskThresholdSlider.doubleValue)
         } else {
             base = ShapeSegmentEngine()
+        }
+        // 個別のマスク生成設定を持つROIは、全体設定ではなくそのROIの設定でマスクを作る
+        base = PerROISegmentEngine(base: base) { [weak self] rawValue, threshold in
+            guard let self, let kind = SegmentEngineKind(rawValue: rawValue) else { return ShapeSegmentEngine() }
+            return self.makeSegmentEngine(kind: kind, threshold: threshold ?? 0)
         }
         // 人物レイヤ由来のROIは、選択中のマスク生成方式に関係なく候補生成時の人物シルエットで
         // マスクする（「人物矩形全体がモザイクされてしまう」報告への修正。人物の輪郭に沿った
@@ -5707,7 +5851,8 @@ final class MosaicWindowController: NSObject {
         }
 
         renderedImage = nil
-        mosaicPreviewCheckbox.state = .off
+        // 既定でモザイク表示ON（候補生成が終わり次第そのままモザイクが乗った状態で確認できる）
+        mosaicPreviewCheckbox.state = mosaicPreviewDefaultOn ? .on : .off
         canvas.setImage(image)
         canvas.rois = []
         canvas.personLayerRects = []
