@@ -27,6 +27,8 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case regionForegroundLegacy
     /// 学習済み部位セグメンテーションモデル（YOLO-seg）による形状抽出。モデル導入時のみ有効。
     case learnedShape
+    /// MobileSAM（同梱）による形状抽出。検出枠をプロンプトに、枠内の対象の形状を直接得る。
+    case samShape
 
     public var displayName: String {
         switch self {
@@ -36,6 +38,7 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
         case .regionForeground: return "対象形状"
         case .regionForegroundLegacy: return "対象形状（初期実装・比較用）"
         case .learnedShape: return "学習モデル形状"
+        case .samShape: return "対象形状（SAM）"
         }
     }
 }

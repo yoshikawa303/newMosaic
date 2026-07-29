@@ -66,3 +66,12 @@ newMosaic が同梱・利用するサードパーティ成果物の一覧。追�
 - ライセンス: **MIT License**
 - 用途: ONNXモデルのローカル推論実行
 - バージョン: 1.24.2（SwiftPM解決）
+
+## MobileSAM（sam_encoder.onnx / sam_decoder.onnx）
+
+- 提供元: MobileSAM（https://github.com/ChaoningZhang/MobileSAM 、Apache-2.0 License）
+- ONNX変換版: Acly/MobileSAM（https://huggingface.co/Acly/MobileSAM 、MIT License）
+  - `mobile_sam_image_encoder.onnx` → `sam_encoder.onnx`（約28MB）
+  - `sam_mask_decoder_single.onnx` → `sam_decoder.onnx`（約16MB）
+- 用途: 「対象形状（SAM）」マスク生成。検出枠をプロンプトに、枠内の対象の形状マスクを直接得る
+- 実行: ONNX Runtimeによる完全ローカル実行。画像・検出結果の外部送信は行わない

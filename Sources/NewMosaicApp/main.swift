@@ -3977,6 +3977,7 @@ final class MosaicWindowController: NSObject {
                 case .regionForeground: return RegionForegroundSegmentEngine()
                 case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
                 case .learnedShape: return LearnedShapeSegmentEngine()
+                case .samShape: return SAMSegmentEngine()
                 }
             }
 
@@ -4998,6 +4999,7 @@ final class MosaicWindowController: NSObject {
         case .regionForeground: return RegionForegroundSegmentEngine(maskThreshold: threshold)
         case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
         case .learnedShape: return LearnedShapeSegmentEngine()
+        case .samShape: return SAMSegmentEngine()
         }
     }
 

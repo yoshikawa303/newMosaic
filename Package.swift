@@ -25,6 +25,10 @@ let package = Package(
             resources: [
                 // deepghs/anime_censor_detection censor_detect_v1.0_s (MIT License)
                 .copy("Resources/censor_detect.onnx"),
+                // MobileSAM (Apache-2.0) のONNX変換版 Acly/MobileSAM (MIT License)
+                // 検出枠の内部から対象の形状マスクを直接得る（対象形状（SAM））
+                .copy("Resources/sam_encoder.onnx"),
+                .copy("Resources/sam_decoder.onnx"),
                 // deepghs/anime_person_detection person_detect_v1.3_s (MIT License)
                 .copy("Resources/person_detect.onnx"),
                 // deepghs/nudenet_onnx 320n (Apache-2.0 License, NudeNet v3)

@@ -2360,3 +2360,35 @@
   検証は swift build / swift test 112/112 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00097で再パッケージ。CHANGELOG/ARCHITECTURE §5.42/QUALITY_STATSを同期。
 
 - 作業時間: 約90分
+
+### 2026-07-29 16:00 JST - Claude Code - 種別: 依頼内容 - 手作業学習への異議と自動化方針
+
+```
+え、、手作業で学習必要なんですか？
+そういった作業をすべてなくしたい、モザイク処理を限りなく自動化したくてこのアプリを開発してるんですが。。
+```
+
+（追記）内容確認の上、MobileSAM取得と実装・検証の許可を受領:
+
+```
+上記チャットの内容って本当ですか？
+内容チェック上、問題なければ、Mobile SAMを取得し、実装をコスパよく進めて検証してください。
+```
+
+v0.0.00097の「学習モデル形状」は上級者向け任意機能として残す判断も受領。
+
+### 2026-07-29 17:30 JST - Claude Code - 種別: 作業結果 - 対象形状（SAM）を実装（v0.0.00098）
+
+- 内容:
+
+  **事実確認**: MobileSAM本体はApache-2.0（GitHub実確認）、ONNX変換版Acly/MobileSAMはMIT（HF実確認）、box promptとONNX対応も確認。「SAM同梱を避けた」の記述はARCHITECTURE.mdではなくSegmentEngine.swift:166のコメントだったと訂正の上、初期のVision採用判断が§5.40の構造的限界の起点であることを確認した。
+
+  **事前検証（Python/onnxruntime）**: 漫画の作画慣行を模した合成線画（輪郭線で囲まれた有機形状+効果線・しずく等のクラッタ）で枠→形状を実測。最初IoU 0.315と低く、原因を調査した結果、このエンコーダは**リサイズをモデル内部で行わない**（パディング・正規化のみ）ことが判明。長辺1024へのリサイズを追加すると、ぴったり枠でIoU 0.990、検出誤差想定の枠で0.989、1.4倍枠でも0.647（枠塗り方式はそれぞれ0.664/0.556/0.311）。
+
+  **実装**: `SAMSegmentEngine` / `SegmentEngineKind.samShape`（表示名「対象形状（SAM）」）。エンコーダ（画像毎1回・埋め込みキャッシュ）→デコーダ（ROI毎・枠プロンプト）→logits>0二値化→ROI矩形制限→被覆率0.02未満は図形フォールバック。実モデルを通したend-to-endテストでIoU>0.8を固定（初回1.3秒、キャッシュ後0.6秒）。sam_encoder.onnx(28MB)/sam_decoder.onnx(16MB)を同梱し、THIRD_PARTY_NOTICESへ記載。
+
+  **既定は変更していない**。GUI確認で品質を確認いただき、問題なければ§2.2に従い「対象形状（SAM）」の既定化を次の作業で行う。
+
+  検証は swift build / swift test 114/114 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00098で再パッケージ。CHANGELOG/ARCHITECTURE §5.43/QUALITY_STATS/THIRD_PARTY_NOTICESを同期。
+
+- 作業時間: 約80分
