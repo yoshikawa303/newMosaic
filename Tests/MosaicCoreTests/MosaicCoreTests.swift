@@ -1728,3 +1728,95 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         #expect(SegmentEngineKind(rawValue: kind.rawValue) == kind)
     }
 }
+
+/// 二値の形状マスク: 楕円ROIを制限に使ったとき、内部が減衰せず縁がぼけないこと。
+/// `ellipseMask`（放射グラデーション）で制限すると、せっかく取れた輪郭が縁で薄まる（§5.41）。
+/// SAMマスクの制限にはこちらを使う。
+@Test func hardShapeMaskKeepsEllipseInteriorFullyWhite() throws {
+    let extent = CGRect(x: 0, y: 0, width: 200, height: 200)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8),
+        confidence: 1, source: "test", shape: .ellipse, category: .maleGenital
+    )
+    let mask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func luminance(x: Int, y: Int) -> Int {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(mask, toBitmap: &pixel, rowBytes: 4,
+                       bounds: CGRect(x: x, y: y, width: 1, height: 1),
+                       format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+        return Int(pixel[0])
+    }
+    // 中心は白
+    #expect(luminance(x: 100, y: 100) == 255)
+    // 楕円の縁の内側も減衰せず白のまま（グラデーション版はここが灰色になる）
+    #expect(luminance(x: 100, y: 172) == 255)
+    // 楕円の外（矩形の四隅）は黒
+    #expect(luminance(x: 25, y: 25) == 0)
+    #expect(luminance(x: 175, y: 175) == 0)
+}
+
+/// 矩形ROIでは従来どおり矩形の二値マスクになること（形状ごとの分岐の担保）。
+@Test func hardShapeMaskUsesRectangleForRectangleROI() throws {
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
+        confidence: 1, source: "test", shape: .rectangle, category: .nipple
+    )
+    let mask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
+    let context = CIContext(options: [.cacheIntermediates: false])
+    var corner = [UInt8](repeating: 0, count: 4)
+    context.render(mask, toBitmap: &corner, rowBytes: 4,
+                   bounds: CGRect(x: 22, y: 22, width: 1, height: 1),
+                   format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB())
+    // 矩形なら角も白（楕円なら黒になる）
+    #expect(corner[0] == 255)
+}
+
+/// 検出器が性器を見つけた場合、骨格由来の鼠径部ROI（カテゴリ「その他」）を取り除くこと。
+/// 3人検出で「その他1〜3」の大きな誤ROIが並び、うち1件はコマ全体を覆っていた（GUI報告）。
+@Test func groinPriorsAreDroppedWhenDetectorFoundGenitals() {
+    func roi(_ source: String, _ category: MosaicTargetCategory) -> MosaicROI {
+        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2),
+                  confidence: 0.9, source: source, category: category)
+    }
+    let candidates = [
+        roi("pose-groin", .other), roi("pose-groin", .other), roi("pose-groin", .other),
+        roi("anime-censor", .maleGenital), roi("manual", .other)
+    ]
+    let detected = [roi("anime-censor", .maleGenital)]
+    let filtered = PoseDerivedROIFilter.dropGroinPriors(from: candidates, ifDetectorFound: detected)
+    #expect(filtered.count == 2)
+    #expect(!filtered.contains { $0.source == "pose-groin" })
+    // 手動ROIと検出器ROIは残る
+    #expect(filtered.contains { $0.source == "manual" })
+    #expect(filtered.contains { $0.source == "anime-censor" })
+}
+
+/// 検出器が性器を見つけられなかった画像では、鼠径部ROIをフォールバックとして残すこと。
+@Test func groinPriorsRemainWhenDetectorFoundNoGenitals() {
+    func roi(_ source: String, _ category: MosaicTargetCategory) -> MosaicROI {
+        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2),
+                  confidence: 0.9, source: source, category: category)
+    }
+    let candidates = [roi("pose-groin", .other), roi("anime-censor", .nipple)]
+    let detected = [roi("anime-censor", .nipple)]
+    let filtered = PoseDerivedROIFilter.dropGroinPriors(from: candidates, ifDetectorFound: detected)
+    #expect(filtered.count == 2)
+    #expect(filtered.contains { $0.source == "pose-groin" })
+}
+
+/// 乳首側のフィルタも同じ規則で動くこと（既存挙動の固定）。
+@Test func chestPriorsAreDroppedOnlyWhenDetectorFoundNipple() {
+    func roi(_ source: String, _ category: MosaicTargetCategory) -> MosaicROI {
+        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2),
+                  confidence: 0.9, source: source, category: category)
+    }
+    let candidates = [roi("pose-chest", .nipple), roi("anime-censor", .nipple)]
+    #expect(PoseDerivedROIFilter.dropChestPriors(
+        from: candidates, ifDetectorFound: [roi("anime-censor", .nipple)]
+    ).count == 1)
+    #expect(PoseDerivedROIFilter.dropChestPriors(
+        from: candidates, ifDetectorFound: [roi("anime-censor", .maleGenital)]
+    ).count == 2)
+}

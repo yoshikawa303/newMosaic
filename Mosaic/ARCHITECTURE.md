@@ -469,6 +469,17 @@ Visionの前景抽出は性器クロップに対し実面積比0.80前後を返�
 - Swift実装のend-to-endテスト（実モデル推論込み）でIoU>0.8を固定。
 - **既定は変更していない**。GUI確認で品質が確認でき次第、「対象形状（SAM）」の既定化は§2.2に従いユーザー判断で行う。
 
+## 5.44 骨格由来プライアの整理とUI初期化の修正（2026-07-29 v0.0.00099〜）
+
+- **`PoseDerivedROIFilter`**: 骨格（関節位置）からの幾何プライアROIを、直接検出器の結果に応じて落とす純ロジック。`MosaicCore`へ切り出してテスト可能にした。
+  - `dropChestPriors`: 検出器が乳首を検出したら`source == "pose-chest"`を除去（v0.0.00080から存在。ここへ移設）。
+  - `dropGroinPriors`: 検出器が性器を検出したら`source == "pose-groin"`を除去（**新規**）。鼠径部プライアはカテゴリが`.other`のため、検出器の性器ROIとはIoUベースの重複除去でも統合されず、人数分の「その他」誤ROIとして残っていた（3人検出で「その他1〜3」が生成され、うち1件はコマ全体を覆っていた）。
+  - どちらも検出器が該当部位を見つけられなかった画像ではフォールバックとして残す。
+- **`hardShapeMask`**: ROI形状（矩形/楕円/多角形+回転）の**二値**マスク。`SAMSegmentEngine`の制限を矩形からこれへ変更した。矩形制限のままだと、SAMのマスクがROI全体を覆ったとき「楕円のROIなのに四角いモザイク」になる。`shapeMask`の楕円は放射グラデーションのため輪郭が縁で薄まる（§5.41）が、二値版では起きない。
+- **サイドパネル既定幅**: `applyInitialLayoutIfNeeded`が左ペインへ280ptをハードコードしていたが、インスペクタの最小幅は340pt。初期化するとこの矛盾で「性器（男性）」が「性」になる等の省略表示、モザイクパターンタイルの横切れが起きていた。`inspectorPaneDefaultWidth`(360)と`defaultLeftPaneWidth(_:)`で一元管理する。`libraryTwoColumnPaneWidth()`にも下限340ptを設けた。
+- **設定初期化の網羅**: `refreshAllUIFromSettings`が「検出」「ワークフロー」「レイヤ表示」を再同期しておらず、初期化しても直前の状態が残っていた（レイヤ表示が全OFFのまま等）。`loadDetectionSettings` / `loadLayerVisibilityDefaults` / `loadWorkflowOptions`を追加。レイヤ表示の既定はROIとモザイクがON、人物・骨格がOFF。
+- **レイヤ一覧の実体連動**: ROI 0件で「モザイク対象」、画像未読込で「画像」を出さない。`numberOfChildrenOfItem`を`rootLayerItems().count`へ統一し、フィルタ追加時の件数不整合を防ぐ。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

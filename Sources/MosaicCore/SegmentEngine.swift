@@ -154,6 +154,53 @@ public final class ShapeSegmentEngine: Segmenting {
         return transformed.cropped(to: extent)
     }
 
+    /// ROIの形状（矩形/楕円/多角形+回転）の**二値**マスク。
+    ///
+    /// `shapeMask` の楕円は放射グラデーション（縁へ向かって黒くなる）のため、輪郭が取れている
+    /// マスクへ乗算すると輪郭が縁で薄まってしまう（§5.41）。輪郭マスクを「表示されているROIの
+    /// 形状」で切り取る用途にはこちらを使う。
+    public static func hardShapeMask(for roi: MosaicROI, extent: CGRect) -> CIImage {
+        let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        switch roi.shape {
+        case .rectangle:
+            return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
+        case .polygon:
+            return polygonMask(for: roi, rect: rect, extent: extent)
+        case .ellipse:
+            return hardEllipseMask(rect: rect, extent: extent, rotation: roi.rotation)
+        }
+    }
+
+    /// 縁がぼけない二値の楕円マスク（CGContextで塗る）。
+    static func hardEllipseMask(rect: CGRect, extent: CGRect, rotation: Double) -> CIImage {
+        let width = max(1, Int(extent.width))
+        let height = max(1, Int(extent.height))
+        guard let context = CGContext(
+            data: nil,
+            width: width,
+            height: height,
+            bitsPerComponent: 8,
+            bytesPerRow: 0,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else {
+            return rectangleMask(rect: rect, extent: extent, rotation: rotation)
+        }
+        context.setFillColor(CGColor(gray: 0, alpha: 1))
+        context.fill(CGRect(x: 0, y: 0, width: CGFloat(width), height: CGFloat(height)))
+        if abs(rotation) > 0.01 {
+            context.translateBy(x: rect.midX, y: rect.midY)
+            context.rotate(by: CGFloat(-rotation * .pi / 180))
+            context.translateBy(x: -rect.midX, y: -rect.midY)
+        }
+        context.setFillColor(CGColor(gray: 1, alpha: 1))
+        context.fillEllipse(in: rect)
+        guard let image = context.makeImage() else {
+            return rectangleMask(rect: rect, extent: extent, rotation: rotation)
+        }
+        return CIImage(cgImage: image).cropped(to: extent)
+    }
+
     /// 全面マスクをROIの形状マスク（矩形/楕円+回転）へ制限する。
     /// 従来の矩形クロップと異なり、楕円ROI・回転ROIでも形状どおりに制限される。
     static func restrict(_ mask: CIImage, to roi: MosaicROI, extent: CGRect) -> CIImage {

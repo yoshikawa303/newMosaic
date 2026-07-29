@@ -594,6 +594,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     animeDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
+                    rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                 } catch {
                     detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
                 }
@@ -606,6 +607,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     photoDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
+                    rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                 } catch {
                     detectorFailures.append("実写部位検出: \(error.localizedDescription)")
                 }
@@ -641,8 +643,17 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
     /// 検出器の正しいROIとIoUが重ならないため重複除去をすり抜けて誤ROIとして残っていた
     /// （GUI報告で確定）。検出器が乳首を見つけられなかった画像でのみフォールバックとして残す。
     private static func dropPoseChestPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
-        guard detected.contains(where: { $0.category == .nipple }) else { return rois }
-        return rois.filter { $0.source != "pose-chest" }
+        PoseDerivedROIFilter.dropChestPriors(from: rois, ifDetectorFound: detected)
+    }
+
+    /// 直接検出器が性器を1つでも検出できた場合、骨格由来の推定鼠径部ROI（source "pose-groin"、
+    /// カテゴリは`.other`）は全て取り除く。乳首と同じ理由で、腰関節からの幾何プライアは
+    /// 位置精度が低く、人数分だけ「その他」の大きな誤ROIが並ぶ（GUI報告で確定。3人検出で
+    /// 「その他1〜3」が生成され、うち1件は下段コマ全体を覆っていた）。カテゴリが`.other`のため
+    /// 検出器の性器ROIとはIoUによる重複除去でも統合されず、そのまま残ってしまう。
+    /// 検出器が性器を見つけられなかった画像でのみフォールバックとして残す。
+    private static func dropPoseGroinPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
+        PoseDerivedROIFilter.dropGroinPriors(from: rois, ifDetectorFound: detected)
     }
 }
 
@@ -819,7 +830,9 @@ private final class VideoPreviewView: NSView {
         player = AVPlayer(url: url)
         super.init(frame: .zero)
         wantsLayer = true
-        layer?.backgroundColor = NSColor.black.cgColor
+        // 純黒は白基調の漫画原稿に対してコントラストが強すぎるため、
+        // 標準のアンダーページ色（画像編集アプリの一般的な台紙色）を使う
+        layer?.backgroundColor = NSColor.underPageBackgroundColor.cgColor
 
         playerLayer.player = player
         playerLayer.videoGravity = .resizeAspect
@@ -1023,6 +1036,8 @@ final class MosaicWindowController: NSObject {
     /// （`updateLibraryModeVisibility()`参照。グリッド以外ではサムネイルサイズに意味がないため）。
     private let thumbSmallerButton = SquareIconButton()
     private let thumbLargerButton = SquareIconButton()
+    /// 画像が開かれている時だけ有効にするツールバーボタン（候補生成・適用・レイヤ削除など）。
+    private var imageDependentToolbarButtons: [NSButton] = []
     private let undoButton = NSButton(title: "元に戻す", target: nil, action: nil)
     private let redoButton = NSButton(title: "やり直す", target: nil, action: nil)
     private let zoomLabel = NSTextField(labelWithString: "100%")
@@ -1088,7 +1103,14 @@ final class MosaicWindowController: NSObject {
     private let styleOpacitySlider = NSSlider(value: 1.0, minValue: 0.1, maxValue: 1.0, target: nil, action: nil)
     private let styleOpacityValueLabel = NSTextField(labelWithString: "100%")
     private let styleTintCheckbox = NSButton(checkboxWithTitle: "色を付ける", target: nil, action: nil)
-    private let styleTintColorWell = NSColorWell()
+    private let styleTintColorWell: NSColorWell = {
+        let well = NSColorWell()
+        // 幅制約が無いとスタック内で横いっぱいへ伸び、他の設定行と見た目が揃わない
+        well.translatesAutoresizingMaskIntoConstraints = false
+        well.widthAnchor.constraint(equalToConstant: 44).isActive = true
+        well.heightAnchor.constraint(equalToConstant: 22).isActive = true
+        return well
+    }()
     private let styleBlockScaleSlider = NSSlider(value: 28, minValue: 4, maxValue: 80, target: nil, action: nil)
     private let styleBlockScaleValueLabel = NSTextField(labelWithString: "28")
     private let styleFeatherSlider = NSSlider(value: 0, minValue: 0, maxValue: 40, target: nil, action: nil)
@@ -1449,6 +1471,9 @@ final class MosaicWindowController: NSObject {
         toolbar.spacing = 6
         toolbar.edgeInsets = NSEdgeInsets(top: 6, left: 8, bottom: 6, right: 8)
         toolbar.translatesAutoresizingMaskIntoConstraints = false
+        imageDependentToolbarButtons = [detectButton, applyButton, clearButton,
+                                        zoomOutButton, zoomFitButton, zoomInButton]
+        updateImageActionAvailability()
 
         canvasModeControl.segmentStyle = .texturedRounded
         // 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル（選択するモード）。
@@ -1933,13 +1958,22 @@ final class MosaicWindowController: NSObject {
 
     /// ライブラリのグリッド表示（サムネイル既定サイズ120pt）がちょうど2列になる幅。
     /// サイドパネルの「工場初期値」として使う（右パネルは既定でライブラリが配置されるため）。
+    /// 左ペインの工場既定幅。インスペクタが入っている場合は省略表示にならない幅を使う。
+    private func defaultLeftPaneWidth(_ leftPane: NSView) -> CGFloat {
+        max(280, minimumWidth(forPane: leftPane) + 20)
+    }
+
     private func libraryTwoColumnPaneWidth() -> CGFloat {
         let itemWidth: CGFloat = 120 // thumbnailSizeSliderの既定値
         let interitem: CGFloat = 5
         let sectionInset: CGFloat = 5 * 2
         let scrollbarReserve: CGFloat = 16
         let panelPadding: CGFloat = 8 * 2
-        return itemWidth * 2 + interitem + sectionInset + scrollbarReserve + panelPadding
+        let twoColumns = itemWidth * 2 + interitem + sectionInset + scrollbarReserve + panelPadding
+        // 表示モード切替（グリッド/テキスト/サムネイル）とズーム・更新アイコンが
+        // 省略表示にならない下限。2列幅がこれを下回る場合はこちらを採る。
+        let controlRowMinimum: CGFloat = 340
+        return max(twoColumns, controlRowMinimum)
     }
 
     /// パネル配置が一度も保存されていない場合の工場既定サイド。
@@ -2025,8 +2059,8 @@ final class MosaicWindowController: NSObject {
         // 幅0のまま気づかれず、「再起動するとサイドパネルが表示されない」不具合につながるため、
         // 復元結果によらず常に最終チェックとして既定幅を強制する。
         mainSplit.layoutSubtreeIfNeeded()
-        if !leftPane.isHidden && leftPane.frame.width < 50 {
-            mainSplit.setPosition(280, ofDividerAt: 0)
+        if !leftPane.isHidden && leftPane.frame.width < minimumWidth(forPane: leftPane) {
+            mainSplit.setPosition(defaultLeftPaneWidth(leftPane), ofDividerAt: 0)
         }
         if !rightPane.isHidden && rightPane.frame.width < 50 {
             setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
@@ -2039,7 +2073,7 @@ final class MosaicWindowController: NSObject {
         let totalWidth = mainSplit.bounds.width
         if totalWidth > 400 {
             if !leftPane.isHidden, leftPane.frame.width > totalWidth * 0.5 {
-                mainSplit.setPosition(280, ofDividerAt: 0)
+                mainSplit.setPosition(defaultLeftPaneWidth(leftPane), ofDividerAt: 0)
                 mainSplit.layoutSubtreeIfNeeded()
             }
             if !rightPane.isHidden, rightPane.frame.width > totalWidth * 0.5 {
@@ -3212,6 +3246,7 @@ final class MosaicWindowController: NSObject {
             if leaf.kind == .roi { leaf.isVisible = roiOn }
         }
         applyLayerVisibility()
+        updateLayerDetailToggleAvailability()
         reloadLayerList()
     }
 
@@ -3308,6 +3343,8 @@ final class MosaicWindowController: NSObject {
 
         let scrollView = NSScrollView()
         scrollView.hasVerticalScroller = true
+        // 内容が収まっている時にスクロールバーが出ていると、まだ続きがあるように見えて紛らわしい
+        scrollView.autohidesScrollers = true
         scrollView.translatesAutoresizingMaskIntoConstraints = false
         scrollView.documentView = layerOutlineView
 
@@ -5133,6 +5170,16 @@ final class MosaicWindowController: NSObject {
     private func updateUndoRedoAvailability() {
         undoButton.isEnabled = !undoStack.isEmpty
         redoButton.isEnabled = !redoStack.isEmpty
+        updateImageActionAvailability()
+    }
+
+    /// 画像を開いていない状態では、画像に対する操作（候補生成・モザイク適用・レイヤ削除）を無効化する。
+    /// 従来は押せてしまい、「先に画像を開いてください」というエラーで初めて分かる作りだった。
+    private func updateImageActionAvailability() {
+        let hasImage = loadedImage != nil
+        for button in imageDependentToolbarButtons {
+            button.isEnabled = hasImage
+        }
     }
 
     @objc private func exportImage() {
@@ -5295,11 +5342,21 @@ final class MosaicWindowController: NSObject {
         let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
         let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
         let previewVideoButton = shortcutToolbarButton("previewSelectedVideo", symbol: "play.rectangle")
+        // 8個を1行に並べるとライブラリパネルの幅に収まらず、右端のアイコンが切れていた
+        // （GUI報告）。4個ずつ2行へ折り返して、工場既定幅でも必ず全て見えるようにする。
+        func iconRow(_ views: [NSView]) -> NSStackView {
+            let row = NSStackView(views: views)
+            row.orientation = .horizontal
+            row.spacing = 4
+            row.alignment = .centerY
+            return row
+        }
         let buttons = NSStackView(views: [
-            openOriginalButton, openProcessedButton, previewVideoButton, repairLinksButton,
-            saveButton, revealButton, exportButton, deleteButton
+            iconRow([openOriginalButton, openProcessedButton, previewVideoButton, repairLinksButton]),
+            iconRow([saveButton, revealButton, exportButton, deleteButton])
         ])
-        buttons.orientation = .horizontal
+        buttons.orientation = .vertical
+        buttons.alignment = .leading
         buttons.spacing = 4
         buttons.translatesAutoresizingMaskIntoConstraints = false
 
@@ -6482,6 +6539,41 @@ extension MosaicWindowController {
         AppLog.ui.info("すべての設定を初期化しました")
     }
 
+    /// 「検出」セクションの各コントロールを保存値（無ければ既定値）へ戻す。
+    private func loadDetectionSettings() {
+        individualDetectionCheckbox.state =
+            (AppSettings.shared.object(forKey: Self.individualDetectionDefaultsKey) as? Bool ?? true) ? .on : .off
+        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .regionForeground) ?? 0
+        segmentEngineControl.selectItem(at: defaultEngineIndex)
+        let threshold = AppSettings.shared.double(forKey: Self.maskThresholdDefaultsKey)
+        maskThresholdSlider.doubleValue = threshold
+        maskThresholdValueLabel.stringValue = threshold < 0.01 ? "自動" : "\(Int(threshold * 100)) %"
+        shapeControl.selectedSegment = 1
+    }
+
+    /// レイヤパネル「表示:」「詳細:」を既定状態へ戻す。
+    /// 既定はROIとモザイクをON（候補生成の結果がすぐ見える状態）、人物・骨格はOFF。
+    private func loadLayerVisibilityDefaults() {
+        roiLayerCheckbox.state = .on
+        mosaicPreviewCheckbox.state = mosaicPreviewDefaultOn ? .on : .off
+        personLayerCheckbox.state = .off
+        poseLayerCheckbox.state = .off
+        layerOutlineAllCheckbox.state = .on
+        layerTagAllCheckbox.state = .on
+        applyLayerVisibility()
+        updateLayerDetailToggleAvailability()
+    }
+
+    /// 「詳細: 輪郭 / タグ」は表示中のレイヤに対する設定なので、
+    /// ROI・人物・骨格がすべて非表示なら操作しても効果が無い。無効化して状態の矛盾を防ぐ。
+    private func updateLayerDetailToggleAvailability() {
+        let hasVisibleLayer = roiLayerCheckbox.state == .on
+            || personLayerCheckbox.state == .on
+            || poseLayerCheckbox.state == .on
+        layerOutlineAllCheckbox.isEnabled = hasVisibleLayer
+        layerTagAllCheckbox.isEnabled = hasVisibleLayer
+    }
+
     /// 設定の読込・初期化後に、画面上の全コントロールをAppSettingsの現在値へ再同期する。
     private func refreshAllUIFromSettings() {
         let savedDomainMode = AppSettings.shared.integer(forKey: Self.domainModeDefaultsKey)
@@ -6492,6 +6584,11 @@ extension MosaicWindowController {
         loadGenerationFilter()
         loadMosaicStyleSettings()
         loadLibraryViewPreferences()
+        // 「検出」「ワークフロー」「レイヤ表示」は従来ここで再同期しておらず、初期化しても
+        // 直前の状態が残っていた（初期化直後にレイヤ表示が全OFFのまま等。GUI報告）。
+        loadWorkflowOptions()
+        loadDetectionSettings()
+        loadLayerVisibilityDefaults()
         applyPanelAssignments()
         // restoreSplitPositions()を直接呼ぶだけだと、保存値が無い場合（初期化直後や、
         // レイアウト情報を含まない古いプロジェクトファイルの読込時）に分割位置が
@@ -7101,6 +7198,11 @@ extension MosaicWindowController: NSSplitViewDelegate {
     /// サイドペイン/キャンバスの最小幅。インスペクタを含むペインは、モザイクパターンの
     /// プレビュータイル（44pt×4列＋ラベル列）が必須制約で圧縮できないため、他のペインより
     /// 広い下限を与える（狭めるとAuto Layoutの制約違反やタイルのはみ出しが起きるため）。
+    /// インスペクタを含むペインの既定幅。最小幅(340)を下回ると
+    /// 「性器（男性）」が「性」になる等の省略表示とパターンタイルの横切れが起きるため、
+    /// 余白を含めた値をここで一元管理する。
+    static let inspectorPaneDefaultWidth: CGFloat = 360
+
     private func minimumWidth(forPane pane: NSView) -> CGFloat {
         if pane === canvasContainer { return 200 }
         if let inspector = sidePanels[.inspector],
@@ -7158,10 +7260,12 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
     /// レイヤ一覧のルート表示順: モザイク対象 → 人物（グループ含む）→ 骨格 → 画像
     /// （従来の画像先頭から変更。ユーザー指定の並び順）。
     fileprivate func rootLayerItems() -> [AnyObject] {
-        let roiLeaves = ungroupedLayers.filter { $0.kind == .roi }
+        // ROIが1件も無いのに「モザイク対象」、画像未読込なのに「画像」が並んでいると、
+        // 中身の無いレイヤがあるように見えて紛らわしい（GUI報告）。実体がある時だけ出す。
+        let roiLeaves = canvas.rois.isEmpty ? [] : ungroupedLayers.filter { $0.kind == .roi }
         let personLeaves = ungroupedLayers.filter { $0.kind.isPerson }
         let poseLeaves = ungroupedLayers.filter { $0.kind.isPose }
-        let imageLeaves = ungroupedLayers.filter { $0.kind == .image }
+        let imageLeaves = loadedImage == nil ? [] : ungroupedLayers.filter { $0.kind == .image }
         let others = ungroupedLayers.filter {
             $0.kind != .roi && $0.kind != .image && !$0.kind.isPerson && !$0.kind.isPose
         }
@@ -7169,7 +7273,7 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
     }
 
     func outlineView(_ outlineView: NSOutlineView, numberOfChildrenOfItem item: Any?) -> Int {
-        if item == nil { return layerGroups.count + ungroupedLayers.count }
+        if item == nil { return rootLayerItems().count }
         if let group = item as? LayerGroup { return group.children.count }
         if let leaf = item as? LayerLeaf, leaf.kind == .roi {
             return roiListGroups.count + ungroupedROIEntries.count

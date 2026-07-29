@@ -239,11 +239,12 @@ public final class SAMSegmentEngine: Segmenting {
             ))
         }
 
-        // ROIの矩形（回転対応・二値）で制限する。楕円制限は放射グラデーションのため
-        // 取れた輪郭が縁で薄まる（§5.41）。SAMのマスクが形状そのものなので矩形で十分
+        // 画面に表示されているROIの形状（矩形/楕円/多角形）の**二値**マスクで制限する。
+        // 矩形で制限すると、SAMのマスクがROI全体を覆ったとき「楕円のROIなのに四角いモザイク」に
+        // なってしまう（GUI報告）。二値なので、§5.41の「縁で輪郭が薄まる」問題も起きない。
         let black = CIImage(color: .black).cropped(to: extent)
         let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-        let boundsMask = ShapeSegmentEngine.rectangleMask(rect: roiRect, extent: extent, rotation: roi.rotation)
+        let boundsMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
         let restricted = mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
             kCIInputBackgroundImageKey: boundsMask
         ]).cropped(to: extent)

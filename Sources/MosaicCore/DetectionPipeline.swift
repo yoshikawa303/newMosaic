@@ -932,3 +932,27 @@ public final class StaticImageMosaicPipeline {
         return DetectionSnapshot(persons: persons, poseHints: hints, rois: refined)
     }
 }
+
+
+/// 骨格由来の推定ROI（幾何プライア）を、直接検出器の結果に応じて取り除くフィルタ。
+///
+/// 骨格からの推定は肩・腰の関節位置からの幾何計算であり、位置精度が低い。検出器が
+/// 同じ部位を内容ベースで見つけられている場合は、推定ROIは誤ROIにしかならない。
+/// カテゴリが異なる（鼠径部は`.other`）場合はIoUベースの重複除去でも統合されず残るため、
+/// ここで明示的に落とす。GUI報告で繰り返し問題になった箇所のため、純ロジックとして切り出す。
+public enum PoseDerivedROIFilter {
+    /// 骨格由来の推定乳首ROI（source "pose-chest"）。検出器が乳首を1件でも見つけたら取り除く。
+    public static func dropChestPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
+        guard detected.contains(where: { $0.category == .nipple }) else { return rois }
+        return rois.filter { $0.source != "pose-chest" }
+    }
+
+    /// 骨格由来の推定鼠径部ROI（source "pose-groin"、カテゴリ`.other`）。
+    /// 検出器が性器を1件でも見つけたら取り除く。人数分だけ「その他」の大きな誤ROIが並ぶ
+    /// （3人検出で「その他1〜3」が生成され、うち1件はコマ全体を覆っていた）ため。
+    public static func dropGroinPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
+        let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
+        guard detected.contains(where: { genitals.contains($0.category) }) else { return rois }
+        return rois.filter { $0.source != "pose-groin" }
+    }
+}

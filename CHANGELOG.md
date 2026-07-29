@@ -1,5 +1,30 @@
 # Changelog
 
+## v0.0.00099 - 2026-07-29
+
+■更新履歴（Readme / ChangeLog 用）
+
+- バグ修正: 性器を検出できた画像で、骨格から推定した**不要な「その他」ROI（人数分）**が生成されなくなった。3人検出時に「その他1〜3」が並び、うち1件がコマ全体を覆う問題を解消。
+- バグ修正: 「対象形状（SAM）」で、楕円の選択範囲なのにモザイクが四角く出ることがある問題を修正。表示されている選択範囲の形状どおりに切り取るようにした。
+- バグ修正: 設定の初期化後にインスペクタの幅が足りず、「性器（男性）」が「性」と表示されるなど項目名が省略され、モザイクパターンのタイルも横に切れていた問題を修正。
+- バグ修正: 設定の初期化で「検出」「ワークフロー」「レイヤ表示」が既定値に戻らず、レイヤ表示が全OFFのままになる問題を修正。初期化後はROIとモザイクの表示がONで始まる。
+- バグ修正: ライブラリ操作アイコンの右端が切れる問題を修正（4個ずつ2行へ折り返し）。
+- 改善: 選択範囲・人物・骨格をすべて非表示にしている間は「詳細: 輪郭 / タグ」を無効表示にする。
+- 改善: 選択範囲が0件のとき「モザイク対象」、画像未読込のとき「画像」をレイヤ一覧に出さない。
+- 改善: 画像を開いていない間は候補生成・モザイク適用・レイヤ削除・ズームを無効表示にする。
+- 改善: レイヤ一覧のスクロールバーを内容が収まっている時は隠す。塗りつぶし色の見本が横に伸びないよう固定サイズにした。キャンバスの背景色を純黒から標準の台紙色へ変更。
+
+■更新履歴
+
+- `PoseDerivedROIFilter`（`MosaicCore`）を新設し、骨格由来プライアの除去を純ロジックとして切り出してテスト可能にした。`dropGroinPriors`は検出器が性器を1件でも検出した場合に`source == "pose-groin"`を除去する（`.other`カテゴリのためIoUベースの重複除去では統合されず残っていた）。乳首側の`dropChestPriors`も同所へ移設。
+- `ShapeSegmentEngine.hardShapeMask(for:extent:)` / `hardEllipseMask` を追加。`SAMSegmentEngine`の制限を矩形から**ROI形状の二値マスク**へ変更した。`ellipseMask`は放射グラデーションのため輪郭が縁で薄まる（§5.41）が、二値なら起きない。
+- `inspectorPaneDefaultWidth`（360）と`defaultLeftPaneWidth(_:)`を追加し、`applyInitialLayoutIfNeeded`のハードコード280ptを置き換え。インスペクタの最小幅340ptを下回らないようにした。
+- `libraryTwoColumnPaneWidth()`に下限340ptを追加（表示モード切替とズーム/更新アイコンが省略されない幅）。
+- `refreshAllUIFromSettings`へ`loadWorkflowOptions` / `loadDetectionSettings` / `loadLayerVisibilityDefaults`を追加。`updateLayerDetailToggleAvailability()`を新設し表示トグルの変更時にも追従させた。
+- `rootLayerItems()`をROI件数・画像有無でフィルタし、`numberOfChildrenOfItem`を同関数の件数へ統一（別計算による不整合を防止）。
+- `updateImageActionAvailability()`を追加し、`updateUndoRedoAvailability()`から呼ぶ。
+- テスト追加（計119件）: 二値形状マスクの楕円内部・角の値、鼠径部/胸部プライア除去の条件分岐。
+
 ## v0.0.00098 - 2026-07-29
 
 ■更新履歴（Readme / ChangeLog 用）
