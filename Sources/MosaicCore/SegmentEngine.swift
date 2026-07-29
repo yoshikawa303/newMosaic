@@ -25,6 +25,8 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case regionForeground
     /// 「対象形状」のリリース初期（Build 41）実装。現行実装との精度比較用（デバッグ・検証目的）。
     case regionForegroundLegacy
+    /// 学習済み部位セグメンテーションモデル（YOLO-seg）による形状抽出。モデル導入時のみ有効。
+    case learnedShape
 
     public var displayName: String {
         switch self {
@@ -33,6 +35,7 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
         case .foregroundObjects: return "物体の輪郭（自動抽出）"
         case .regionForeground: return "対象形状"
         case .regionForegroundLegacy: return "対象形状（初期実装・比較用）"
+        case .learnedShape: return "学習モデル形状"
         }
     }
 }
@@ -737,5 +740,135 @@ public final class VisionPersonSegmentEngine: Segmenting {
         return rois.map { roi in
             ShapeSegmentEngine.restrict(fullFrameMask, to: roi, extent: extent)
         }
+    }
+}
+
+
+/// 学習済み部位セグメンテーションモデル（YOLO-seg）で部位の輪郭を直接得るエンジン。
+///
+/// 同梱の検出モデルは枠しか出力しないため、従来の「対象形状」はVisionの汎用APIで形状を
+/// 近似していた。Visionの前景抽出は被写体と背景を分ける目的であり、被写体**内部**にある
+/// 性器・乳首は原理的に分離できない（ARCHITECTURE §5.40/§5.41 の実測結果）。
+/// 本エンジンは形状そのものを学習したモデルを使うことで、この限界を回避する。
+///
+/// モデルが未導入・推論失敗・マスクが空のいずれの場合も `ShapeSegmentEngine` へフォールバックし、
+/// 選択範囲が必ず塗られるようにする（検閲漏れを作らないため）。
+public final class LearnedShapeSegmentEngine: Segmenting {
+    /// 学習モデルのマスクをROIへ対応付ける際の最小IoU。これを下回るものは「別の部位」とみなす。
+    static let minimumMatchIoU = 0.2
+    /// 採用するマスクの最小被覆率。これ未満は「ほぼ空」で検閲漏れになるためフォールバックする。
+    static let minimumUsableCoverage = 0.02
+
+    private let fallback = ShapeSegmentEngine()
+    private let detector: PartSegmentationDetector?
+    private let confidenceThreshold: Double
+    private let measureContext = CIContext(options: [.cacheIntermediates: false])
+
+    /// モデルが導入されているか（UIで選択肢を出すかの判定に使う）。
+    public static var isAvailable: Bool { PartSegmentationDetector.isAvailable }
+
+    public init(confidenceThreshold: Double = 0.3) {
+        self.confidenceThreshold = confidenceThreshold
+        // 未導入・読み込み失敗は例外にせず、フォールバック動作へ倒す（既存の運用を壊さないため）
+        detector = try? PartSegmentationDetector()
+        if detector == nil {
+            segmentLogger.info("learnedShape unavailable=modelNotInstalled")
+        }
+    }
+
+    public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        guard let detector else {
+            return try fallback.createMasks(for: rois, in: image, extent: extent)
+        }
+        let results: [PartSegmentationResult]
+        do {
+            results = try detector.detect(in: image, confidenceThreshold: confidenceThreshold)
+        } catch {
+            segmentLogger.info("learnedShape inferenceFailed fallback=shape")
+            return try fallback.createMasks(for: rois, in: image, extent: extent)
+        }
+        segmentLogger.info("learnedShape detections=\(results.count)")
+
+        var masks: [CIImage] = []
+        for roi in rois {
+            if let mask = learnedMask(for: roi, results: results, extent: extent) {
+                masks.append(mask)
+            } else {
+                masks.append(try fallback.createMasks(for: [roi], in: image, extent: extent)[0])
+            }
+        }
+        return masks
+    }
+
+    private func learnedMask(
+        for roi: MosaicROI,
+        results: [PartSegmentationResult],
+        extent: CGRect
+    ) -> CIImage? {
+        // 同カテゴリを優先し、重なりが最も大きい検出結果を選ぶ
+        let candidates = results
+            .map { (result: $0, iou: $0.rect.iou(with: roi.rect)) }
+            .filter { $0.iou >= Self.minimumMatchIoU }
+        guard !candidates.isEmpty else {
+            segmentLogger.info("""
+                learnedShape category=\(roi.category.rawValue, privacy: .public) match=none fallback=shape
+                """)
+            return nil
+        }
+        let sameCategory = candidates.filter { $0.result.category == roi.category }
+        let best = (sameCategory.isEmpty ? candidates : sameCategory).max { $0.iou < $1.iou }
+        guard let best else { return nil }
+
+        var mask = CIImage(cgImage: best.result.mask)
+        if mask.extent.width != extent.width || mask.extent.height != extent.height {
+            guard mask.extent.width > 0, mask.extent.height > 0 else { return nil }
+            mask = mask.transformed(by: CGAffineTransform(
+                scaleX: extent.width / mask.extent.width,
+                y: extent.height / mask.extent.height
+            ))
+        }
+
+        // 選択範囲の外へ広がらないよう、ROIの矩形（回転対応）で制限する。
+        // 楕円マスクではなく二値の矩形マスクを使う（楕円は放射グラデーションのため、
+        // せっかく取れた輪郭が縁へ向かって薄まってしまう。ARCHITECTURE §5.41）。
+        let black = CIImage(color: .black).cropped(to: extent)
+        let boundsMask = ShapeSegmentEngine.rectangleMask(
+            rect: roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft),
+            extent: extent,
+            rotation: roi.rotation
+        )
+        let restricted = mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: boundsMask
+        ]).cropped(to: extent)
+
+        // 空に近いマスクは検閲漏れになるため採用しない
+        let coverage = coverageRatio(of: restricted, in: roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft))
+        segmentLogger.info("""
+            learnedShape category=\(roi.category.rawValue, privacy: .public) \
+            matched=\(best.result.category.rawValue, privacy: .public) \
+            iou=\(String(format: "%.2f", best.iou), privacy: .public) \
+            coverage=\(String(format: "%.2f", coverage), privacy: .public)
+            """)
+        guard coverage >= Self.minimumUsableCoverage else { return nil }
+        return restricted
+    }
+
+    /// ROI矩形内での白領域の割合（リニア測定。ガンマの影響を受けない実面積比）。
+    private func coverageRatio(of mask: CIImage, in rect: CGRect) -> Double {
+        guard rect.width > 0, rect.height > 0 else { return 0 }
+        let average = mask.applyingFilter("CIAreaAverage", parameters: [
+            kCIInputExtentKey: CIVector(cgRect: rect)
+        ])
+        var pixel = [UInt8](repeating: 0, count: 4)
+        let linearSpace = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+        measureContext.render(
+            average,
+            toBitmap: &pixel,
+            rowBytes: 4,
+            bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+            format: .RGBA8,
+            colorSpace: linearSpace
+        )
+        return Double(pixel[0]) / 255.0
     }
 }

@@ -1365,6 +1365,8 @@ final class MosaicWindowController: NSObject {
                     key: "", modifiers: [], isRecommended: false, action: #selector(reloadLibraryFromButton)),
         AppShortcut(id: "exportTrainingDataset", category: "ライブラリ", title: "学習用データセットを書き出す",
                     key: "", modifiers: [], isRecommended: false, action: #selector(exportTrainingDataset)),
+        AppShortcut(id: "exportShapeDataset", category: "ライブラリ", title: "形状学習用データセットを書き出す",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(exportShapeTrainingDataset)),
         AppShortcut(id: "registerFolderAsLinks", category: "一括処理", title: "フォルダを一括登録（リンク）",
                     key: "", modifiers: [], isRecommended: false, action: #selector(registerFolderAsLinks)),
         AppShortcut(id: "repairBrokenLinksAction", category: "一括処理", title: "リンク切れ修正",
@@ -3974,6 +3976,7 @@ final class MosaicWindowController: NSObject {
                 case .foregroundObjects: return ForegroundSegmentEngine()
                 case .regionForeground: return RegionForegroundSegmentEngine()
                 case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
+                case .learnedShape: return LearnedShapeSegmentEngine()
                 }
             }
 
@@ -4911,6 +4914,15 @@ final class MosaicWindowController: NSObject {
 
     /// 「マスク生成」方式の変更。「個別」ONで選択中レイヤがあれば、そのレイヤにだけ方式を書き込む。
     @objc private func segmentEngineChanged() {
+        let kinds = SegmentEngineKind.allCases
+        let index = segmentEngineControl.indexOfSelectedItem
+        if index >= 0, index < kinds.count, kinds[index] == .learnedShape, !LearnedShapeSegmentEngine.isAvailable {
+            // 未導入でもクラッシュせず図形へフォールバックするが、無言だと原因が分からないため案内する
+            updateStatus(
+                "形状モデル（part_seg.onnx）が未導入のため「図形」で処理します。"
+                + "Docs/FINETUNE_GUIDE.md の手順で作成し Application Support/newMosaic/Models へ配置してください"
+            )
+        }
         if applyDetectionSettingToSelectedLayers() { return }
         resumeMosaicPreviewIfNeeded()
     }
@@ -4985,6 +4997,7 @@ final class MosaicWindowController: NSObject {
         case .foregroundObjects: return ForegroundSegmentEngine()
         case .regionForeground: return RegionForegroundSegmentEngine(maskThreshold: threshold)
         case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
+        case .learnedShape: return LearnedShapeSegmentEngine()
         }
     }
 
@@ -5370,6 +5383,42 @@ final class MosaicWindowController: NSObject {
         do {
             let result = try YOLODatasetExporter.export(items: annotated, libraryEngine: libraryEngine, to: url)
             updateStatus("学習用データセットを書き出しました: 画像\(result.imageCount)件 / ROI \(result.roiCount)件")
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            showError(error)
+        }
+    }
+
+    /// 形状モデル（学習モデル形状）用に、手描き多角形ROIの輪郭をYOLOセグメンテーション形式で書き出す。
+    /// 楕円・矩形ROIは形状学習に有害（楕円を出力するモデルが育つ）ため既定で除外される。
+    /// 手順の詳細は Docs/FINETUNE_GUIDE.md「部位セグメンテーション（形状）モデルの学習」を参照。
+    @objc private func exportShapeTrainingDataset() {
+        let annotated = libraryItems.filter { item in
+            item.rois.contains { $0.shape == .polygon && $0.polygonPoints != nil }
+        }
+        guard !annotated.isEmpty else {
+            updateStatus(
+                "形状学習用の対象がありません。選択範囲の形状を「多角形」にして頂点を輪郭へ沿わせ、保存してください"
+            )
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseFiles = false
+        panel.canChooseDirectories = true
+        panel.canCreateDirectories = true
+        panel.prompt = "エクスポート"
+        panel.message = "形状学習用データセット（YOLOセグメンテーション形式）の出力先フォルダを選択してください"
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            let result = try YOLOSegDatasetExporter.export(
+                items: annotated,
+                libraryEngine: libraryEngine,
+                to: url
+            )
+            updateStatus(
+                "形状学習用データセットを書き出しました: 画像\(result.imageCount)件 / 輪郭\(result.polygonCount)件"
+                + "（形状なしのため除外 \(result.skippedCount)件）"
+            )
             NSWorkspace.shared.activateFileViewerSelecting([url])
         } catch {
             showError(error)

@@ -2333,3 +2333,30 @@
   検証は swift build / swift test 99/99 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00096で再パッケージ。
 
 - 作業時間: 約70分
+
+### 2026-07-29 14:00 JST - Claude Code - 種別: 依頼内容 - 部位セグメンテーションモデルの学習を実行
+
+```
+☆話を信じて、部位セグメンテーションモデルを学習するを実行して。ただしおかしくなったら厳しく差し戻します。
+```
+
+### 2026-07-29 15:30 JST - Claude Code - 種別: 作業結果 - 学習モデル形状の実装（v0.0.00097）
+
+- 内容:
+
+  **事前調査**: 既存の公開モデルで代替できないか確認した。`NSFW-API/NSFW_Segmentation`（YOLO11-seg、breast/areola/nipple/vagina/penis）が存在するが、**ライセンス未記載**のため同梱不可、かつ実写学習で漫画には使えない。deepghs org にはセグメンテーションモデルが1つも無い。よって自前学習の路線で実装した。
+
+  **既存機能は一切変更していない**。追加のみで、モデル未導入時は従来どおり動作する。
+
+  - `YOLOSegDecoder`: YOLO-segの2本出力をデコードし `sigmoid(Σ 係数×プロトタイプ)` でマスク合成。枠外は0。要素数が合わなければ空を返す（検出専用モデルを渡してもクラッシュしない）
+  - `PartSegmentationDetector`: `Application Support/newMosaic/Models/part_seg.onnx` を読む。レターボックスのパディングを除去してから元画像サイズへ戻す。出力が2本ないモデルは明示的エラー
+  - `LearnedShapeSegmentEngine` / `SegmentEngineKind.learnedShape`: IoU 0.2以上でROIへ対応付け、同カテゴリ優先。ROI矩形（二値・回転対応）で制限。未導入・推論失敗・被覆率0.02未満はすべて図形へフォールバックし検閲漏れを作らない
+  - `YOLOSegDatasetExporter`: 輪郭形式で書き出す。既定は手描き多角形ROIのみ（楕円・矩形を輪郭として与えると「楕円を出力するモデル」が育つため）。回転は画素空間で適用
+  - UI: ライブラリ＞「形状学習用データセットを書き出す」、マスク生成＞「学習モデル形状」。未導入で選んだ場合は案内を表示
+  - `Docs/FINETUNE_GUIDE.md` へ S1〜S5 の学習手順を追加
+
+  ユーザー側の作業は「選択範囲の形状を多角形にして頂点を輪郭に沿わせる」→書き出し→学習→モデル配置。目安はカテゴリごとに50枚で1回試し、結果を見て増やす。
+
+  検証は swift build / swift test 112/112 PASS / agent_governance_guard.sh PASS / local_quality_gate.sh PASS、v0.0.00097で再パッケージ。CHANGELOG/ARCHITECTURE §5.42/QUALITY_STATSを同期。
+
+- 作業時間: 約90分

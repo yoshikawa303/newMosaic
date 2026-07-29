@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.0.00097 - 2026-07-29
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 追加: マスク生成に「**学習モデル形状**」を追加。部位の輪郭を学習したモデル（YOLOセグメンテーション）で、性器・乳首の形状に沿ったマスクを作れるようになった。
+- 追加: ライブラリ＞「形状学習用データセットを書き出す」。多角形で輪郭をなぞった選択範囲が、そのまま形状モデルの教師データになる。
+- 学習手順は `Docs/FINETUNE_GUIDE.md`「部位セグメンテーション（形状）モデルの学習」を参照。モデルは同梱せず、各自で作成して導入する。
+- 既存のマスク生成方式・既定値は変更していない。モデル未導入時は従来どおり動作する。
+
+■更新履歴
+
+- `YOLOSegDecoder` を新設。YOLOv8/YOLO11-seg の2本出力（`output0`=枠+マスク係数、`output1`=マスクプロトタイプ）をデコードし、`sigmoid(Σ 係数×プロトタイプ)` でマスクを合成する。枠の外は0にする（ultralyticsの`crop_mask`相当）。
+- `PartSegmentationDetector` を新設。`Application Support/newMosaic/Models/part_seg.onnx` を読み、部位ごとの形状マスクを返す。レターボックスのパディングを除去して元画像サイズへ戻す。出力が1本（検出専用モデル）の場合は明示的なエラーにする。
+- `LearnedShapeSegmentEngine` と `SegmentEngineKind.learnedShape` を追加。ROIとのIoU 0.2以上で対応付け、同カテゴリを優先。ROI矩形（回転対応・二値）で制限する。モデル未導入・推論失敗・被覆率0.02未満のいずれも `ShapeSegmentEngine` へフォールバックし、検閲漏れを作らない。
+- `YOLOSegDatasetExporter` を新設。1行 `class x1 y1 x2 y2 ...` の輪郭形式で書き出す。既定では手描き多角形ROIのみ（楕円・矩形は形状学習に有害なため除外）。回転は画素空間で適用する。
+- クラス順は `PartSegmentationDetector.classCategories`（nipple / maleGenital / femaleGenital）で書き出し側と実行側を統一し、テストで固定。
+- テスト追加（計112件）: マスク係数のオフセット、枠外の非塗り、sigmoidしきい値、検出専用モデルを渡した場合の空返却、レターボックス除去、モデル未導入時のフォールバック、輪郭書き出しの座標・回転・クラス順。
+
 ## v0.0.00096 - 2026-07-29
 
 ■更新履歴（Readme / ChangeLog 用）
