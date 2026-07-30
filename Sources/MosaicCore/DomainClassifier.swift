@@ -138,7 +138,7 @@ public final class DomainModelClassifier {
         let outputs = try session.run(
             withInputs: [inputName: inputValue],
             outputNames: [outputName],
-            runOptions: nil
+            runOptions: ORTMemory.shrinkingRunOptions
         )
         guard let output = outputs[outputName] else {
             throw CocoaError(.fileReadCorruptFile, userInfo: [

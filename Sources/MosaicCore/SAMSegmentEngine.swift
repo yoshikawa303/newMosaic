@@ -65,7 +65,9 @@ public final class SAMSegmentEngine: Segmenting {
     /// 「元画像1枚 ＋ その画像から切り出した窓」を同時に保持する。
     /// 元画像が変わった時点で全て捨てる（CGImageの同一性で判定）。
     private final class EmbeddingCache: @unchecked Sendable {
-        private static let capacity = 24
+        /// 1埋め込みは 1x256x64x64 float32 = 4MB。1画像あたりの小さいROIは通常10件未満なので
+        /// 8件あれば足りる（超えた分は再エンコードするだけで、動作は変わらない）。
+        private static let capacity = 8
         private var source: CGImage?
         private var entries: [String: ORTValue] = [:]
         private let lock = NSLock()
@@ -91,6 +93,11 @@ public final class SAMSegmentEngine: Segmenting {
     private static let embeddingCache = EmbeddingCache()
 
     public init() {}
+
+    /// メモリ実測用にセッションだけ先に読み込む（テスト専用）。
+    static func warmUpSessionsForMeasurement() {
+        _ = sharedSessions
+    }
 
     public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
         guard let sessions = Self.sharedSessions else {
@@ -158,7 +165,7 @@ public final class SAMSegmentEngine: Segmenting {
         let outputs = try encoder.run(
             withInputs: [inputName: inputValue],
             outputNames: [outputName],
-            runOptions: nil
+            runOptions: ORTMemory.shrinkingRunOptions
         )
         guard let value = outputs[outputName] else {
             throw CocoaError(.fileReadUnknown)
@@ -226,7 +233,7 @@ public final class SAMSegmentEngine: Segmenting {
             "has_mask_input": try value(&hasMask, shape: [1]),
             "orig_im_size": try value(&origSize, shape: [2])
         ]
-        let outputs = try decoder.run(withInputs: inputs, outputNames: ["masks"], runOptions: nil)
+        let outputs = try decoder.run(withInputs: inputs, outputNames: ["masks"], runOptions: ORTMemory.shrinkingRunOptions)
         guard let masksValue = outputs["masks"] else { return nil }
         let floats = (try masksValue.tensorData() as Data)
             .withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }

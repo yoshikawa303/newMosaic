@@ -444,9 +444,14 @@ private enum LibrarySortKey: String {
     case name, status, resolution, roiCount, updatedAt
 }
 
+/// 「元に戻す」「やり直し」1ステップ分の状態。
+///
+/// **描画済み画像は持たない。** 以前はフル解像度のCGImageを各ステップに保持していたが、
+/// A4・300dpi（2480x3508）で1枚あたり34.8MB、しかもスタックに上限が無いため、
+/// 編集を重ねるだけでGB単位が常駐した（「使用メモリが6GBを超える」報告の主因）。
+/// 描画結果はROIから作り直せるので、ROIだけを保持する（ARCHITECTURE §5.49）。
 private struct EditorState {
     var rois: [MosaicROI]
-    var renderedImage: CGImage?
 }
 
 private struct CandidateGenerationInput: @unchecked Sendable {
@@ -1220,6 +1225,10 @@ final class MosaicWindowController: NSObject {
     }
     private var thumbnailCache: [UUID: NSImage] = [:]
     private var thumbnailCacheUpdatedAt: [UUID: Date] = [:]
+    /// `thumbnailCache`のLRU順（末尾が最新）。
+    private var thumbnailCacheOrder: [UUID] = []
+    /// サムネイル1枚は240ptで約230KB。ライブラリが数千件になると無制限では数百MBになるため上限を設ける。
+    private static let thumbnailCacheLimit = 300
     private var undoStack: [EditorState] = []
     private var redoStack: [EditorState] = []
     private var hasUnsavedChanges = false
@@ -3936,6 +3945,8 @@ final class MosaicWindowController: NSObject {
         do {
             let repaired = try libraryEngine.repairBrokenLinks(searchFolder: folder)
             thumbnailCache.removeAll()
+            thumbnailCacheUpdatedAt.removeAll()
+            thumbnailCacheOrder.removeAll()
             reloadLibrary()
             updateStatus("リンク切れ一括修正: \(repaired)/\(brokenCount)件を修正しました")
         } catch {
@@ -4909,16 +4920,9 @@ final class MosaicWindowController: NSObject {
             return
         }
         do {
-            let output = try mosaicEngine.applyMosaic(
-                to: loadedImage.cgImage,
-                rois: canvas.rois,
-                style: defaultMosaicStyleForRendering(),
-                segmentEngine: currentSegmentEngine(),
-                patternImageProvider: { [weak self] in self?.patternImage(for: $0) },
-                skipIncompletePatterns: true
-            )
+            let output = try renderMosaicOutput(for: canvas.rois)
             renderedImage = output
-            canvas.setImage(output)
+            canvas.setImage(output ?? loadedImage.cgImage)
         } catch {
             renderedImage = nil
             canvas.setImage(loadedImage.cgImage)
@@ -4926,6 +4930,20 @@ final class MosaicWindowController: NSObject {
             updateStatus("モザイクプレビューを解除しました: \(error.localizedDescription)")
             showError(error)
         }
+    }
+
+    /// ROIからモザイク適用結果を作る（表示はしない）。ROIが空・画像未読み込みならnil。
+    /// 「元に戻す」で描画済み画像を復元する代わりに作り直すために使う。
+    private func renderMosaicOutput(for rois: [MosaicROI]) throws -> CGImage? {
+        guard let loadedImage, !rois.isEmpty else { return nil }
+        return try mosaicEngine.applyMosaic(
+            to: loadedImage.cgImage,
+            rois: rois,
+            style: defaultMosaicStyleForRendering(),
+            segmentEngine: currentSegmentEngine(),
+            patternImageProvider: { [weak self] in self?.patternImage(for: $0) },
+            skipIncompletePatterns: true
+        )
     }
 
     @objc private func maskThresholdChanged() {
@@ -5120,27 +5138,38 @@ final class MosaicWindowController: NSObject {
     }
 
     private func currentEditorState() -> EditorState {
-        EditorState(rois: canvas.rois, renderedImage: renderedImage)
+        EditorState(rois: canvas.rois)
     }
 
     private func applyEditorState(_ state: EditorState) {
         canvas.rois = state.rois
-        renderedImage = state.renderedImage
         guard let loadedImage else { return }
+        // 描画済み画像はスタックに持たないのでROIから作り直す。
+        // モザイク表示OFFでも `renderedImage` は画像出力・ライブラリ保存が参照するため
+        // （`exportImage()` / `performLibraryAutoSave()`）、表示の有無にかかわらず更新する。
+        // ここで未描画のままにすると、元に戻した直後の出力が無修正になり検閲漏れになる。
+        do {
+            renderedImage = try renderMosaicOutput(for: state.rois)
+        } catch {
+            renderedImage = nil
+            showError(error)
+        }
         // 「モザイク表示」チェックはユーザー操作でのみ変わる。チェック状態に合わせて表示を復元する。
         if mosaicPreviewCheckbox.state == .on {
-            if let rendered = state.renderedImage {
-                canvas.setImage(rendered)
-            } else {
-                resumeMosaicPreviewIfNeeded()
-            }
+            canvas.setImage(renderedImage ?? loadedImage.cgImage)
         } else {
             canvas.setImage(loadedImage.cgImage)
         }
     }
 
+    /// 「元に戻す」の保持段数。1段はROI配列のみ（数KB）なので大きめに取れる。
+    private static let undoHistoryLimit = 100
+
     private func pushUndoSnapshot(_ state: EditorState) {
         undoStack.append(state)
+        if undoStack.count > Self.undoHistoryLimit {
+            undoStack.removeFirst(undoStack.count - Self.undoHistoryLimit)
+        }
         redoStack.removeAll()
         hasUnsavedChanges = true
         editorRevision += 1
@@ -5567,6 +5596,8 @@ final class MosaicWindowController: NSObject {
 
     private func thumbnail(for item: MosaicLibraryItem, maxDimension: CGFloat = 240) -> NSImage {
         if let cached = thumbnailCache[item.id], thumbnailCacheUpdatedAt[item.id] == item.updatedAt {
+            thumbnailCacheOrder.removeAll { $0 == item.id }
+            thumbnailCacheOrder.append(item.id)
             return cached
         }
         let url = libraryEngine.processedURL(for: item) ?? libraryEngine.originalURL(for: item)
@@ -5590,6 +5621,13 @@ final class MosaicWindowController: NSObject {
         thumb.unlockFocus()
         thumbnailCache[item.id] = thumb
         thumbnailCacheUpdatedAt[item.id] = item.updatedAt
+        thumbnailCacheOrder.removeAll { $0 == item.id }
+        thumbnailCacheOrder.append(item.id)
+        while thumbnailCacheOrder.count > Self.thumbnailCacheLimit {
+            let oldest = thumbnailCacheOrder.removeFirst()
+            thumbnailCache.removeValue(forKey: oldest)
+            thumbnailCacheUpdatedAt.removeValue(forKey: oldest)
+        }
         return thumb
     }
 

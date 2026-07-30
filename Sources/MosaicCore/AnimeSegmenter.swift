@@ -69,7 +69,7 @@ public final class AnimeSegmenter {
         let outputs = try session.run(
             withInputs: [inputName: inputValue],
             outputNames: [outputName],
-            runOptions: nil
+            runOptions: ORTMemory.shrinkingRunOptions
         )
         guard let output = outputs[outputName] else { return nil }
         let outputData = try output.tensorData() as Data

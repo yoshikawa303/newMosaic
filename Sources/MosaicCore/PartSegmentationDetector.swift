@@ -232,7 +232,7 @@ public final class PartSegmentationDetector {
         let outputs = try session.run(
             withInputs: [inputName: inputValue],
             outputNames: [boxOutputName, maskOutputName],
-            runOptions: nil
+            runOptions: ORTMemory.shrinkingRunOptions
         )
         guard let boxOutput = outputs[boxOutputName], let maskOutput = outputs[maskOutputName] else { return [] }
 

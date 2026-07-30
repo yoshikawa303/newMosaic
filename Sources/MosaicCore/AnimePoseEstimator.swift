@@ -170,7 +170,7 @@ public final class AnimePoseEstimator {
         let outputs = try session.run(
             withInputs: [inputName: inputValue],
             outputNames: Set(outputNames),
-            runOptions: nil
+            runOptions: ORTMemory.shrinkingRunOptions
         )
         // モデル出力名が"simcc_x"/"simcc_y"と一致しない場合、出力順（first/last）へ暗黙依存した
         // フォールバックとなり、出力順が入れ替わっているとX/Yが交換され全キーポイントが誤検出に
