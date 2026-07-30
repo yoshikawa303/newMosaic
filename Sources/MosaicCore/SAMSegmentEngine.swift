@@ -22,6 +22,11 @@ public final class SAMSegmentEngine: Segmenting {
     static let inputLongSide = 1024
     /// 採用するマスクの最小被覆率（ROI矩形内）。これ未満は「ほぼ空」でフォールバックする。
     static let minimumUsableCoverage = 0.02
+    /// ROIの形状（楕円等）で切り取るかの判定しきい値。SAMのマスクがROI矩形内でこの割合を
+    /// 超えて広がっている＝対象を分離できていないとみなし、選択範囲の形状に合わせる。
+    /// 下回る場合はSAMが対象の輪郭を取れているので、形状で切ると対象の一部が欠ける
+    /// （楕円は外接矩形より約21%小さく四隅を削る）ため、矩形制限のみに留める。
+    static let shapeConformCoverage = 0.85
 
     private let fallback = ShapeSegmentEngine()
     private let measureContext = CIContext(options: [.cacheIntermediates: false])
@@ -239,20 +244,41 @@ public final class SAMSegmentEngine: Segmenting {
             ))
         }
 
-        // 画面に表示されているROIの形状（矩形/楕円/多角形）の**二値**マスクで制限する。
-        // 矩形で制限すると、SAMのマスクがROI全体を覆ったとき「楕円のROIなのに四角いモザイク」に
-        // なってしまう（GUI報告）。二値なので、§5.41の「縁で輪郭が薄まる」問題も起きない。
+        // まずROIの外接矩形で制限する（SAMのマスクは画像全体に及ぶため、ROI外への漏れを防ぐ）。
         let black = CIImage(color: .black).cropped(to: extent)
         let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-        let boundsMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
-        let restricted = mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
-            kCIInputBackgroundImageKey: boundsMask
+        let opaque = mask.composited(over: black)
+        let rectMask = ShapeSegmentEngine.rectangleMask(rect: roiRect, extent: extent, rotation: roi.rotation)
+        let rectClipped = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: rectMask
         ]).cropped(to: extent)
+        let rectCoverage = coverageRatio(of: rectClipped, in: roiRect)
+
+        // ROIの形状（楕円等）でさらに切り取るかを、SAMが対象を分離できたかで決める。
+        //
+        // 楕円は外接矩形より約21%小さく、**四隅を削ぎ落とす**。対象が枠いっぱいに描かれていると
+        // 楕円で切った瞬間に対象の一部がマスクから外れ、検閲漏れになる（GUI報告: 男性器が
+        // 楕円からはみ出す）。一方、SAMが枠のほぼ全面を返した場合は対象を分離できておらず、
+        // そのまま使うと「楕円のROIなのに四角いモザイク」になる（GUI報告）。
+        // そこで、SAMが対象を分離できている（枠を埋め尽くしていない）ときは形状で切らずに
+        // 輪郭をそのまま残し、分離できていないときだけ選択範囲の形状に合わせる。
+        let conformsToShape = rectCoverage > Self.shapeConformCoverage
+        let restricted: CIImage
+        if conformsToShape {
+            let shapeMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
+            restricted = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
+                kCIInputBackgroundImageKey: shapeMask
+            ]).cropped(to: extent)
+        } else {
+            restricted = rectClipped
+        }
 
         let coverage = coverageRatio(of: restricted, in: roiRect)
         segmentLogger.info("""
             samShape category=\(roi.category.rawValue, privacy: .public) \
             rotation=\(Int(roi.rotation)) \
+            rectCoverage=\(String(format: "%.2f", rectCoverage), privacy: .public) \
+            clip=\(conformsToShape ? "shape" : "rect", privacy: .public) \
             coverage=\(String(format: "%.2f", coverage), privacy: .public)
             """)
         // ほぼ空のマスクは検閲漏れになるため採用せず、図形フォールバックへ倒す

@@ -1214,7 +1214,7 @@ private final class PatchyStubSegmentEngine: Segmenting {
     let otherCategory = MosaicROI(rect: rect, confidence: 0.5, source: "photo-censor", category: .nipple)
     let far = MosaicROI(rect: farRect, confidence: 0.5, source: "photo-censor", category: .femaleGenital)
 
-    let deduped = PhotoCensorDetector.dedupe([low, high, otherCategory, far])
+    let deduped = MultiScaleDetection.dedupe([low, high, otherCategory, far])
 
     #expect(deduped.count == 3)
     #expect(deduped.contains { $0.confidence == 0.8 })
@@ -1823,7 +1823,7 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
 
 /// 検出器の乳首枠を「乳首（縮小）」と「乳輪（枠そのまま）」の2つへ分けること。
 /// 検出枠は乳輪相当の大きさで返るため、そのままでは「乳首単位で欲しい」要望を満たせない。
-@Test func nippleDetectionSplitsIntoNippleAndAreola() {
+@Test func nippleDetectionSplitsIntoNippleAndAreola() throws {
     let detected = MosaicROI(
         rect: NormalizedRect(x: 0.4, y: 0.4, width: 0.1, height: 0.1),
         confidence: 0.8, source: "anime-censor", category: .nipple
@@ -1831,10 +1831,8 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     let result = DetectedROIRefiner.splitNippleAndAreola([detected])
     #expect(result.count == 2)
 
-    let nipple = try? #require(result.first { $0.category == .nipple })
-    let areola = try? #require(result.first { $0.category == .areola })
-    let nippleROI = try! #require(nipple)
-    let areolaROI = try! #require(areola)
+    let nippleROI = try #require(result.first { $0.category == .nipple })
+    let areolaROI = try #require(result.first { $0.category == .areola })
 
     // 乳輪は検出枠そのまま
     #expect(abs(areolaROI.rect.width - 0.1) < 0.0001)
@@ -1965,4 +1963,46 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     )
     #expect(result.count == 1)
     #expect(result.first?.id == trueROI.id)
+}
+
+/// クロップ内の座標が画像全体の座標へ正しく移されること。
+/// ここがずれると、小さいコマで見つけた対象が別の場所へマスクされる。
+@Test func multiScaleDetectionMapsCropCoordinatesToImage() {
+    let region = NormalizedRect(x: 0.5, y: 0.25, width: 0.4, height: 0.5)
+    // クロップの中心にある枠
+    let inCrop = NormalizedRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5)
+    let mapped = MultiScaleDetection.mapToImage(inCrop, region: region)
+    #expect(abs(mapped.x - 0.6) < 0.0001)
+    #expect(abs(mapped.y - 0.375) < 0.0001)
+    #expect(abs(mapped.width - 0.2) < 0.0001)
+    #expect(abs(mapped.height - 0.25) < 0.0001)
+}
+
+/// 全体推論とクロップ推論で同じ対象を二重に拾った場合、信頼度の高い方だけを残すこと。
+@Test func multiScaleDetectionKeepsHigherConfidenceOnOverlap() {
+    let rect = NormalizedRect(x: 0.3, y: 0.3, width: 0.1, height: 0.1)
+    let low = MosaicROI(rect: rect, confidence: 0.4, source: "anime-censor", category: .femaleGenital)
+    let high = MosaicROI(
+        rect: NormalizedRect(x: 0.305, y: 0.305, width: 0.1, height: 0.1),
+        confidence: 0.8, source: "anime-censor", category: .femaleGenital
+    )
+    // 別カテゴリが同じ位置にある場合は統合しない
+    let other = MosaicROI(rect: rect, confidence: 0.5, source: "anime-censor", category: .maleGenital)
+    let result = MultiScaleDetection.dedupe([low, high, other])
+    #expect(result.count == 2)
+    #expect(result.contains { $0.category == .maleGenital })
+    #expect(result.first { $0.category == .femaleGenital }?.confidence == 0.8)
+}
+
+/// 人物未検出時の代替タイルが画像全体を覆い、隣接タイルが重複していること
+/// （境界に跨る対象が分断されないため）。
+@Test func multiScaleTileRegionsCoverImageWithOverlap() {
+    let tiles = MultiScaleDetection.tileRegions()
+    #expect(tiles.count == 4)
+    // 右端・下端まで到達する
+    #expect(abs((tiles.map { $0.x + $0.width }.max() ?? 0) - 1.0) < 0.0001)
+    #expect(abs((tiles.map { $0.y + $0.height }.max() ?? 0) - 1.0) < 0.0001)
+    // 横に隣接するタイルが重なっている
+    #expect(tiles[0].intersection(tiles[1]) != nil)
+    #expect(tiles[0].intersection(tiles[2]) != nil)
 }

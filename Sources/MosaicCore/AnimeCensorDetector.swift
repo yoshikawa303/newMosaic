@@ -270,6 +270,86 @@ public final class AnimeCensorDetector {
             )
         }
     }
+
+    /// 全体画像に加えて人物クロップごとにも推論して統合する。
+    ///
+    /// モデル入力が640x640のため、1ページに複数コマがある漫画では小さいコマの対象部位が
+    /// 数ピクセルまで縮小されて検出できない（GUI報告: 下段コマの男性器が自動検出されない）。
+    /// 実写側（`PhotoCensorDetector`）では Build 39 で同じ対策を入れており、
+    /// アニメ側にだけ無かったものを揃える。
+    public func detect(
+        in image: CGImage,
+        personBounds: [NormalizedRect],
+        confidenceThreshold: Double = 0.3
+    ) throws -> [MosaicROI] {
+        try MultiScaleDetection.detect(
+            in: image,
+            personBounds: personBounds,
+            wholeImage: { try self.detect(in: $0, confidenceThreshold: confidenceThreshold) }
+        )
+    }
+}
+
+/// 全体画像＋人物クロップの多重スケール推論と、その結果の統合（純ロジック。単体テスト可能）。
+/// アニメ・実写の両検出器で共有する。
+public enum MultiScaleDetection {
+    /// 人物未検出時の代替クロップ領域（2x2タイル。境界で対象が分断されないよう20%重複）。
+    public static func tileRegions() -> [NormalizedRect] {
+        let size = 0.6
+        return [
+            NormalizedRect(x: 0.0, y: 0.0, width: size, height: size),
+            NormalizedRect(x: 0.4, y: 0.0, width: size, height: size),
+            NormalizedRect(x: 0.0, y: 0.4, width: size, height: size),
+            NormalizedRect(x: 0.4, y: 0.4, width: size, height: size)
+        ]
+    }
+
+    /// クロップ内の正規化座標を画像全体の正規化座標へ移す。
+    public static func mapToImage(_ rect: NormalizedRect, region: NormalizedRect) -> NormalizedRect {
+        NormalizedRect(
+            x: region.x + rect.x * region.width,
+            y: region.y + rect.y * region.height,
+            width: rect.width * region.width,
+            height: rect.height * region.height
+        ).clamped()
+    }
+
+    /// 全体・クロップの重複検出を同カテゴリ内IoUで統合する（信頼度の高い方を残す）。
+    public static func dedupe(_ rois: [MosaicROI], iouThreshold: Double = 0.45) -> [MosaicROI] {
+        var kept: [MosaicROI] = []
+        for roi in rois.sorted(by: { $0.confidence > $1.confidence }) {
+            let overlaps = kept.contains { existing in
+                existing.category == roi.category && existing.rect.iou(with: roi.rect) > iouThreshold
+            }
+            if !overlaps { kept.append(roi) }
+        }
+        return kept
+    }
+
+    static func detect(
+        in image: CGImage,
+        personBounds: [NormalizedRect],
+        wholeImage: (CGImage) throws -> [MosaicROI]
+    ) throws -> [MosaicROI] {
+        var results = (try? wholeImage(image)) ?? []
+        let regions = personBounds.isEmpty
+            ? tileRegions()
+            : personBounds.map { $0.expanded(scale: 1.15).clamped() }
+        let imageSize = CGSize(width: image.width, height: image.height)
+        for region in regions {
+            let cropRect = region.cgRect(imageSize: imageSize, origin: .topLeft)
+            guard cropRect.width >= 64, cropRect.height >= 64,
+                  region.width > 0.01, region.height > 0.01,
+                  let crop = image.cropping(to: cropRect) else { continue }
+            let cropROIs = (try? wholeImage(crop)) ?? []
+            results.append(contentsOf: cropROIs.map { roi in
+                var mapped = roi
+                mapped.rect = mapToImage(roi.rect, region: region)
+                return mapped
+            })
+        }
+        return dedupe(results)
+    }
 }
 
 /// アニメ・イラスト向けの人物検出器（バウンディングボックス）。
@@ -339,52 +419,11 @@ public final class PhotoCensorDetector {
         personBounds: [NormalizedRect],
         confidenceThreshold: Double = 0.2
     ) throws -> [MosaicROI] {
-        var results = (try? detect(in: image, confidenceThreshold: confidenceThreshold)) ?? []
-        let regions = personBounds.isEmpty
-            ? Self.tileRegions()
-            : personBounds.map { $0.expanded(scale: 1.15).clamped() }
-        let imageSize = CGSize(width: image.width, height: image.height)
-        for region in regions {
-            let cropRect = region.cgRect(imageSize: imageSize, origin: .topLeft)
-            guard cropRect.width >= 64, cropRect.height >= 64,
-                  region.width > 0.01, region.height > 0.01,
-                  let crop = image.cropping(to: cropRect) else { continue }
-            let cropROIs = (try? detect(in: crop, confidenceThreshold: confidenceThreshold)) ?? []
-            // クロップ内正規化座標 → 画像全体の正規化座標へ変換
-            results.append(contentsOf: cropROIs.map { roi in
-                var mapped = roi
-                mapped.rect = NormalizedRect(
-                    x: region.x + roi.rect.x * region.width,
-                    y: region.y + roi.rect.y * region.height,
-                    width: roi.rect.width * region.width,
-                    height: roi.rect.height * region.height
-                ).clamped()
-                return mapped
-            })
-        }
-        return Self.dedupe(results)
+        try MultiScaleDetection.detect(
+            in: image,
+            personBounds: personBounds,
+            wholeImage: { try self.detect(in: $0, confidenceThreshold: confidenceThreshold) }
+        )
     }
 
-    /// 人物未検出時の代替クロップ領域（2x2タイル。境界で対象が分断されないよう20%重複）。
-    static func tileRegions() -> [NormalizedRect] {
-        let size = 0.6
-        return [
-            NormalizedRect(x: 0.0, y: 0.0, width: size, height: size),
-            NormalizedRect(x: 0.4, y: 0.0, width: size, height: size),
-            NormalizedRect(x: 0.0, y: 0.4, width: size, height: size),
-            NormalizedRect(x: 0.4, y: 0.4, width: size, height: size)
-        ]
-    }
-
-    /// 全体・クロップの重複検出を同カテゴリ内IoUで統合する（信頼度の高い方を残す）。
-    static func dedupe(_ rois: [MosaicROI], iouThreshold: Double = 0.45) -> [MosaicROI] {
-        var kept: [MosaicROI] = []
-        for roi in rois.sorted(by: { $0.confidence > $1.confidence }) {
-            let overlaps = kept.contains { existing in
-                existing.category == roi.category && existing.rect.iou(with: roi.rect) > iouThreshold
-            }
-            if !overlaps { kept.append(roi) }
-        }
-        return kept
-    }
 }

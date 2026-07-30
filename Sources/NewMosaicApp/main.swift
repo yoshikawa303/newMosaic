@@ -590,7 +590,13 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
             detectorAvailable = animeCensorDetector != nil
             if let detector = animeCensorDetector {
                 do {
-                    let detected = try detector.detect(in: input.image)
+                    // 全体画像＋人物クロップの多重スケール推論。1ページに複数コマがある漫画では
+                    // 小さいコマの対象部位が640px入力で数ピクセルへ縮小され検出できないため
+                    // （GUI報告: 下段コマの男性器が自動検出されない）。実写側と同じ方式に揃えた。
+                    let detected = try detector.detect(
+                        in: input.image,
+                        personBounds: snapshot.personBounds
+                    )
                     animeDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
