@@ -40,6 +40,16 @@
 - 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "SegmentMask"' --last 10m`
 - 削除: アプリ独自ファイルは作成しない。OSのUnified Logging保持方針に従う。
 
+## 検出後処理診断（v0.0.00101〜）
+
+- 経路: macOS Unified Logging（subsystem `com.yoshikawa.newMosaic`、category `Detection`）。
+- 対象: `DetectedROIRefiner.dropOversizedGenitalROIs` の判定（`genitalSize` 行）。
+- 記録項目: カテゴリ、検出スコア、ROIの正規化面積、体格基準にした人物領域の面積、面積比、しきい値、人物検出数、判定結果（keep/drop）。
+- 目的: 性器の誤検出が残る／正しいROIが消える場合に、しきい値を推測で動かさず実測値で切り分ける。
+- 画像内容・ファイルパス・個人情報は記録しない（数値のみ）。
+- 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Detection"' --last 10m`
+- 画面からは ヘルプ＞デバッグ＞デバッグログ で確認できる。
+
 ## アプリ側イベントログ・デバッグログ画面（2026-07-25〜）
 
 - 経路: macOS Unified Logging。`Sources/NewMosaicApp/main.swift` の `enum AppLog`（subsystem

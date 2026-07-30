@@ -1916,3 +1916,53 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(all.firstIndex(of: .areola) == all.count - 1)
     #expect(MosaicTargetCategory.areola.displayName == "乳輪")
 }
+
+/// 体格基準の人物領域は「ROIの6割以上を含むもののうち面積最小」を採ること。
+///
+/// 人物検出は複数人をまとめた過大な枠を返すことがある（実測: コマ全体を覆う人物枠）。
+/// 重なり面積が最大のものを基準にすると、その過大な枠が選ばれて面積比が薄まり、
+/// 誤検出を見逃していた（v0.0.00100で12%しきい値を入れても除去できなかった実例）。
+@Test func bodyScaleReferencePicksTightestContainingPerson() throws {
+    let roi = NormalizedRect(x: 0.30, y: 0.88, width: 0.12, height: 0.13)
+    // 締まった人物枠（下段コマの1人）
+    let tight = NormalizedRect(x: 0.29, y: 0.80, width: 0.40, height: 0.18)
+    // コマ全体を覆う過大な人物枠
+    let loose = NormalizedRect(x: 0.10, y: 0.81, width: 0.79, height: 0.17)
+    let reference = try #require(DetectedROIRefiner.bodyScaleReference(
+        for: roi, persons: [loose, tight]
+    ))
+    #expect(abs(reference.area - tight.area) < 0.0001)
+    // 端がわずかに重なるだけの枠は基準に選ばない
+    let sliver = NormalizedRect(x: 0.41, y: 0.88, width: 0.05, height: 0.05)
+    let reference2 = try #require(DetectedROIRefiner.bodyScaleReference(
+        for: roi, persons: [sliver, tight]
+    ))
+    #expect(abs(reference2.area - tight.area) < 0.0001)
+}
+
+/// 実測した画面の座標比で、誤検出が除去され正しいROIが残ることを確認する。
+/// 画面実測（1400x1900相当を正規化）:
+/// - 下段コマの誤検出ROI: 人物枠（締まった方）の約22% → 除去
+/// - 上段コマの正しいROI: 人物枠の約1.4% → 保持
+@Test func measuredScreenCaseDropsFalseGenitalAndKeepsTrueOne() {
+    // 上段コマの人物枠（ページのほぼ全体）
+    let personTop = NormalizedRect(x: 0.04, y: 0.02, width: 0.91, height: 0.79)
+    // 下段コマの締まった人物枠と、コマ全体を覆う過大な枠
+    let personBottomTight = NormalizedRect(x: 0.29, y: 0.80, width: 0.40, height: 0.18)
+    let personBottomLoose = NormalizedRect(x: 0.10, y: 0.81, width: 0.79, height: 0.17)
+
+    let trueROI = MosaicROI(
+        rect: NormalizedRect(x: 0.40, y: 0.58, width: 0.08, height: 0.13),
+        confidence: 0.6, source: "anime-censor", category: .femaleGenital
+    )
+    let falseROI = MosaicROI(
+        rect: NormalizedRect(x: 0.30, y: 0.88, width: 0.12, height: 0.13),
+        confidence: 0.4, source: "anime-censor", category: .femaleGenital
+    )
+    let result = DetectedROIRefiner.dropOversizedGenitalROIs(
+        from: [trueROI, falseROI],
+        persons: [personTop, personBottomTight, personBottomLoose]
+    )
+    #expect(result.count == 1)
+    #expect(result.first?.id == trueROI.id)
+}
