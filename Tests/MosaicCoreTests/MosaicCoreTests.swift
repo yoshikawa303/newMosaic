@@ -1820,3 +1820,99 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         from: candidates, ifDetectorFound: [roi("anime-censor", .maleGenital)]
     ).count == 2)
 }
+
+/// 検出器の乳首枠を「乳首（縮小）」と「乳輪（枠そのまま）」の2つへ分けること。
+/// 検出枠は乳輪相当の大きさで返るため、そのままでは「乳首単位で欲しい」要望を満たせない。
+@Test func nippleDetectionSplitsIntoNippleAndAreola() {
+    let detected = MosaicROI(
+        rect: NormalizedRect(x: 0.4, y: 0.4, width: 0.1, height: 0.1),
+        confidence: 0.8, source: "anime-censor", category: .nipple
+    )
+    let result = DetectedROIRefiner.splitNippleAndAreola([detected])
+    #expect(result.count == 2)
+
+    let nipple = try? #require(result.first { $0.category == .nipple })
+    let areola = try? #require(result.first { $0.category == .areola })
+    let nippleROI = try! #require(nipple)
+    let areolaROI = try! #require(areola)
+
+    // 乳輪は検出枠そのまま
+    #expect(abs(areolaROI.rect.width - 0.1) < 0.0001)
+    // 乳首は縮小され、乳輪の内側に収まる
+    #expect(nippleROI.rect.width < areolaROI.rect.width)
+    #expect(abs(nippleROI.rect.width - 0.1 * DetectedROIRefiner.nippleShrinkScale) < 0.0001)
+    // 中心は一致する
+    #expect(abs((nippleROI.rect.x + nippleROI.rect.width / 2) - 0.45) < 0.0001)
+    // 面積比が0.5未満なのでIoUベースの重複除去（>0.5）で統合されず両方残せる
+    #expect(nippleROI.rect.iou(with: areolaROI.rect) < 0.5)
+    // IDは別（同一IDだとレイヤ一覧・選択が壊れる）
+    #expect(nippleROI.id != areolaROI.id)
+}
+
+/// 手動追加した乳首ROIは分割しないこと（ユーザーが指定した範囲を勝手に縮めない）。
+@Test func manualNippleROIIsNotSplit() {
+    let manual = MosaicROI(
+        rect: NormalizedRect(x: 0.4, y: 0.4, width: 0.1, height: 0.1),
+        confidence: 1, source: "manual", category: .nipple
+    )
+    let result = DetectedROIRefiner.splitNippleAndAreola([manual])
+    #expect(result.count == 1)
+    #expect(result[0].category == .nipple)
+    #expect(abs(result[0].rect.width - 0.1) < 0.0001)
+}
+
+/// 人物領域に対して大きすぎる性器ROIを誤検出として落とすこと。
+/// 実測では正しいROIは人物領域の約1.8%、寝具の陰影を誤検出したROIは約17%だった。
+@Test func oversizedGenitalROIsAreDroppedRelativeToPerson() {
+    // 人物領域: 0.5 x 0.5 = 面積0.25
+    let person = NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)
+    // 正しいROI: 面積0.0045 → 人物比1.8%
+    let valid = MosaicROI(
+        rect: NormalizedRect(x: 0.3, y: 0.3, width: 0.05, height: 0.09),
+        confidence: 0.6, source: "anime-censor", category: .femaleGenital
+    )
+    // 誤検出ROI: 面積0.0425 → 人物比17%
+    let oversized = MosaicROI(
+        rect: NormalizedRect(x: 0.15, y: 0.15, width: 0.17, height: 0.25),
+        confidence: 0.4, source: "anime-censor", category: .femaleGenital
+    )
+    let result = DetectedROIRefiner.dropOversizedGenitalROIs(from: [valid, oversized], persons: [person])
+    #expect(result.count == 1)
+    #expect(abs(result[0].rect.width - 0.05) < 0.0001)
+}
+
+/// 人物が検出されていない場合は落とさないこと（部位のクローズアップ画像を壊さないため）。
+/// 手動追加ROIと性器以外のカテゴリも対象外。
+@Test func oversizedFilterSkipsWhenNoPersonOrManualOrOtherCategory() {
+    let big = NormalizedRect(x: 0.1, y: 0.1, width: 0.4, height: 0.4)
+    let person = NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)
+    func roi(_ source: String, _ category: MosaicTargetCategory) -> MosaicROI {
+        MosaicROI(rect: big, confidence: 0.5, source: source, category: category)
+    }
+    // 人物未検出
+    #expect(DetectedROIRefiner.dropOversizedGenitalROIs(
+        from: [roi("anime-censor", .femaleGenital)], persons: []
+    ).count == 1)
+    // 手動追加
+    #expect(DetectedROIRefiner.dropOversizedGenitalROIs(
+        from: [roi("manual", .femaleGenital)], persons: [person]
+    ).count == 1)
+    // 性器以外
+    #expect(DetectedROIRefiner.dropOversizedGenitalROIs(
+        from: [roi("anime-censor", .nipple)], persons: [person]
+    ).count == 1)
+}
+
+/// 「乳輪」は列挙の末尾にあり、既存カテゴリの`allCases`索引がずれていないこと。
+/// 索引は学習データ書き出しのクラス番号に対応するため、途中挿入すると既存データが壊れる。
+@Test func areolaCategoryIsAppendedWithoutShiftingExistingIndices() {
+    let all = MosaicTargetCategory.allCases
+    #expect(all.firstIndex(of: .nipple) == 0)
+    #expect(all.firstIndex(of: .femaleGenital) == 1)
+    #expect(all.firstIndex(of: .maleGenital) == 2)
+    #expect(all.firstIndex(of: .other) == 3)
+    #expect(all.firstIndex(of: .eyes) == 4)
+    #expect(all.firstIndex(of: .lowerFace) == 5)
+    #expect(all.firstIndex(of: .areola) == all.count - 1)
+    #expect(MosaicTargetCategory.areola.displayName == "乳輪")
+}

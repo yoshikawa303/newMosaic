@@ -595,6 +595,10 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
+                    rois = DetectedROIRefiner.dropOversizedGenitalROIs(
+                        from: rois, persons: snapshot.personBounds
+                    )
+                    rois = DetectedROIRefiner.splitNippleAndAreola(rois)
                 } catch {
                     detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
                 }
@@ -608,6 +612,10 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
+                    rois = DetectedROIRefiner.dropOversizedGenitalROIs(
+                        from: rois, persons: snapshot.personBounds
+                    )
+                    rois = DetectedROIRefiner.splitNippleAndAreola(rois)
                 } catch {
                     detectorFailures.append("実写部位検出: \(error.localizedDescription)")
                 }
@@ -1844,7 +1852,10 @@ final class MosaicWindowController: NSObject {
         let defaults = AppSettings.shared
         for (category, button) in categoryFilterChecks {
             let key = "GenerateFilter.category.\(category.rawValue)"
-            button.state = (defaults.object(forKey: key) as? Bool ?? true) ? .on : .off
+            // 「乳輪」は乳首を含む上位範囲のため既定OFF（両方ONにすると同じ場所へ
+            // 大小2つのROIが重なる）。乳輪まで覆いたい場合にユーザーがONにする。
+            let fallback = category != .areola
+            button.state = (defaults.object(forKey: key) as? Bool ?? fallback) ? .on : .off
         }
         generatePersonCheckbox.state = (defaults.object(forKey: "GenerateFilter.person") as? Bool ?? true) ? .on : .off
         generatePoseCheckbox.state = (defaults.object(forKey: "GenerateFilter.pose") as? Bool ?? true) ? .on : .off
@@ -2523,13 +2534,14 @@ final class MosaicWindowController: NSObject {
         let generateLayerRow = NSStackView(views: [generatePersonCheckbox, generatePoseCheckbox])
         generateLayerRow.orientation = .horizontal
         generateLayerRow.spacing = 10
-        // 候補カテゴリは3列表示（1行目=顔領域、2行目=部位、3行目=その他）
+        // 候補カテゴリは3列表示（1行目=顔領域、2行目=胸部、3行目=性器、4行目=その他）
         func categoryButton(_ category: MosaicTargetCategory) -> NSView {
             categoryFilterChecks.first(where: { $0.category == category })?.button ?? NSView()
         }
         let categories = NSGridView(views: [
             [categoryButton(.eyes), categoryButton(.lowerFace), NSGridCell.emptyContentView],
-            [categoryButton(.nipple), categoryButton(.femaleGenital), categoryButton(.maleGenital)],
+            [categoryButton(.nipple), categoryButton(.areola), NSGridCell.emptyContentView],
+            [categoryButton(.femaleGenital), categoryButton(.maleGenital), NSGridCell.emptyContentView],
             [categoryButton(.other), NSGridCell.emptyContentView, NSGridCell.emptyContentView]
         ])
         categories.rowSpacing = 3

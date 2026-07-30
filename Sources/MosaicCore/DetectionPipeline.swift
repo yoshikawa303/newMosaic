@@ -956,3 +956,55 @@ public enum PoseDerivedROIFilter {
         return rois.filter { $0.source != "pose-groin" }
     }
 }
+
+/// 検出器の出力を、より使いやすいROIへ整えるための後処理（純ロジック。単体テスト可能）。
+public enum DetectedROIRefiner {
+    /// 検出器の乳首枠を「乳首」と「乳輪」の2つのROIへ分ける倍率。
+    ///
+    /// `nipple_f` クラスの枠は乳輪（色の変わった領域）とほぼ同じ大きさで返るため、
+    /// そのままマスクすると「乳首単位で欲しいのに乳輪まで覆われる」ことになる（GUI報告）。
+    /// 枠そのままを「乳輪」、中心へ縮小した範囲を「乳首」として別カテゴリで扱う。
+    public static let nippleShrinkScale = 0.55
+
+    /// 乳首検出から乳輪ROIを派生させ、乳首ROI自体は乳首相当の大きさへ縮小する。
+    /// どちらを使うかは候補カテゴリのチェックで選ぶ（両方ONでも面積比が0.3程度のため
+    /// IoUベースの重複除去では統合されず、両方残る）。
+    public static func splitNippleAndAreola(_ rois: [MosaicROI]) -> [MosaicROI] {
+        rois.flatMap { roi -> [MosaicROI] in
+            guard roi.category == .nipple, roi.source != "manual" else { return [roi] }
+            var areola = roi
+            areola.id = UUID()
+            areola.category = .areola
+            areola.source = roi.source + "-areola"
+
+            var nipple = roi
+            nipple.rect = roi.rect.expanded(scale: nippleShrinkScale).clamped()
+            return [nipple, areola]
+        }
+    }
+
+    /// 人物領域に対して大きすぎる性器ROIを誤検出として落とす。
+    ///
+    /// 実測（GUI報告の画像）では、正しい性器ROIは人物領域の約1.8%だったのに対し、
+    /// 寝具の陰影を誤検出したROIは約17%だった。人物は全身が枠になるため、性器が
+    /// 人物領域の十数%を占めることは解剖学的に起こらない。
+    /// 人物領域が判明しないROI（人物未検出・部位のクローズアップ等）は落とさない。
+    public static let maximumGenitalAreaRatioInPerson = 0.12
+
+    public static func dropOversizedGenitalROIs(from rois: [MosaicROI], persons: [NormalizedRect]) -> [MosaicROI] {
+        guard !persons.isEmpty else { return rois }
+        let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
+        return rois.filter { roi in
+            guard genitals.contains(roi.category), roi.source != "manual" else { return true }
+            // ROIを最もよく含む人物領域を選ぶ（重なり面積が最大のもの）
+            let containing = persons
+                .compactMap { person -> (person: NormalizedRect, overlap: Double)? in
+                    guard let intersection = person.intersection(roi.rect) else { return nil }
+                    return (person, intersection.area)
+                }
+                .max { $0.overlap < $1.overlap }
+            guard let containing, containing.person.area > 0, roi.rect.area > 0 else { return true }
+            return roi.rect.area / containing.person.area <= maximumGenitalAreaRatioInPerson
+        }
+    }
+}

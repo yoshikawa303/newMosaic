@@ -122,6 +122,11 @@ public enum MosaicTargetCategory: String, Codable, Sendable, CaseIterable {
     case eyes
     /// 眼窩下〜オトガイ（医療マスク・ガスマスク・犬の鼻口等で覆う想定）
     case lowerFace
+    /// 乳輪（乳首を含む色の変わった領域）。検出器の乳首枠は乳輪相当の大きさで返るため、
+    /// 「乳首」を枠より小さい範囲、「乳輪」を枠そのままとして別カテゴリへ分けている。
+    /// 既存の保存データとの互換のため、必ず列挙の末尾へ追加する（`allCases`の索引が
+    /// 学習データ書き出しのクラス番号に対応しているため、途中挿入は既存データを壊す）。
+    case areola
 
     public var displayName: String {
         switch self {
@@ -131,6 +136,7 @@ public enum MosaicTargetCategory: String, Codable, Sendable, CaseIterable {
         case .other: return "その他"
         case .eyes: return "目元"
         case .lowerFace: return "眼窩下〜あご"
+        case .areola: return "乳輪"
         }
     }
 }
