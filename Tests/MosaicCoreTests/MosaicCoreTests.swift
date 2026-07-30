@@ -1505,24 +1505,6 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(luminance(rectRestricted, x: 24, y: 24) > 200)
 }
 
-@Test func legacyRegionForegroundEngineReturnsOneMaskPerROI() throws {
-    // 初期実装エンジンが現行と同じ契約（ROIと同数・同順のマスクを返す）を満たすこと。
-    // 平坦な画像ではVisionが前景を返さないため、図形ベースへフォールバックする経路も通る。
-    let image = try makeSolidImage(width: 120, height: 90)
-    let rois = [
-        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3),
-                  confidence: 1, source: "test", shape: .ellipse),
-        MosaicROI(rect: NormalizedRect(x: 0.5, y: 0.5, width: 0.3, height: 0.3),
-                  confidence: 1, source: "test", shape: .rectangle)
-    ]
-    let extent = CGRect(x: 0, y: 0, width: 120, height: 90)
-    let masks = try LegacyRegionForegroundSegmentEngine().createMasks(for: rois, in: image, extent: extent)
-    #expect(masks.count == rois.count)
-    for mask in masks {
-        #expect(mask.extent.width > 0)
-        #expect(mask.extent.height > 0)
-    }
-}
 
 /// 回転ROIで、初期実装エンジンの制限矩形が「傾いた選択範囲」に追従することを実測する。
 /// 当時（Build 41）は回転機能が無く`roi.rect`（無回転）で切っていたため、回転ROIでは
@@ -1704,12 +1686,12 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         confidence: 0.9,
         source: "test",
         category: .maleGenital,
-        maskEngine: "regionForegroundLegacy",
+        maskEngine: "samShape",
         maskThreshold: 0.5
     )
     let encoded = try JSONEncoder().encode(roi)
     let decoded = try JSONDecoder().decode(MosaicROI.self, from: encoded)
-    #expect(decoded.maskEngine == "regionForegroundLegacy")
+    #expect(decoded.maskEngine == "samShape")
     #expect(decoded.maskThreshold == 0.5)
 
     let legacyJSON = """
@@ -1859,47 +1841,7 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(abs(result[0].rect.width - 0.1) < 0.0001)
 }
 
-/// 人物領域に対して大きすぎる性器ROIを誤検出として落とすこと。
-/// 実測では正しいROIは人物領域の約1.8%、寝具の陰影を誤検出したROIは約17%だった。
-@Test func oversizedGenitalROIsAreDroppedRelativeToPerson() {
-    // 人物領域: 0.5 x 0.5 = 面積0.25
-    let person = NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)
-    // 正しいROI: 面積0.0045 → 人物比1.8%
-    let valid = MosaicROI(
-        rect: NormalizedRect(x: 0.3, y: 0.3, width: 0.05, height: 0.09),
-        confidence: 0.6, source: "anime-censor", category: .femaleGenital
-    )
-    // 誤検出ROI: 面積0.0425 → 人物比17%
-    let oversized = MosaicROI(
-        rect: NormalizedRect(x: 0.15, y: 0.15, width: 0.17, height: 0.25),
-        confidence: 0.4, source: "anime-censor", category: .femaleGenital
-    )
-    let result = DetectedROIRefiner.dropOversizedGenitalROIs(from: [valid, oversized], persons: [person])
-    #expect(result.count == 1)
-    #expect(abs(result[0].rect.width - 0.05) < 0.0001)
-}
 
-/// 人物が検出されていない場合は落とさないこと（部位のクローズアップ画像を壊さないため）。
-/// 手動追加ROIと性器以外のカテゴリも対象外。
-@Test func oversizedFilterSkipsWhenNoPersonOrManualOrOtherCategory() {
-    let big = NormalizedRect(x: 0.1, y: 0.1, width: 0.4, height: 0.4)
-    let person = NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.5)
-    func roi(_ source: String, _ category: MosaicTargetCategory) -> MosaicROI {
-        MosaicROI(rect: big, confidence: 0.5, source: source, category: category)
-    }
-    // 人物未検出
-    #expect(DetectedROIRefiner.dropOversizedGenitalROIs(
-        from: [roi("anime-censor", .femaleGenital)], persons: []
-    ).count == 1)
-    // 手動追加
-    #expect(DetectedROIRefiner.dropOversizedGenitalROIs(
-        from: [roi("manual", .femaleGenital)], persons: [person]
-    ).count == 1)
-    // 性器以外
-    #expect(DetectedROIRefiner.dropOversizedGenitalROIs(
-        from: [roi("anime-censor", .nipple)], persons: [person]
-    ).count == 1)
-}
 
 /// 「乳輪」は列挙の末尾にあり、既存カテゴリの`allCases`索引がずれていないこと。
 /// 索引は学習データ書き出しのクラス番号に対応するため、途中挿入すると既存データが壊れる。
@@ -1915,55 +1857,7 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(MosaicTargetCategory.areola.displayName == "乳輪")
 }
 
-/// 体格基準の人物領域は「ROIの6割以上を含むもののうち面積最小」を採ること。
-///
-/// 人物検出は複数人をまとめた過大な枠を返すことがある（実測: コマ全体を覆う人物枠）。
-/// 重なり面積が最大のものを基準にすると、その過大な枠が選ばれて面積比が薄まり、
-/// 誤検出を見逃していた（v0.0.00100で12%しきい値を入れても除去できなかった実例）。
-@Test func bodyScaleReferencePicksTightestContainingPerson() throws {
-    let roi = NormalizedRect(x: 0.30, y: 0.88, width: 0.12, height: 0.13)
-    // 締まった人物枠（下段コマの1人）
-    let tight = NormalizedRect(x: 0.29, y: 0.80, width: 0.40, height: 0.18)
-    // コマ全体を覆う過大な人物枠
-    let loose = NormalizedRect(x: 0.10, y: 0.81, width: 0.79, height: 0.17)
-    let reference = try #require(DetectedROIRefiner.bodyScaleReference(
-        for: roi, persons: [loose, tight]
-    ))
-    #expect(abs(reference.area - tight.area) < 0.0001)
-    // 端がわずかに重なるだけの枠は基準に選ばない
-    let sliver = NormalizedRect(x: 0.41, y: 0.88, width: 0.05, height: 0.05)
-    let reference2 = try #require(DetectedROIRefiner.bodyScaleReference(
-        for: roi, persons: [sliver, tight]
-    ))
-    #expect(abs(reference2.area - tight.area) < 0.0001)
-}
 
-/// 実測した画面の座標比で、誤検出が除去され正しいROIが残ることを確認する。
-/// 画面実測（1400x1900相当を正規化）:
-/// - 下段コマの誤検出ROI: 人物枠（締まった方）の約22% → 除去
-/// - 上段コマの正しいROI: 人物枠の約1.4% → 保持
-@Test func measuredScreenCaseDropsFalseGenitalAndKeepsTrueOne() {
-    // 上段コマの人物枠（ページのほぼ全体）
-    let personTop = NormalizedRect(x: 0.04, y: 0.02, width: 0.91, height: 0.79)
-    // 下段コマの締まった人物枠と、コマ全体を覆う過大な枠
-    let personBottomTight = NormalizedRect(x: 0.29, y: 0.80, width: 0.40, height: 0.18)
-    let personBottomLoose = NormalizedRect(x: 0.10, y: 0.81, width: 0.79, height: 0.17)
-
-    let trueROI = MosaicROI(
-        rect: NormalizedRect(x: 0.40, y: 0.58, width: 0.08, height: 0.13),
-        confidence: 0.6, source: "anime-censor", category: .femaleGenital
-    )
-    let falseROI = MosaicROI(
-        rect: NormalizedRect(x: 0.30, y: 0.88, width: 0.12, height: 0.13),
-        confidence: 0.4, source: "anime-censor", category: .femaleGenital
-    )
-    let result = DetectedROIRefiner.dropOversizedGenitalROIs(
-        from: [trueROI, falseROI],
-        persons: [personTop, personBottomTight, personBottomLoose]
-    )
-    #expect(result.count == 1)
-    #expect(result.first?.id == trueROI.id)
-}
 
 /// クロップ内の座標が画像全体の座標へ正しく移されること。
 /// ここがずれると、小さいコマで見つけた対象が別の場所へマスクされる。

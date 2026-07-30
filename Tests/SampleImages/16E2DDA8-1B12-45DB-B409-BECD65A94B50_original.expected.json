@@ -1,0 +1,89 @@
+{
+  "note": "22ページ目。上段=アップのコマ、下段=引きのコマ。下段は人物が小さく検出が難しい。乳首3件・性器3件が正解。v0.0.00104時点の実測結果を目視照合して確定した基準。 乳首検出は「乳首（枠の0.55倍）」と「乳輪（枠そのまま）」へ分割されるため、両方を期待値に含む。人物マスクの被覆率上限0.90は「人物枠を塗り潰していない」ことの担保。",
+  "minimumRecall": 1.0,
+  "maximumFalsePositives": 0,
+  "expected": [
+    {
+      "category": "nipple",
+      "rect": {
+        "x": 0.276,
+        "y": 0.4085,
+        "width": 0.0449,
+        "height": 0.0314
+      }
+    },
+    {
+      "category": "areola",
+      "rect": {
+        "x": 0.2576,
+        "y": 0.3957,
+        "width": 0.0816,
+        "height": 0.0571
+      }
+    },
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.546,
+        "y": 0.6227,
+        "width": 0.1782,
+        "height": 0.1259
+      }
+    },
+    {
+      "category": "femaleGenital",
+      "rect": {
+        "x": 0.4097,
+        "y": 0.5825,
+        "width": 0.0761,
+        "height": 0.1321
+      }
+    },
+    {
+      "category": "nipple",
+      "rect": {
+        "x": 0.2507,
+        "y": 0.874,
+        "width": 0.0146,
+        "height": 0.0106
+      }
+    },
+    {
+      "category": "areola",
+      "rect": {
+        "x": 0.2447,
+        "y": 0.8697,
+        "width": 0.0266,
+        "height": 0.0193
+      }
+    },
+    {
+      "category": "nipple",
+      "rect": {
+        "x": 0.1943,
+        "y": 0.897,
+        "width": 0.0138,
+        "height": 0.0105
+      }
+    },
+    {
+      "category": "areola",
+      "rect": {
+        "x": 0.1887,
+        "y": 0.8927,
+        "width": 0.025,
+        "height": 0.0191
+      }
+    },
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.6416,
+        "y": 0.8954,
+        "width": 0.0548,
+        "height": 0.0482
+      }
+    }
+  ],
+  "maximumPersonMaskCoverage": 0.9
+}

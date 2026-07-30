@@ -959,11 +959,6 @@ public enum PoseDerivedROIFilter {
 
 /// 検出器の出力を、より使いやすいROIへ整えるための後処理（純ロジック。単体テスト可能）。
 public enum DetectedROIRefiner {
-    /// 検出後処理の診断ログ（ヘルプ＞デバッグ＞デバッグログで確認できる）。
-    /// 誤検出の切り分けを推測ではなく数値で行うために、判定に使った値をすべて残す。
-    /// 画像内容・ファイルパスは記録しない。
-    static let logger = Logger(subsystem: "com.yoshikawa.newMosaic", category: "Detection")
-
     /// 検出器の乳首枠を「乳首」と「乳輪」の2つのROIへ分ける倍率。
     ///
     /// `nipple_f` クラスの枠は乳輪（色の変わった領域）とほぼ同じ大きさで返るため、
@@ -988,59 +983,4 @@ public enum DetectedROIRefiner {
         }
     }
 
-    /// 人物領域に対して大きすぎる性器ROIを誤検出として落とす。
-    ///
-    /// 実測（GUI報告の画像）では、正しい性器ROIは人物領域の約1.8%だったのに対し、
-    /// 寝具の陰影を誤検出したROIは約17%だった。人物は全身が枠になるため、性器が
-    /// 人物領域の十数%を占めることは解剖学的に起こらない。
-    /// 人物領域が判明しないROI（人物未検出・部位のクローズアップ等）は落とさない。
-    public static let maximumGenitalAreaRatioInPerson = 0.12
-
-    /// 基準にする人物領域として認めるための、ROIの何割がその人物領域に入っているかの下限。
-    /// 端がわずかに重なっただけの人物領域を基準に使うと判定が不安定になるため。
-    public static let minimumROICoverageByPerson = 0.6
-
-    public static func dropOversizedGenitalROIs(from rois: [MosaicROI], persons: [NormalizedRect]) -> [MosaicROI] {
-        guard !persons.isEmpty else { return rois }
-        let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
-        return rois.filter { roi in
-            guard genitals.contains(roi.category), roi.source != "manual",
-                  roi.rect.area > 0 else { return true }
-            guard let reference = bodyScaleReference(for: roi.rect, persons: persons) else {
-                logger.info("""
-                    genitalSize category=\(roi.category.rawValue, privacy: .public) \
-                    score=\(String(format: "%.2f", roi.confidence), privacy: .public) \
-                    persons=\(persons.count) reference=none decision=keep
-                    """)
-                return true
-            }
-            let ratio = roi.rect.area / reference.area
-            let keep = ratio <= maximumGenitalAreaRatioInPerson
-            logger.info("""
-                genitalSize category=\(roi.category.rawValue, privacy: .public) \
-                score=\(String(format: "%.2f", roi.confidence), privacy: .public) \
-                roiArea=\(String(format: "%.5f", roi.rect.area), privacy: .public) \
-                refArea=\(String(format: "%.5f", reference.area), privacy: .public) \
-                ratio=\(String(format: "%.3f", ratio), privacy: .public) \
-                limit=\(String(format: "%.2f", maximumGenitalAreaRatioInPerson), privacy: .public) \
-                persons=\(persons.count) \
-                decision=\(keep ? "keep" : "drop", privacy: .public)
-                """)
-            return keep
-        }
-    }
-
-    /// ROIの体格基準に使う人物領域を選ぶ。
-    ///
-    /// ROIの6割以上を含む人物領域のうち、**面積が最小のもの**を採る。人物検出は
-    /// 複数人をまとめた過大な枠を返すことがあり（実測: コマ全体を覆う人物枠）、
-    /// 重なり面積が最大のものを選ぶと過大な枠が基準になって面積比が薄まり、
-    /// 誤検出を見逃していた。最も締まった枠を基準にすることで体格の推定が安定する。
-    static func bodyScaleReference(for rect: NormalizedRect, persons: [NormalizedRect]) -> NormalizedRect? {
-        let containing = persons.filter { person in
-            guard person.area > 0, let intersection = person.intersection(rect) else { return false }
-            return intersection.area / rect.area >= minimumROICoverageByPerson
-        }
-        return containing.min { $0.area < $1.area }
-    }
 }

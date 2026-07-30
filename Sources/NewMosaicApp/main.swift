@@ -516,46 +516,14 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                 persons = []
             }
             // キャラクターセグメンテーションで人物シルエットを付与する（実写のVisionシルエット相当）。
-            // 全体画像1回の推論では2人目以降の小さい人物のマスクが取れないことがあるため、
-            // 人物範囲ごとにクロップして個別推論する（複数人物対応。「人物3のマスクが
-            // 作成されない」報告への修正）。
+            // 経路（クロップ推論→SAM→全体画像推論）と、人物枠を塗り潰したマスクを弾く判定は
+            // コア側の `PersonSilhouetteProvider` に集約してある（実画像テストと同じ経路を通すため）。
             var personsWithMasks = persons
             if !persons.isEmpty, let segmenter = animeSegmenter {
-                // クロップ推論が「ほぼ全面」を返した（=人物と背景を分離できなかった）人物は、
-                // 全体画像1回の推論結果から該当矩形を切り出す方式へフォールバックする
-                // （背景まで巻き込むマスクを避ける。全体マスクは必要になった時だけ1回計算）。
-                var wholeImageMask: CGImage??
-                func fallbackMask(for bounds: NormalizedRect) -> CGImage? {
-                    if wholeImageMask == nil {
-                        wholeImageMask = .some(try? segmenter.characterMask(in: input.image))
-                    }
-                    guard let full = wholeImageMask ?? nil else { return nil }
-                    return AnimeSegmenter.personMask(
-                        fullMask: full,
-                        bounds: bounds,
-                        imageSize: CGSize(width: input.image.width, height: input.image.height)
-                    )
-                }
-                // `anime_seg.onnx` は「キャラクターか背景か」の二値分類のため、人物が重なる場面や
-                // 寝具の多い場面では対象を分離できず枠全体を塗ってしまう（GUI報告: 下段コマで
-                // ベッドや別人の足まで人物範囲になる）。分離に失敗したときは、枠で指定した
-                // インスタンスを取れるSAMへ切り替える（従来の全体画像フォールバックはその次）。
-                let samEngine = SAMSegmentEngine()
+                let silhouetteProvider = PersonSilhouetteProvider(segmenter: segmenter)
                 personsWithMasks = persons.map { person in
-                    var mask: CGImage?
-                    do {
-                        mask = try segmenter.personMaskByCrop(in: input.image, bounds: person.bounds)
-                    } catch {
-                        detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
-                        mask = nil
-                    }
-                    if mask == nil {
-                        mask = samEngine.instanceMask(in: input.image, box: person.bounds)
-                    }
-                    if mask == nil {
-                        mask = fallbackMask(for: person.bounds)
-                    }
-                    return PersonDetection(bounds: person.bounds, maskImage: mask)
+                    let result = silhouetteProvider.silhouette(in: input.image, bounds: person.bounds)
+                    return PersonDetection(bounds: person.bounds, maskImage: result.mask)
                 }
             }
             // アニメ骨格検出（DWPose）。関節が取れた人物は骨格レイヤ+骨格ベースの候補ROIも生成する
@@ -609,9 +577,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
-                    rois = DetectedROIRefiner.dropOversizedGenitalROIs(
-                        from: rois, persons: snapshot.personBounds
-                    )
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
                 } catch {
                     detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
@@ -626,9 +591,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.mergeCandidates(base: rois, adding: detected)
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
-                    rois = DetectedROIRefiner.dropOversizedGenitalROIs(
-                        from: rois, persons: snapshot.personBounds
-                    )
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
                 } catch {
                     detectorFailures.append("実写部位検出: \(error.localizedDescription)")
@@ -1513,7 +1475,7 @@ final class MosaicWindowController: NSObject {
         applyScaledFont(shapeControl, size: 12)
         segmentEngineControl.removeAllItems()
         segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
-        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .regionForeground) ?? 0
+        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .samShape) ?? 0
         segmentEngineControl.selectItem(at: defaultEngineIndex)
         segmentEngineControl.toolTip = "選択範囲から実際の処理マスクを生成する方式"
         segmentEngineControl.target = self
@@ -4038,7 +4000,6 @@ final class MosaicWindowController: NSObject {
                 case .visionPersonSegmentation: return VisionPersonSegmentEngine()
                 case .foregroundObjects: return ForegroundSegmentEngine()
                 case .regionForeground: return RegionForegroundSegmentEngine()
-                case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
                 case .learnedShape: return LearnedShapeSegmentEngine()
                 case .samShape: return SAMSegmentEngine()
                 }
@@ -5060,7 +5021,6 @@ final class MosaicWindowController: NSObject {
         case .visionPersonSegmentation: return VisionPersonSegmentEngine()
         case .foregroundObjects: return ForegroundSegmentEngine()
         case .regionForeground: return RegionForegroundSegmentEngine(maskThreshold: threshold)
-        case .regionForegroundLegacy: return LegacyRegionForegroundSegmentEngine()
         case .learnedShape: return LearnedShapeSegmentEngine()
         case .samShape: return SAMSegmentEngine()
         }
@@ -6569,7 +6529,7 @@ extension MosaicWindowController {
     private func loadDetectionSettings() {
         individualDetectionCheckbox.state =
             (AppSettings.shared.object(forKey: Self.individualDetectionDefaultsKey) as? Bool ?? true) ? .on : .off
-        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .regionForeground) ?? 0
+        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .samShape) ?? 0
         segmentEngineControl.selectItem(at: defaultEngineIndex)
         let threshold = AppSettings.shared.double(forKey: Self.maskThresholdDefaultsKey)
         maskThresholdSlider.doubleValue = threshold

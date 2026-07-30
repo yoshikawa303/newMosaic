@@ -1,0 +1,71 @@
+{
+  "note": "12ページ目。5コマそれぞれに男性器があり、右大ゴマに乳首1件。全コマで検出できている状態を基準とする。 乳首検出は「乳首（枠の0.55倍）」と「乳輪（枠そのまま）」へ分割されるため、両方を期待値に含む。人物マスクの被覆率上限0.90は「人物枠を塗り潰していない」ことの担保。",
+  "minimumRecall": 1.0,
+  "maximumFalsePositives": 0,
+  "expected": [
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.2138,
+        "y": 0.2342,
+        "width": 0.2176,
+        "height": 0.1518
+      }
+    },
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.1962,
+        "y": 0.4279,
+        "width": 0.2385,
+        "height": 0.0791
+      }
+    },
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.5268,
+        "y": 0.8447,
+        "width": 0.3323,
+        "height": 0.1122
+      }
+    },
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.7685,
+        "y": 0.2018,
+        "width": 0.0852,
+        "height": 0.1899
+      }
+    },
+    {
+      "category": "maleGenital",
+      "rect": {
+        "x": 0.2341,
+        "y": 0.6014,
+        "width": 0.1994,
+        "height": 0.0748
+      }
+    },
+    {
+      "category": "nipple",
+      "rect": {
+        "x": 0.7464,
+        "y": 0.5412,
+        "width": 0.0116,
+        "height": 0.012
+      }
+    },
+    {
+      "category": "areola",
+      "rect": {
+        "x": 0.7417,
+        "y": 0.5363,
+        "width": 0.0211,
+        "height": 0.0219
+      }
+    }
+  ],
+  "maximumPersonMaskCoverage": 0.9
+}

@@ -254,8 +254,19 @@ public final class AnimeCensorDetector {
         model = try YOLOONNXModel(resourceName: "censor_detect")
     }
 
+    /// 検出の既定しきい値。
+    ///
+    /// 実サンプル3枚（`Tests/SampleImages/`）での実測に基づく。0.30では寝具の陰影を
+    /// 性器と誤検出する例が1件あり（スコア0.33）、0.40へ上げるとその1件だけが消えて
+    /// 真の検出（最低スコア0.44 / 0.47）は1件も失われなかった。
+    /// 変更する場合は `swift test --filter SampleImageRegressionTests` で再測定すること。
+    public static let defaultConfidenceThreshold = 0.4
+
     /// 画像からNSFW部位を検出し、カテゴリ付きROIとして返す。
-    public func detect(in image: CGImage, confidenceThreshold: Double = 0.3) throws -> [MosaicROI] {
+    public func detect(
+        in image: CGImage,
+        confidenceThreshold: Double = defaultConfidenceThreshold
+    ) throws -> [MosaicROI] {
         try model.detect(
             in: image,
             classCount: Self.classCategories.count,
@@ -280,7 +291,7 @@ public final class AnimeCensorDetector {
     public func detect(
         in image: CGImage,
         personBounds: [NormalizedRect],
-        confidenceThreshold: Double = 0.3
+        confidenceThreshold: Double = defaultConfidenceThreshold
     ) throws -> [MosaicROI] {
         try MultiScaleDetection.detect(
             in: image,

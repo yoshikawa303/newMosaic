@@ -10,3 +10,5 @@ dist/
 # 実画像の回帰テスト用サンプル（著作物・成人向け画像をリポジトリへ入れないため除外）
 Tests/SampleImages/*
 !Tests/SampleImages/README.md
+# 期待値は座標のみで著作物を含まないため、基準として管理下に置く
+!Tests/SampleImages/*.expected.json

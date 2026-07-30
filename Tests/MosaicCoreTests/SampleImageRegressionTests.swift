@@ -108,6 +108,34 @@ import Testing
         return result
     }
 
+    /// マスクのうち、指定した枠の内側で白（対象）になっている画素の割合。
+    /// `AnimeSegmenter.coverageRatio` は画像全体に対する比率なので、
+    /// 「人物枠を塗り潰しているか」の判定には使えない。
+    static func whiteRatio(of mask: CGImage, within bounds: NormalizedRect) -> Double {
+        let rect = bounds.clamped().cgRect(
+            imageSize: CGSize(width: mask.width, height: mask.height),
+            origin: .topLeft
+        )
+        guard rect.width >= 1, rect.height >= 1,
+              let crop = mask.cropping(to: rect) else { return 0 }
+        let width = crop.width
+        let height = crop.height
+        var pixels = [UInt8](repeating: 0, count: width * height)
+        let drawn = pixels.withUnsafeMutableBytes { pointer -> Bool in
+            guard let context = CGContext(
+                data: pointer.baseAddress, width: width, height: height,
+                bitsPerComponent: 8, bytesPerRow: width,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.draw(crop, in: CGRect(x: 0, y: 0, width: width, height: height))
+            return true
+        }
+        guard drawn, !pixels.isEmpty else { return 0 }
+        let white = pixels.reduce(0) { $0 + ($1 > 127 ? 1 : 0) }
+        return Double(white) / Double(pixels.count)
+    }
+
     // MARK: - テスト本体
 
     /// サンプル画像に対して検出パイプラインを実行し、期待値と突き合わせる。
@@ -133,9 +161,9 @@ import Testing
                 continue
             }
             let personBounds = ((try? personDetector.detectPersons(in: image)) ?? []).map(\.bounds)
-            var rois = try detector.detect(in: image, personBounds: personBounds)
-            rois = DetectedROIRefiner.dropOversizedGenitalROIs(from: rois, persons: personBounds)
-            rois = DetectedROIRefiner.splitNippleAndAreola(rois)
+            let rois = DetectedROIRefiner.splitNippleAndAreola(
+                try detector.detect(in: image, personBounds: personBounds)
+            )
 
             let summary = rois
                 .map { "\($0.category.rawValue)(\(String(format: "%.2f", $0.confidence)))" }
@@ -192,18 +220,15 @@ import Testing
         for url in urls {
             guard let image = Self.loadImage(url) else { continue }
             let persons = (try? personDetector.detectPersons(in: image)) ?? []
+            // アプリと同じ経路（クロップ推論→SAM→全体画像推論）で測る
+            let provider = PersonSilhouetteProvider(segmenter: segmenter)
             var worst = 0.0
             for (index, person) in persons.enumerated() {
-                guard let mask = (try? segmenter.personMaskByCrop(in: image, bounds: person.bounds)) ?? nil else {
-                    print("[\(url.lastPathComponent)] 人物\(index + 1): クロップ推論が失敗（全体推論へフォールバック）")
-                    worst = max(worst, 1.0)
-                    continue
-                }
-                let coverage = AnimeSegmenter.coverageRatio(of: mask)
-                worst = max(worst, coverage)
+                let result = provider.silhouette(in: image, bounds: person.bounds)
+                worst = max(worst, result.coverage)
                 print(String(
-                    format: "[%@] 人物%d: マスク被覆率 %.2f",
-                    url.lastPathComponent, index + 1, coverage
+                    format: "[%@] 人物%d: 被覆率 %.2f（経路: %@）",
+                    url.lastPathComponent, index + 1, result.coverage, result.source.rawValue
                 ))
             }
             if let limit = Self.loadExpectation(for: url)?.maximumPersonMaskCoverage {
@@ -211,6 +236,83 @@ import Testing
                     worst <= limit,
                     "\(url.lastPathComponent): 人物マスクの被覆率 \(worst) が上限 \(limit) を超えました（背景まで塗っている疑い）"
                 )
+            }
+        }
+    }
+
+    /// 検出しきい値を変えたときの検出内訳を表で出す（測定のみ。合否判定はしない）。
+    /// 「誤検出を消すためにしきい値を上げる」判断が、見逃しを増やさないかを数値で確認するため。
+    @Test func reportDetectionAcrossConfidenceThresholds() throws {
+        let urls = Self.sampleImageURLs()
+        guard !urls.isEmpty else { return }
+        guard let detector = try? AnimeCensorDetector(),
+              let personDetector = try? AnimePersonDetector() else { return }
+
+        let thresholds = [0.20, 0.30, 0.40, 0.50]
+        for url in urls {
+            guard let image = Self.loadImage(url) else { continue }
+            let personBounds = ((try? personDetector.detectPersons(in: image)) ?? []).map(\.bounds)
+            print("=== \(url.lastPathComponent)（人物\(personBounds.count)件）===")
+            for threshold in thresholds {
+                let rois = ((try? detector.detect(
+                    in: image, personBounds: personBounds, confidenceThreshold: threshold
+                )) ?? [])
+                let byCategory = Dictionary(grouping: rois, by: { $0.category.rawValue })
+                    .map { "\($0.key)×\($0.value.count)" }
+                    .sorted()
+                    .joined(separator: " ")
+                let scores = rois
+                    .map { String(format: "%.2f", $0.confidence) }
+                    .sorted(by: >)
+                    .joined(separator: ",")
+                print(String(format: "  しきい値 %.2f: 計%2d件  %@  [%@]",
+                             threshold, rois.count, byCategory, scores))
+                // 期待値ファイル（expected.json）を書き起こすための座標を出す
+                if abs(threshold - AnimeCensorDetector.defaultConfidenceThreshold) < 0.001 {
+                    for roi in rois.sorted(by: { $0.confidence > $1.confidence }) {
+                        print(String(
+                            format: "    { \"category\": \"%@\", \"rect\": { \"x\": %.4f, \"y\": %.4f, \"width\": %.4f, \"height\": %.4f } },  // score %.2f",
+                            roi.category.rawValue, roi.rect.x, roi.rect.y,
+                            roi.rect.width, roi.rect.height, roi.confidence
+                        ))
+                    }
+                }
+            }
+        }
+    }
+
+    /// 小さいROIで、SAMの全体推論と切り出し推論のどちらが形状を捉えられているかを実測する。
+    ///
+    /// 被覆率が1.0付近＝枠を塗り潰しており形状を分離できていない、0付近＝空振り。
+    /// その中間にあることが「対象の輪郭を取れている」目安になる
+    /// （`SAMSegmentEngine.shapeConformCoverage` = 0.85 が既存の判定基準）。
+    @Test func compareSAMWholeImageAndCropForSmallROIs() throws {
+        let urls = Self.sampleImageURLs()
+        guard !urls.isEmpty else { return }
+        guard let detector = try? AnimeCensorDetector() else {
+            print("[SampleImageRegressionTests] 検出モデルが無いため測定をスキップしました。")
+            return
+        }
+        for url in urls {
+            guard let image = Self.loadImage(url) else { continue }
+            let rois = (try? detector.detect(in: image)) ?? []
+            guard !rois.isEmpty else { continue }
+            let longSide = Double(max(image.width, image.height))
+            let scale = Double(SAMSegmentEngine.inputLongSide) / longSide
+            print("=== \(url.lastPathComponent)（\(image.width)x\(image.height)）===")
+            for roi in rois.sorted(by: { $0.rect.area < $1.rect.area }) {
+                let px = roi.rect.cgRect(
+                    imageSize: CGSize(width: image.width, height: image.height)
+                )
+                let sideInInput = max(px.width, px.height) * scale
+                let full = SAMSegmentEngine.measureCoverage(in: image, box: roi.rect, useCrop: false)
+                let crop = SAMSegmentEngine.measureCoverage(in: image, box: roi.rect, useCrop: true)
+                print(String(
+                    format: "  %-14@ 枠%4dx%4dpx（入力換算%3d） 全体=%@ 切出=%@",
+                    roi.category.rawValue, Int(px.width), Int(px.height), Int(sideInInput),
+                    full.map { String(format: "%.2f", $0) } ?? "  --",
+                    crop.map { String(format: "%.2f", $0) } ?? "  --"
+                ))
             }
         }
     }

@@ -60,21 +60,32 @@ public final class SAMSegmentEngine: Segmenting {
         }
     }()
 
-    /// 画像埋め込みのキャッシュ（直近1枚）。モザイクプレビューの再生成のたびに
-    /// エンコーダ（重い方）を回さないため。CGImageの同一性で判定する。
+    /// 画像埋め込みのキャッシュ。モザイクプレビューの再生成のたびにエンコーダ（重い方）を
+    /// 回さないため。小さいROIは周辺を切り出して個別にエンコードするので、
+    /// 「元画像1枚 ＋ その画像から切り出した窓」を同時に保持する。
+    /// 元画像が変わった時点で全て捨てる（CGImageの同一性で判定）。
     private final class EmbeddingCache: @unchecked Sendable {
-        private var entry: (image: CGImage, value: ORTValue)?
+        private static let capacity = 24
+        private var source: CGImage?
+        private var entries: [String: ORTValue] = [:]
         private let lock = NSLock()
-        func value(for image: CGImage) -> ORTValue? {
+
+        func value(source: CGImage, key: String) -> ORTValue? {
             lock.lock()
             defer { lock.unlock() }
-            guard let entry, entry.image === image else { return nil }
-            return entry.value
+            guard self.source === source else { return nil }
+            return entries[key]
         }
-        func store(image: CGImage, value: ORTValue) {
+
+        func store(source: CGImage, key: String, value: ORTValue) {
             lock.lock()
             defer { lock.unlock() }
-            entry = (image, value)
+            if self.source !== source {
+                self.source = source
+                entries.removeAll()
+            }
+            if entries.count >= Self.capacity { entries.removeAll() }
+            entries[key] = value
         }
     }
     private static let embeddingCache = EmbeddingCache()
@@ -114,9 +125,21 @@ public final class SAMSegmentEngine: Segmenting {
     // MARK: - エンコード
 
     private static func imageEmbedding(for image: CGImage, encoder: ORTSession) throws -> ORTValue {
-        if let cached = embeddingCache.value(for: image) {
+        try imageEmbedding(of: image, source: image, cacheKey: "full", encoder: encoder)
+    }
+
+    /// `target` をエンコードする。`source`/`cacheKey` はキャッシュの同一性判定にのみ使う
+    /// （切り出し窓の埋め込みを、元画像の埋め込みと共存させるため）。
+    private static func imageEmbedding(
+        of target: CGImage,
+        source: CGImage,
+        cacheKey: String,
+        encoder: ORTSession
+    ) throws -> ORTValue {
+        if let cached = embeddingCache.value(source: source, key: cacheKey) {
             return cached
         }
+        let image = target
 
         // 長辺を1024へリサイズ（アスペクト比維持。パディング・正規化はモデル内部で行う）
         let scale = Double(inputLongSide) / Double(max(image.width, image.height))
@@ -140,7 +163,7 @@ public final class SAMSegmentEngine: Segmenting {
         guard let value = outputs[outputName] else {
             throw CocoaError(.fileReadUnknown)
         }
-        embeddingCache.store(image: image, value: value)
+        embeddingCache.store(source: source, key: cacheKey, value: value)
         return value
     }
 
@@ -229,6 +252,87 @@ public final class SAMSegmentEngine: Segmenting {
         )
     }
 
+    // MARK: - 小さいROI向けの切り出し推論
+
+    /// SAM入力（長辺1024）空間でのROI長辺がこれ未満なら、周辺を切り出してから推論する。
+    ///
+    /// SAMは画像全体を長辺1024へ縮小し、デコーダは256×256のマスクlogitsを生成する。
+    /// 元画像のROIは最終的に「長辺1024換算のさらに1/4」の格子でしか表現されないため、
+    /// 小さいROIは形状が潰れる（GUI報告: 小さい男性器はSAMより「対象形状」の方が正しい）。
+    ///
+    /// 値は実サンプル3枚のROI13件での実測による（ROI矩形内の被覆率、全体推論→切り出し推論）。
+    /// 被覆率が1.0付近＝枠を塗り潰しており対象を分離できていない、という意味になる。
+    ///
+    ///     入力換算17〜59: 0.89〜0.97 → 0.72〜0.82（切り出しで明確に分離できる）
+    ///     入力換算61     : 0.76      → 0.71
+    ///     入力換算130〜255: 0.36〜0.70 → 0.36〜0.66（差はノイズ程度。切り出しの利点なし）
+    ///
+    /// 効果のある側（〜61）と無い側（130〜）の間を取って96とする。
+    /// 切り出しは窓ごとにエンコーダを回すため、利点の無い大きなROIには使わない。
+    /// 再測定は `swift test --filter compareSAMWholeImageAndCropForSmallROIs` で行う。
+    static let minimumBoxSideInInput = 96.0
+    /// 切り出す窓の大きさ（ROI長辺の倍率）。SAMは周辺の文脈がないと対象を切り出せないため、
+    /// ROIちょうどではなく周囲を含める。
+    static let cropContextScale = 3.0
+
+    /// ROIを中心に周辺を含めた正方形の切り出し窓（画像内へ収める）。
+    static func contextWindow(around box: CGRect, imageSize: CGSize) -> CGRect? {
+        guard box.width > 0, box.height > 0, imageSize.width > 0, imageSize.height > 0 else { return nil }
+        let side = min(
+            max(box.width, box.height) * cropContextScale,
+            min(imageSize.width, imageSize.height)
+        )
+        var origin = CGPoint(x: box.midX - side / 2, y: box.midY - side / 2)
+        origin.x = min(max(0, origin.x), imageSize.width - side)
+        origin.y = min(max(0, origin.y), imageSize.height - side)
+        let window = CGRect(x: origin.x, y: origin.y, width: side, height: side).integral
+        let bounds = CGRect(origin: .zero, size: imageSize)
+        let clipped = window.intersection(bounds)
+        // 窓がROIを含まなくなるほど小さい場合は切り出さない（全体推論に任せる）
+        guard clipped.contains(box.intersection(bounds)) else { return nil }
+        return clipped
+    }
+
+    /// 小さいROI向けに、周辺を切り出してからSAMを実行し、結果を元画像座標のマスクへ戻す。
+    private static func binaryMaskViaCrop(
+        box: CGRect,
+        encoder: ORTSession,
+        decoder: ORTSession,
+        image: CGImage
+    ) throws -> CGImage? {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        guard let window = contextWindow(around: box, imageSize: imageSize),
+              let cropped = image.cropping(to: window) else { return nil }
+        let key = "crop:\(Int(window.minX)),\(Int(window.minY)),\(Int(window.width)),\(Int(window.height))"
+        let embedding = try imageEmbedding(of: cropped, source: image, cacheKey: key, encoder: encoder)
+        let localBox = box.offsetBy(dx: -window.minX, dy: -window.minY)
+        guard let localMask = try binaryMask(
+            box: localBox, embedding: embedding, decoder: decoder, image: cropped
+        ) else { return nil }
+        return place(localMask, at: window, inImageOfSize: imageSize)
+    }
+
+    /// 切り出し窓のマスクを、元画像サイズの黒背景マスクへ貼り戻す。
+    static func place(_ mask: CGImage, at window: CGRect, inImageOfSize size: CGSize) -> CGImage? {
+        let width = Int(size.width)
+        let height = Int(size.height)
+        guard width > 0, height > 0, let context = CGContext(
+            data: nil, width: width, height: height,
+            bitsPerComponent: 8, bytesPerRow: width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGImageAlphaInfo.none.rawValue
+        ) else { return nil }
+        context.setFillColor(gray: 0, alpha: 1)
+        context.fill(CGRect(x: 0, y: 0, width: width, height: height))
+        context.interpolationQuality = .none
+        // CGContextは下原点、windowは上原点なので上下を入れ替える
+        context.draw(mask, in: CGRect(
+            x: window.minX, y: size.height - window.maxY,
+            width: window.width, height: window.height
+        ))
+        return context.makeImage()
+    }
+
     // MARK: - デコード（ROIごと）
 
     /// 枠（プロンプト）を与えて、その中の対象の二値マスクを元画像サイズで得る。
@@ -263,9 +367,21 @@ public final class SAMSegmentEngine: Segmenting {
         if abs(roi.rotation) > 0.01 {
             box = Self.rotatedBoundingBox(of: box, rotationDegrees: roi.rotation)
         }
-        guard let maskImage = try Self.binaryMask(
-            box: box, embedding: embedding, decoder: decoder, image: image
-        ) else { return nil }
+        // 小さいROIは全体推論だと形状が潰れるため、周辺を切り出してから推論する
+        let scale = Double(Self.inputLongSide) / Double(max(image.width, image.height))
+        let boxSideInInput = max(box.width, box.height) * scale
+        let usesCrop = boxSideInInput < Self.minimumBoxSideInInput
+        let maskImage: CGImage?
+        if usesCrop, let encoder = Self.sharedSessions?.encoder {
+            maskImage = try Self.binaryMaskViaCrop(
+                box: box, encoder: encoder, decoder: decoder, image: image
+            ) ?? Self.binaryMask(box: box, embedding: embedding, decoder: decoder, image: image)
+        } else {
+            maskImage = try Self.binaryMask(
+                box: box, embedding: embedding, decoder: decoder, image: image
+            )
+        }
+        guard let maskImage else { return nil }
 
 
         var mask = CIImage(cgImage: maskImage)
@@ -309,6 +425,8 @@ public final class SAMSegmentEngine: Segmenting {
         segmentLogger.info("""
             samShape category=\(roi.category.rawValue, privacy: .public) \
             rotation=\(Int(roi.rotation)) \
+            path=\(usesCrop ? "crop" : "full", privacy: .public) \
+            boxSideInInput=\(Int(boxSideInInput)) \
             rectCoverage=\(String(format: "%.2f", rectCoverage), privacy: .public) \
             clip=\(conformsToShape ? "shape" : "rect", privacy: .public) \
             coverage=\(String(format: "%.2f", coverage), privacy: .public)
@@ -335,6 +453,33 @@ public final class SAMSegmentEngine: Segmenting {
             colorSpace: linearSpace
         )
         return Double(pixel[0]) / 255.0
+    }
+
+    /// 全体推論と切り出し推論を同じROIで比較測定するための入口（テスト専用）。
+    /// 返す値はROI矩形内での白画素の割合。
+    static func measureCoverage(
+        in image: CGImage,
+        box: NormalizedRect,
+        useCrop: Bool
+    ) -> Double? {
+        guard let sessions = sharedSessions else { return nil }
+        let imageSize = CGSize(width: image.width, height: image.height)
+        let rect = box.clamped().cgRect(imageSize: imageSize, origin: .topLeft)
+        let mask: CGImage?
+        if useCrop {
+            mask = try? binaryMaskViaCrop(
+                box: rect, encoder: sessions.encoder, decoder: sessions.decoder, image: image
+            )
+        } else {
+            guard let embedding = try? imageEmbedding(for: image, encoder: sessions.encoder) else {
+                return nil
+            }
+            mask = try? binaryMask(
+                box: rect, embedding: embedding, decoder: sessions.decoder, image: image
+            )
+        }
+        guard let mask else { return nil }
+        return PersonSilhouetteProvider.coverage(of: mask, within: box)
     }
 
     private static func rotatedBoundingBox(of rect: CGRect, rotationDegrees: Double) -> CGRect {

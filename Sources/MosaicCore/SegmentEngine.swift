@@ -23,8 +23,6 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
     case visionPersonSegmentation
     case foregroundObjects
     case regionForeground
-    /// 「対象形状」のリリース初期（Build 41）実装。現行実装との精度比較用（デバッグ・検証目的）。
-    case regionForegroundLegacy
     /// 学習済み部位セグメンテーションモデル（YOLO-seg）による形状抽出。モデル導入時のみ有効。
     case learnedShape
     /// MobileSAM（同梱）による形状抽出。検出枠をプロンプトに、枠内の対象の形状を直接得る。
@@ -36,7 +34,6 @@ public enum SegmentEngineKind: String, Codable, Sendable, CaseIterable {
         case .visionPersonSegmentation: return "人物の輪郭（AI自動認識）"
         case .foregroundObjects: return "物体の輪郭（自動抽出）"
         case .regionForeground: return "対象形状"
-        case .regionForegroundLegacy: return "対象形状（初期実装・比較用）"
         case .learnedShape: return "学習モデル形状"
         case .samShape: return "対象形状（SAM）"
         }
@@ -626,129 +623,6 @@ public final class RegionForegroundSegmentEngine: Segmenting {
     }
 }
 
-
-/// 「対象形状」のリリース初期（Build 41相当）実装。現行の`RegionForegroundSegmentEngine`との
-/// 精度比較用に残す（マスク生成の選択肢からデバッグ目的で選べる）。
-///
-/// 現行実装との違いは最終段の制限方法のみ:
-/// - 初期実装（本クラス）: 前景マスクをROIの**矩形**へクロップする。楕円ROIでも矩形で切るため、
-///   取れた対象物の輪郭がそのまま残る。
-/// - 現行実装: `ShapeSegmentEngine.restrict`でROIの**形状マスク**（楕円は放射グラデーション）を
-///   乗算する。ROI外へのはみ出しは防げるが、楕円ROIでは境界へ向かってマスクが薄くなり、
-///   対象物の輪郭が縁で欠けることがある。
-///
-/// クロップ範囲・前景抽出・顕著領域マスクの処理は現行と共通（v0.0.00083で当時と同一へ復元済み）。
-public final class LegacyRegionForegroundSegmentEngine: Segmenting {
-    private let fallback = ShapeSegmentEngine()
-    private let core = RegionForegroundSegmentEngine()
-
-    public init() {}
-
-    public func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
-        let imageSize = CGSize(width: image.width, height: image.height)
-        var results: [CIImage] = []
-        for roi in rois {
-            if let mask = legacyRegionMask(for: roi, in: image, imageSize: imageSize, extent: extent) {
-                results.append(mask)
-            } else {
-                let fallbackMasks = try fallback.createMasks(for: [roi], in: image, extent: extent)
-                results.append(fallbackMasks[0])
-            }
-        }
-        return results
-    }
-
-    private func legacyRegionMask(
-        for roi: MosaicROI,
-        in image: CGImage,
-        imageSize: CGSize,
-        extent: CGRect
-    ) -> CIImage? {
-        // 当時（Build 41）は選択範囲の回転機能が無かったため、初期実装は`roi.rect`（無回転）
-        // だけを見ていた。回転ROIへそのまま適用すると、クロップからも最終の切り取りからも
-        // 実際の（傾いた）選択範囲が外れ、軸並行の四角いブロックになってしまう
-        // （GUI報告の症状）。回転ROIでは回転後の外接矩形でクロップする。
-        let baseNormalized: NormalizedRect
-        if abs(roi.rotation) > 0.01 {
-            let baseRectPixels = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
-            baseNormalized = NormalizedRect(
-                Self.rotatedBoundingBox(of: baseRectPixels, rotationDegrees: roi.rotation),
-                imageSize: imageSize
-            )
-        } else {
-            baseNormalized = roi.rect
-        }
-        let expanded = baseNormalized.expanded(scale: 1.15).clamped()
-        let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)
-        guard cropRect.width >= 16, cropRect.height >= 16,
-              let crop = image.cropping(to: cropRect) else { return nil }
-
-        var localMask = RegionForegroundSegmentEngine.foregroundMask(in: crop)
-        let foregroundFound = localMask != nil
-        let foregroundCoverage = localMask.map { core.coverageRatio(of: $0) }
-        // 前景がクロップのほぼ全面を覆う場合は顕著領域マスクへ切り替える（当時と同じ判定）
-        var usedSaliency = false
-        if foregroundCoverage.map({ $0 > 0.85 }) ?? true {
-            if let saliency = RegionForegroundSegmentEngine.saliencyMask(in: crop) {
-                localMask = saliency
-                usedSaliency = true
-            }
-        }
-        let finalCoverage = localMask.map { core.coverageRatio(of: $0) }
-        segmentLogger.info("""
-            legacyRegionMask category=\(roi.category.rawValue, privacy: .public) \
-            crop=\(Int(cropRect.width))x\(Int(cropRect.height)) \
-            rotation=\(Int(roi.rotation)) \
-            foreground=\(foregroundFound ? "yes" : "no", privacy: .public) \
-            fgCoverage=\(foregroundCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public) \
-            saliency=\(usedSaliency ? "used" : "no", privacy: .public) \
-            finalCoverage=\(finalCoverage.map { String(format: "%.2f", $0) } ?? "-", privacy: .public)
-            """)
-        guard var mask = localMask, mask.extent.width > 0, mask.extent.height > 0 else {
-            segmentLogger.info("legacyRegionMask fallback=shape reason=noMask category=\(roi.category.rawValue, privacy: .public)")
-            return nil
-        }
-
-        // クロップ実サイズへスケールし、CI座標（下原点）でクロップ位置に配置する
-        let scaleX = cropRect.width / mask.extent.width
-        let scaleY = cropRect.height / mask.extent.height
-        let cropRectCI = expanded.cgRect(imageSize: imageSize, origin: .bottomLeft)
-        mask = mask
-            .transformed(by: CGAffineTransform(scaleX: scaleX, y: scaleY))
-            .transformed(by: CGAffineTransform(translationX: cropRectCI.minX, y: cropRectCI.minY))
-
-        let black = CIImage(color: .black).cropped(to: extent)
-        // ★初期実装の要: ROIの「矩形」で制限する（形状マスクの乗算はしない）。
-        // 矩形マスクは白/黒の二値のため、楕円マスク（放射グラデーション）のように
-        // 縁へ向かってマスクが薄くならず、取れた対象物の輪郭がそのまま残る。
-        // 当時の`cropped(to:)`と違い回転に対応させ、傾いた選択範囲でも正しく切り取る。
-        let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-        let boundsMask = ShapeSegmentEngine.rectangleMask(
-            rect: roiRect,
-            extent: extent,
-            rotation: roi.rotation
-        )
-        return mask.composited(over: black).applyingFilter("CIMultiplyCompositing", parameters: [
-            kCIInputBackgroundImageKey: boundsMask
-        ]).cropped(to: extent)
-    }
-
-    /// 矩形を中心周りに回転させた場合の軸並行外接矩形（現行エンジンと同じ計算）。
-    private static func rotatedBoundingBox(of rect: CGRect, rotationDegrees: Double) -> CGRect {
-        guard abs(rotationDegrees) > 0.01 else { return rect }
-        let radians = rotationDegrees * .pi / 180
-        let cosA = abs(cos(radians))
-        let sinA = abs(sin(radians))
-        let newWidth = rect.width * cosA + rect.height * sinA
-        let newHeight = rect.width * sinA + rect.height * cosA
-        return CGRect(
-            x: rect.midX - newWidth / 2,
-            y: rect.midY - newHeight / 2,
-            width: newWidth,
-            height: newHeight
-        )
-    }
-}
 
 /// Vision の人物セグメンテーション結果（画素単位マスク）をROIごとに切り出して使う。
 /// `ShapeSegmentEngine` と機能が重複するため、UI側でどちらを使うか切替えられるようにしている。
