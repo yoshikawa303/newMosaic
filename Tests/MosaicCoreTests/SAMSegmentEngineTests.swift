@@ -134,4 +134,33 @@ import Testing
         // 2回目はエンコーダ（支配的コスト）を飛ばすため、初回より十分速い
         #expect(second < first * 0.7, "first=\(first)s second=\(second)s")
     }
+
+
+/// 枠プロンプトからインスタンスマスク（人物シルエット用）が得られること。
+/// `anime_seg.onnx` が対象を分離できない場面（人物の重なり・寝具の多い背景）で
+/// 枠全体を塗ってしまう問題への代替経路。
+@Test func instanceMaskReturnsMaskSmallerThanBoxForOutlinedObject() throws {
+    let (image, _) = try makeMangaLikeImage()
+    let engine = SAMSegmentEngine()
+    // 対象(x 275-365, y_topLeft 200-445)を少し余裕をもって囲む枠
+    let box = NormalizedRect(x: 260.0 / 640, y: 185.0 / 640, width: 125.0 / 640, height: 275.0 / 640)
+    let mask = try #require(engine.instanceMask(in: image, box: box))
+    #expect(mask.width == image.width)
+    #expect(mask.height == image.height)
+
+    var pixels = [UInt8](repeating: 0, count: mask.width * mask.height)
+    let context = try #require(CGContext(
+        data: &pixels, width: mask.width, height: mask.height, bitsPerComponent: 8,
+        bytesPerRow: mask.width, space: CGColorSpaceCreateDeviceGray(),
+        bitmapInfo: CGImageAlphaInfo.none.rawValue
+    ))
+    context.draw(mask, in: CGRect(x: 0, y: 0, width: mask.width, height: mask.height))
+
+    let white = pixels.reduce(0) { $0 + ($1 > 127 ? 1 : 0) }
+    let boxArea = Double(mask.width * mask.height) * box.area
+    // 枠より小さい＝対象を分離できている（枠全体を塗っていない）
+    #expect(Double(white) < boxArea * 0.95)
+    // 空でもない
+    #expect(Double(white) > boxArea * 0.1)
+}
 }

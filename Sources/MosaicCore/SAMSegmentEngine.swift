@@ -171,23 +171,16 @@ public final class SAMSegmentEngine: Segmenting {
         return tensor
     }
 
-    // MARK: - デコード（ROIごと）
 
-    private func samMask(
-        for roi: MosaicROI,
+    /// SAMのデコーダを枠プロンプトで実行し、元画像サイズの二値マスク（白=対象）を返す。
+    /// デコーダ出力はマスクのlogitsで、>0 が対象。
+    private static func binaryMask(
+        box: CGRect,
         embedding: ORTValue,
         decoder: ORTSession,
-        image: CGImage,
-        extent: CGRect
-    ) throws -> CIImage? {
-        let imageSize = CGSize(width: image.width, height: image.height)
-        // プロンプト枠: ROIの画素座標（左上原点）。回転ROIは回転後の外接矩形を使う
-        var box = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
-        if abs(roi.rotation) > 0.01 {
-            box = Self.rotatedBoundingBox(of: box, rotationDegrees: roi.rotation)
-        }
-        let scale = Double(Self.inputLongSide) / Double(max(image.width, image.height))
-
+        image: CGImage
+    ) throws -> CGImage? {
+        let scale = Double(inputLongSide) / Double(max(image.width, image.height))
         // 枠 = 左上点(label 2) + 右下点(label 3)。座標はリサイズ後（長辺1024）空間
         var coords: [Float] = [
             Float(box.minX * scale), Float(box.minY * scale),
@@ -216,25 +209,64 @@ public final class SAMSegmentEngine: Segmenting {
             .withUnsafeBytes { Array($0.bindMemory(to: Float.self)) }
         guard floats.count >= image.width * image.height else { return nil }
 
-        // logits > 0 が対象。8bitグレースケールの二値マスクへ変換する
         var pixels = [UInt8](repeating: 0, count: image.width * image.height)
         for index in 0..<pixels.count where floats[index] > 0 {
             pixels[index] = 255
         }
-        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
-              let maskImage = CGImage(
-                  width: image.width,
-                  height: image.height,
-                  bitsPerComponent: 8,
-                  bitsPerPixel: 8,
-                  bytesPerRow: image.width,
-                  space: CGColorSpaceCreateDeviceGray(),
-                  bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
-                  provider: provider,
-                  decode: nil,
-                  shouldInterpolate: false,
-                  intent: .defaultIntent
-              ) else { return nil }
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData) else { return nil }
+        return CGImage(
+            width: image.width,
+            height: image.height,
+            bitsPerComponent: 8,
+            bitsPerPixel: 8,
+            bytesPerRow: image.width,
+            space: CGColorSpaceCreateDeviceGray(),
+            bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.none.rawValue),
+            provider: provider,
+            decode: nil,
+            shouldInterpolate: false,
+            intent: .defaultIntent
+        )
+    }
+
+    // MARK: - デコード（ROIごと）
+
+    /// 枠（プロンプト）を与えて、その中の対象の二値マスクを元画像サイズで得る。
+    ///
+    /// 人物シルエット用にも使う。`anime_seg.onnx` は「キャラクターか背景か」の二値分類であり、
+    /// 人物が重なった場面や寝具の多い場面では対象を分離できず枠全体を塗ってしまう
+    /// （GUI報告: 下段コマでベッドや別人の足まで人物範囲になる）。
+    /// SAMは枠で指定したインスタンスを取るため、こうした場面での分離に向く。
+    /// モデル未導入・推論失敗時は nil を返す（呼び出し側で従来経路へフォールバックする）。
+    public func instanceMask(in image: CGImage, box bounds: NormalizedRect) -> CGImage? {
+        guard let sessions = Self.sharedSessions,
+              let embedding = try? Self.imageEmbedding(for: image, encoder: sessions.encoder) else {
+            return nil
+        }
+        let imageSize = CGSize(width: image.width, height: image.height)
+        let box = bounds.clamped().cgRect(imageSize: imageSize, origin: .topLeft)
+        return try? Self.binaryMask(
+            box: box, embedding: embedding, decoder: sessions.decoder, image: image
+        )
+    }
+
+    private func samMask(
+        for roi: MosaicROI,
+        embedding: ORTValue,
+        decoder: ORTSession,
+        image: CGImage,
+        extent: CGRect
+    ) throws -> CIImage? {
+        let imageSize = CGSize(width: image.width, height: image.height)
+        // プロンプト枠: ROIの画素座標（左上原点）。回転ROIは回転後の外接矩形を使う
+        var box = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
+        if abs(roi.rotation) > 0.01 {
+            box = Self.rotatedBoundingBox(of: box, rotationDegrees: roi.rotation)
+        }
+        guard let maskImage = try Self.binaryMask(
+            box: box, embedding: embedding, decoder: decoder, image: image
+        ) else { return nil }
+
 
         var mask = CIImage(cgImage: maskImage)
         if mask.extent.width != extent.width || mask.extent.height != extent.height {

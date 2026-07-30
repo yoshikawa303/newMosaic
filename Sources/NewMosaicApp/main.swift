@@ -536,6 +536,11 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                         imageSize: CGSize(width: input.image.width, height: input.image.height)
                     )
                 }
+                // `anime_seg.onnx` は「キャラクターか背景か」の二値分類のため、人物が重なる場面や
+                // 寝具の多い場面では対象を分離できず枠全体を塗ってしまう（GUI報告: 下段コマで
+                // ベッドや別人の足まで人物範囲になる）。分離に失敗したときは、枠で指定した
+                // インスタンスを取れるSAMへ切り替える（従来の全体画像フォールバックはその次）。
+                let samEngine = SAMSegmentEngine()
                 personsWithMasks = persons.map { person in
                     var mask: CGImage?
                     do {
@@ -543,6 +548,9 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     } catch {
                         detectorFailures.append("アニメシルエット: \(error.localizedDescription)")
                         mask = nil
+                    }
+                    if mask == nil {
+                        mask = samEngine.instanceMask(in: input.image, box: person.bounds)
                     }
                     if mask == nil {
                         mask = fallbackMask(for: person.bounds)
