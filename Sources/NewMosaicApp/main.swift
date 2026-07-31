@@ -1238,9 +1238,13 @@ final class MosaicWindowController: NSObject {
 
     /// 画像（ライブラリアイテム）ごとの編集状態。エクスポート/加工確定に関わらずセッション内で保持し、
     /// 画像を切り替えて戻ってきたときにROI・検出レイヤ・アンドゥ履歴・モザイク表示状態を復元する。
+    /// 画像を切り替えても編集内容を保つための退避データ。
+    ///
+    /// **描画済み画像は保持しない。** フル解像度のCGImageはA4・300dpiで1枚34.8MBあり、
+    /// 最大`imageEditStateLimit`枚ぶん常駐していた。ROIから作り直せるので保持しない
+    /// （ARCHITECTURE §5.49.3）。人物マスクはAI推論が必要で作り直しが高価なため保持する。
     private struct PerImageEditState {
         var rois: [MosaicROI]
-        var renderedImage: CGImage?
         var mosaicPreviewOn: Bool
         var personLayerRects: [NormalizedRect]
         var personLayerMasks: [CGImage?]
@@ -1258,7 +1262,9 @@ final class MosaicWindowController: NSObject {
 
     private var imageEditStates: [UUID: PerImageEditState] = [:]
     private var imageEditStateOrder: [UUID] = []
-    private let imageEditStateLimit = 8
+    /// 画像切替で編集内容を保つ枚数。1枚あたり人物マスク（フル解像度グレー）を人数分×2系統
+    /// 保持するため、A4・300dpiで4人なら約70MBになる。8枚では約560MBに達したので3枚とする。
+    private let imageEditStateLimit = 3
     private var rightPaneSplitView: NSSplitView?
     private var leftPaneSplitView: NSSplitView?
     private var mainSplitView: NSSplitView?
@@ -5905,7 +5911,6 @@ final class MosaicWindowController: NSObject {
         guard let current = currentLibraryItem else { return }
         imageEditStates[current.id] = PerImageEditState(
             rois: canvas.rois,
-            renderedImage: renderedImage,
             mosaicPreviewOn: mosaicPreviewCheckbox.state == .on,
             personLayerRects: canvas.personLayerRects,
             personLayerMasks: canvas.personLayerMasks,
@@ -5946,18 +5951,18 @@ final class MosaicWindowController: NSObject {
         canvas.resetZoom()
 
         if let saved = imageEditStates[item.id] {
-            renderedImage = saved.renderedImage
-            // 「プレビューON」と「renderedImageあり」という不変条件を、直後のforce-unwrapが
-            // 別の行の判定に依存する形で表現しており、将来の変更で崩れやすい書き方だった
-            // （コードレビューで検出）。if letで両方を同時に扱う形へ変更。
-            if saved.mosaicPreviewOn, let rendered = saved.renderedImage {
+            canvas.rois = saved.rois
+            // 描画済み画像は保持していないのでROIから作り直す。
+            // 表示していなくても画像出力・ライブラリ保存が `renderedImage` を参照するため
+            // 必ず更新する（未描画のまま出力すると検閲漏れになる）。
+            renderedImage = (try? renderMosaicOutput(for: saved.rois)) ?? nil
+            if saved.mosaicPreviewOn, let rendered = renderedImage {
                 mosaicPreviewCheckbox.state = .on
                 canvas.setImage(rendered)
             } else {
                 mosaicPreviewCheckbox.state = .off
                 canvas.setImage(image)
             }
-            canvas.rois = saved.rois
             canvas.personLayerRects = saved.personLayerRects
             canvas.personLayerMasks = saved.personLayerMasks
             personMaskImages = saved.personMaskImages

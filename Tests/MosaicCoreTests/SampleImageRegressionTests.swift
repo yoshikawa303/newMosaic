@@ -268,7 +268,8 @@ import Testing
                 print(String(format: "  しきい値 %.2f: 計%2d件  %@  [%@]",
                              threshold, rois.count, byCategory, scores))
                 // 期待値ファイル（expected.json）を書き起こすための座標を出す
-                if abs(threshold - AnimeCensorDetector.defaultConfidenceThreshold) < 0.001 {
+                if abs(threshold - AnimeCensorDetector.defaultConfidenceThreshold) < 0.001
+                    || abs(threshold - 0.30) < 0.001 {
                     for roi in rois.sorted(by: { $0.confidence > $1.confidence }) {
                         print(String(
                             format: "    { \"category\": \"%@\", \"rect\": { \"x\": %.4f, \"y\": %.4f, \"width\": %.4f, \"height\": %.4f } },  // score %.2f",
@@ -312,6 +313,61 @@ import Testing
                     roi.category.rawValue, Int(px.width), Int(px.height), Int(sideInInput),
                     full.map { String(format: "%.2f", $0) } ?? "  --",
                     crop.map { String(format: "%.2f", $0) } ?? "  --"
+                ))
+            }
+        }
+    }
+
+    /// アプリと同じ合成経路（骨格プライア＋顔領域＋検出器＋各種除去）を再現し、
+    /// 最終的に画面へ出るROIをすべて出力する。
+    ///
+    /// GUI報告（2026-07-31）の切り分け用。報告された誤ROIが検出器由来か、骨格・顔由来かを
+    /// 推測せず特定するために使う。アプリ側（main.swift）の合成順序と一致させること。
+    @Test func reportFinalROIsAsAssembledByApp() throws {
+        let urls = Self.sampleImageURLs()
+        guard !urls.isEmpty else { return }
+        guard let personDetector = try? AnimePersonDetector(),
+              let censorDetector = try? AnimeCensorDetector() else {
+            print("[SampleImageRegressionTests] モデルが無いため測定をスキップしました。")
+            return
+        }
+        let poseEstimator = try? AnimePoseEstimator()
+
+        for url in urls {
+            guard let image = Self.loadImage(url) else { continue }
+            let persons = ((try? personDetector.detectPersons(in: image)) ?? [])
+                .map { PersonDetection(bounds: $0.bounds, maskImage: nil) }
+            let hints: [PoseHint]
+            if let poseEstimator, let estimated = try? poseEstimator.estimatePose(in: image, persons: persons) {
+                hints = estimated
+            } else {
+                hints = persons.map { PoseHint(bodyBounds: $0.bounds, lowerBodyBounds: $0.bounds, joints: []) }
+            }
+            var rois = SensitiveROIGenerator().generateROIs(
+                from: hints, imageSize: CGSize(width: image.width, height: image.height)
+            )
+            if let poseEstimator {
+                rois.append(contentsOf: (try? poseEstimator.faceRegionROIs(in: image, persons: persons)) ?? [])
+            }
+            let detected = (try? censorDetector.detect(
+                in: image, personBounds: persons.map(\.bounds)
+            )) ?? []
+            // main.swift の mergeCandidates と同じ規則（IoU 0.5超の非manualを置き換える）
+            for roi in detected {
+                rois.removeAll { $0.source != "manual" && $0.rect.iou(with: roi.rect) > 0.5 }
+                rois.append(roi)
+            }
+            rois = PoseDerivedROIFilter.dropChestPriors(from: rois, ifDetectorFound: detected)
+            rois = PoseDerivedROIFilter.dropGroinPriors(from: rois, ifDetectorFound: detected)
+            rois = DetectedROIRefiner.splitNippleAndAreola(rois)
+
+            print("=== \(url.lastPathComponent) 最終ROI \(rois.count)件（検出器 \(detected.count)件）===")
+            for roi in rois.sorted(by: { $0.rect.y < $1.rect.y }) {
+                print(String(
+                    format: "  %-13@ src=%-12@ 中心(%.3f, %.3f) 大きさ %.3fx%.3f 回転%4d 信頼度%.2f",
+                    roi.category.rawValue, roi.source,
+                    roi.rect.x + roi.rect.width / 2, roi.rect.y + roi.rect.height / 2,
+                    roi.rect.width, roi.rect.height, Int(roi.rotation), roi.confidence
                 ))
             }
         }
