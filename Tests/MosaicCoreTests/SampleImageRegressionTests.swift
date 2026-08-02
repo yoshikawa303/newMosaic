@@ -360,6 +360,7 @@ import Testing
             rois = PoseDerivedROIFilter.dropChestPriors(from: rois, ifDetectorFound: detected)
             rois = PoseDerivedROIFilter.dropGroinPriors(from: rois, ifDetectorFound: detected)
             rois = DetectedROIRefiner.splitNippleAndAreola(rois)
+            rois = DetectedROIRefiner.expandGenitalEllipses(rois)
 
             print("=== \(url.lastPathComponent) 最終ROI \(rois.count)件（検出器 \(detected.count)件）===")
             for roi in rois.sorted(by: { $0.rect.y < $1.rect.y }) {

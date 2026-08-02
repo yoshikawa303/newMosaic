@@ -1900,3 +1900,55 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(tiles[0].intersection(tiles[1]) != nil)
     #expect(tiles[0].intersection(tiles[2]) != nil)
 }
+
+/// 性器の楕円ROIを広げる後処理。
+///
+/// 楕円は外接矩形より約21%小さく四隅を削るため、斜めに描かれた男性器では先端と根本が
+/// 対角に来て範囲から外れる（GUI報告 2026-07-31）。枠を広げて対角付近まで届かせる。
+@Test func genitalEllipsesAreExpandedButOtherROIsAreUntouched() {
+    let base = NormalizedRect(x: 0.4, y: 0.4, width: 0.2, height: 0.1)
+    let rois = [
+        MosaicROI(rect: base, confidence: 0.7, source: "anime-censor", shape: .ellipse, category: .maleGenital),
+        MosaicROI(rect: base, confidence: 0.7, source: "anime-censor", shape: .ellipse, category: .femaleGenital),
+        // 矩形は四隅を削らないので対象外
+        MosaicROI(rect: base, confidence: 0.7, source: "anime-censor", shape: .rectangle, category: .maleGenital),
+        // 乳首は分割済みの意図した大きさなので変えない
+        MosaicROI(rect: base, confidence: 0.7, source: "anime-censor", shape: .ellipse, category: .nipple),
+        // 手描きはユーザーの意図した範囲なので変えない
+        MosaicROI(rect: base, confidence: 1.0, source: "manual", shape: .ellipse, category: .maleGenital)
+    ]
+    let result = DetectedROIRefiner.expandGenitalEllipses(rois)
+    #expect(result.count == rois.count)
+
+    let scale = DetectedROIRefiner.genitalEllipseExpansionScale
+    for index in 0...1 {
+        #expect(abs(result[index].rect.width - base.width * scale) < 0.0001)
+        #expect(abs(result[index].rect.height - base.height * scale) < 0.0001)
+        // 中心は動かない
+        #expect(abs((result[index].rect.x + result[index].rect.width / 2) - (base.x + base.width / 2)) < 0.0001)
+        #expect(abs((result[index].rect.y + result[index].rect.height / 2) - (base.y + base.height / 2)) < 0.0001)
+    }
+    // 矩形・乳首・手描きは大きさが変わらない（MosaicROI.initのclamped()で生じる
+    // 浮動小数の表現差だけは許容する）
+    for index in 2...4 {
+        #expect(abs(result[index].rect.width - base.width) < 0.0001)
+        #expect(abs(result[index].rect.height - base.height) < 0.0001)
+        #expect(abs(result[index].rect.x - base.x) < 0.0001)
+        #expect(abs(result[index].rect.y - base.y) < 0.0001)
+    }
+}
+
+/// 画像の端にある性器ROIを広げても、範囲は画像内に収まる。
+@Test func expandedGenitalEllipseStaysInsideImage() {
+    let edge = MosaicROI(
+        rect: NormalizedRect(x: 0.0, y: 0.92, width: 0.1, height: 0.08),
+        confidence: 0.6, source: "anime-censor", shape: .ellipse, category: .femaleGenital
+    )
+    let result = DetectedROIRefiner.expandGenitalEllipses([edge])[0].rect
+    #expect(result.x >= 0)
+    #expect(result.y >= 0)
+    #expect(result.x + result.width <= 1.0001)
+    #expect(result.y + result.height <= 1.0001)
+    // 端でも広がってはいる
+    #expect(result.width > edge.rect.width)
+}

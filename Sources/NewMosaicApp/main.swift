@@ -586,6 +586,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
+                    rois = DetectedROIRefiner.expandGenitalEllipses(rois)
                 } catch {
                     detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
                 }
@@ -600,6 +601,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
+                    rois = DetectedROIRefiner.expandGenitalEllipses(rois)
                 } catch {
                     detectorFailures.append("実写部位検出: \(error.localizedDescription)")
                 }

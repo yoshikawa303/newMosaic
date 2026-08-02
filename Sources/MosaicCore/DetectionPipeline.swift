@@ -959,6 +959,17 @@ public enum PoseDerivedROIFilter {
 
 /// 検出器の出力を、より使いやすいROIへ整えるための後処理（純ロジック。単体テスト可能）。
 public enum DetectedROIRefiner {
+    /// 性器の楕円ROIを外側へ広げる倍率。
+    ///
+    /// 楕円は外接矩形より約21%（1 - π/4）小さく、**四隅を削ぎ落とす**。検出枠は水平・垂直の
+    /// 矩形で返るため、斜めに描かれた男性器では先端と根本がちょうど対角に来て楕円から外れる
+    /// （GUI報告 2026-07-31: 楕円マスク時に男性性器の先端・根本が範囲選択されない）。
+    /// 枠を1.15倍に広げてから楕円にすることで、元の検出枠の対角付近まで楕円が届くようにする。
+    ///
+    /// 対象は検出器が出した性器ROIの楕円のみ。手描きROI（`source == "manual"`）は
+    /// ユーザーの意図した範囲なので変更しない。矩形・多角形は四隅を削らないため対象外。
+    public static let genitalEllipseExpansionScale = 1.15
+
     /// 検出器の乳首枠を「乳首」と「乳輪」の2つのROIへ分ける倍率。
     ///
     /// `nipple_f` クラスの枠は乳輪（色の変わった領域）とほぼ同じ大きさで返るため、
@@ -966,6 +977,22 @@ public enum DetectedROIRefiner {
     /// 枠そのままを「乳輪」、中心へ縮小した範囲を「乳首」として別カテゴリで扱う。
     public static let nippleShrinkScale = 0.55
 
+
+    /// 性器の楕円ROIを `genitalEllipseExpansionScale` 倍に広げる。
+    ///
+    /// 楕円が四隅を削ることで対象の先端・根本がマスクから外れる（＝検閲漏れ）のを防ぐ。
+    /// 画像の外へはみ出す分は `NormalizedRect.clamped()` で切り詰められる。
+    public static func expandGenitalEllipses(_ rois: [MosaicROI]) -> [MosaicROI] {
+        let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
+        return rois.map { roi in
+            guard roi.shape == .ellipse,
+                  genitals.contains(roi.category),
+                  roi.source != "manual" else { return roi }
+            var expanded = roi
+            expanded.rect = roi.rect.expanded(scale: genitalEllipseExpansionScale).clamped()
+            return expanded
+        }
+    }
     /// 乳首検出から乳輪ROIを派生させ、乳首ROI自体は乳首相当の大きさへ縮小する。
     /// どちらを使うかは候補カテゴリのチェックで選ぶ（両方ONでも面積比が0.3程度のため
     /// IoUベースの重複除去では統合されず、両方残る）。
