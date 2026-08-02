@@ -2067,3 +2067,39 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(log.readAll().isEmpty)
     #expect(log.existingURLs().isEmpty)
 }
+
+/// 形状ごとにROIを広げても、マスク生成エンジンへ渡す「解析用の枠」は元の検出枠のままであること。
+///
+/// GUI報告 2026-08-02「矩形では正しく判定されるが、楕円・多角形で同じ性器が同じようにマスクされない」。
+/// 広げた枠をそのままSAMのプロンプトに渡していたため、形状ごとに別の範囲が切り出されていた。
+@Test func analysisRectStaysAtTheOriginalDetectionBoxAcrossShapes() {
+    let detected = NormalizedRect(x: 0.40, y: 0.30, width: 0.20, height: 0.14)
+    func roi(_ shape: ROIShape) -> MosaicROI {
+        MosaicROI(rect: detected, confidence: 0.7, source: "anime-censor",
+                  shape: shape, category: .maleGenital)
+    }
+    let expanded = DetectedROIRefiner.expandGenitalROIsToCoverShape(
+        [roi(.rectangle), roi(.ellipse), roi(.polygon)]
+    )
+
+    // 表示・切り取り用の枠は形状ごとに変わる
+    #expect(expanded[1].rect.width > expanded[0].rect.width)
+    #expect(expanded[2].rect.width > expanded[1].rect.width)
+
+    // 解析用の枠はどの形状でも元の検出枠と一致する
+    for (index, result) in expanded.enumerated() {
+        #expect(abs(result.analysisRect.width - detected.width) < 0.0005, "index=\(index)")
+        #expect(abs(result.analysisRect.height - detected.height) < 0.0005, "index=\(index)")
+        #expect(abs(result.analysisRect.x - detected.x) < 0.0005, "index=\(index)")
+        #expect(abs(result.analysisRect.y - detected.y) < 0.0005, "index=\(index)")
+    }
+}
+
+/// `analysisInsetScale` が無いROI（手描き・矩形など）は `analysisRect` が `rect` と一致する。
+@Test func analysisRectFallsBackToRectWithoutInsetScale() {
+    let rect = NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
+    let roi = MosaicROI(rect: rect, confidence: 1.0, source: "manual",
+                        shape: .ellipse, category: .maleGenital)
+    #expect(roi.analysisInsetScale == nil)
+    #expect(roi.analysisRect == roi.rect)
+}

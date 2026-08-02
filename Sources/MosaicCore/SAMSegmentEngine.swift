@@ -408,11 +408,14 @@ public final class SAMSegmentEngine: Segmenting {
     ) throws -> CIImage? {
         let imageSize = CGSize(width: image.width, height: image.height)
         // プロンプト枠: ROIの画素座標（左上原点）。回転ROIは回転後の外接矩形を使う
-        var box = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
+        // プロンプトは**解析用の枠**（＝検出器が出した元の枠）。`rect` は形状で切るために
+        // 広げてあることがあり、そのまま渡すとSAMが別の範囲を切り出す。
+        var box = roi.analysisRect.cgRect(imageSize: imageSize, origin: .topLeft)
         if abs(roi.rotation) > 0.01 {
             box = Self.rotatedBoundingBox(of: box, rotationDegrees: roi.rotation)
         }
         // 小さいROIは全体推論だと形状が潰れるため、周辺を切り出してから推論する
+        // （判定も解析枠基準。表示用に広げた枠で測ると大きさの判断がずれる）
         let scale = Double(Self.inputLongSide) / Double(max(image.width, image.height))
         let boxSideInInput = max(box.width, box.height) * scale
         let usesCrop = boxSideInInput < Self.minimumBoxSideInInput

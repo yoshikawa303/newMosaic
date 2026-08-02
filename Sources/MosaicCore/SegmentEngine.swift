@@ -300,11 +300,11 @@ public final class RegionForegroundSegmentEngine: Segmenting {
         // 回転ROIのみ、無回転rectでは対象物がクロップ外へ出るため回転後の外接矩形を基準にする。
         let baseNormalized: NormalizedRect
         if abs(roi.rotation) > 0.01 {
-            let baseRectPixels = roi.rect.cgRect(imageSize: imageSize, origin: .topLeft)
+            let baseRectPixels = roi.analysisRect.cgRect(imageSize: imageSize, origin: .topLeft)
             let rotatedBoundsPixels = Self.rotatedBoundingBox(of: baseRectPixels, rotationDegrees: roi.rotation)
             baseNormalized = NormalizedRect(rotatedBoundsPixels, imageSize: imageSize)
         } else {
-            baseNormalized = roi.rect
+            baseNormalized = roi.analysisRect
         }
         let expanded = baseNormalized.expanded(scale: 1.15).clamped()
         let cropRect = expanded.cgRect(imageSize: imageSize, origin: .topLeft)

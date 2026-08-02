@@ -314,6 +314,28 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var maskEngine: String?
     /// このROI個別の形状しきい値。nilは全体設定を継承する。
     public var maskThreshold: Double?
+    /// `rect` を「解析に使う枠」へ戻すための縮小倍率。nilは `rect` をそのまま使う。
+    ///
+    /// 楕円・多角形は四隅を削るため、`DetectedROIRefiner.expandGenitalROIsToCoverShape` が
+    /// ROIを広げて対象を包み込ませている。しかし `rect` はマスク生成エンジンが
+    /// **対象を切り出す枠**（SAMのプロンプト枠・前景抽出のクロップ）としても使われるため、
+    /// 広げたままだとエンジンが別物を切り出してしまう。
+    /// 実測（GUI報告 2026-08-02、同じ男性器で形状だけ変えた場合）:
+    ///
+    ///     矩形   枠0.178x0.126 → SAM被覆率0.55
+    ///     楕円   枠0.252x0.178 → SAM被覆率0.28  ← 対象を捉えられていない
+    ///     多角形 枠0.282x0.199 → SAM被覆率0.22
+    ///
+    /// そこで「表示・マスクの切り取りに使う枠（`rect`）」と「解析に使う枠（`analysisRect`）」を
+    /// 分ける。倍率で持つのは、ユーザーがROIを移動・リサイズしても比率が保たれるようにするため。
+    public var analysisInsetScale: Double?
+
+    /// マスク生成エンジンが対象を切り出すのに使う枠。
+    /// `analysisInsetScale` があれば `rect` をその倍率で縮めたもの、無ければ `rect` そのもの。
+    public var analysisRect: NormalizedRect {
+        guard let scale = analysisInsetScale, scale > 0, scale != 1 else { return rect }
+        return rect.expanded(scale: scale).clamped()
+    }
 
     /// 多角形の既定形状（矩形に内接する六角形。上頂点から時計回り）
     public static let defaultPolygonPoints: [NormalizedPoint] = (0..<6).map { index in
@@ -333,7 +355,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         style: MosaicROIStyle? = nil,
         roiGroupName: String? = nil,
         maskEngine: String? = nil,
-        maskThreshold: Double? = nil
+        maskThreshold: Double? = nil,
+        analysisInsetScale: Double? = nil
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -347,6 +370,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.roiGroupName = roiGroupName
         self.maskEngine = maskEngine
         self.maskThreshold = maskThreshold
+        self.analysisInsetScale = analysisInsetScale
     }
 
     private enum CodingKeys: String, CodingKey {

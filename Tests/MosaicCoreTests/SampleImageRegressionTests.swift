@@ -373,4 +373,49 @@ import Testing
             }
         }
     }
+
+    /// 形状（矩形／楕円／多角形）を変えても、SAMが同じ範囲を切り出すこと。
+    ///
+    /// GUI報告 2026-08-02「矩形では正しく判定されるが、楕円・多角形で同じ性器が同じように
+    /// マスクされない」。広げた枠をSAMのプロンプトに渡していたため、形状ごとに別の範囲を
+    /// 切り出していた（実測: 被覆率 0.55 → 0.28 → 0.22）。
+    /// 解析用の枠を元の検出枠へ固定したので、形状によらず同じ被覆率になるはず。
+    @Test func samProducesTheSameMaskRegardlessOfROIShape() throws {
+        let urls = Self.sampleImageURLs()
+        guard !urls.isEmpty else { return }
+        guard let detector = try? AnimeCensorDetector() else { return }
+
+        for url in urls {
+            guard let image = Self.loadImage(url) else { continue }
+            let detected = ((try? detector.detect(in: image)) ?? [])
+                .filter { $0.category == .maleGenital || $0.category == .femaleGenital }
+            guard !detected.isEmpty else { continue }
+            print("=== \(url.lastPathComponent) ===")
+
+            for base in detected {
+                var coverages: [ROIShape: Double] = [:]
+                for shape in [ROIShape.rectangle, .ellipse, .polygon] {
+                    var roi = base
+                    roi.shape = shape
+                    if shape == .polygon { roi.polygonPoints = MosaicROI.defaultPolygonPoints }
+                    let expanded = DetectedROIRefiner.expandGenitalROIsToCoverShape([roi])[0]
+                    guard let value = SAMSegmentEngine.measureCoverage(
+                        in: image, box: expanded.analysisRect, useCrop: false
+                    ) else { continue }
+                    coverages[shape] = value
+                }
+                guard coverages.count == 3 else { continue }
+                let values = Array(coverages.values)
+                let spread = (values.max() ?? 0) - (values.min() ?? 0)
+                print(String(
+                    format: "  %-13@ 矩形=%.2f 楕円=%.2f 多角形=%.2f （差 %.3f）",
+                    base.category.rawValue,
+                    coverages[.rectangle] ?? 0, coverages[.ellipse] ?? 0, coverages[.polygon] ?? 0,
+                    spread
+                ))
+                // 解析枠が同一なので、形状による差は出ない
+                #expect(spread < 0.01, "形状で切り出し範囲が変わっている: \(coverages)")
+            }
+        }
+    }
 }
