@@ -1067,7 +1067,7 @@ final class MosaicWindowController: NSObject {
     private var maskBrushRow: NSView?
 
     private let canvasModeControl = NSSegmentedControl(
-        labels: ["", "", ""],
+        labels: ["", "", "", ""],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -1513,10 +1513,19 @@ final class MosaicWindowController: NSObject {
         // 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル（選択するモード）。
         canvasModeControl.setImage(NSImage(systemSymbolName: "rectangle.dashed", accessibilityDescription: "編集モード"), forSegment: 0)
         canvasModeControl.setImage(NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: "範囲選択モード"), forSegment: 1)
-        canvasModeControl.setImage(NSImage(systemSymbolName: "paintbrush.pointed", accessibilityDescription: "マスク修正モード"), forSegment: 2)
+        canvasModeControl.setImage(NSImage(systemSymbolName: "paintbrush.pointed", accessibilityDescription: "マスク追加ペン"), forSegment: 2)
+        canvasModeControl.setImage(NSImage(systemSymbolName: "eraser", accessibilityDescription: "マスク消しゴム"), forSegment: 3)
         canvasModeControl.setToolTip("編集モード（ドラッグでROIを新規作成。従来通り）", forSegment: 0)
         canvasModeControl.setToolTip("範囲選択モード（ドラッグで複数ROIを一括選択。Option(⌥)キーで一時的に編集モードへ切替）", forSegment: 1)
-        canvasModeControl.setToolTip("マスク修正モード（選択中のレイヤのマスクをドラッグで塗る。Option(⌥)キーを押しながらで消す）", forSegment: 2)
+        canvasModeControl.setToolTip(
+            "マスク追加ペン（ドラッグでマスクを塗る。レイヤ未選択ならモザイク対象へ新しいレイヤ「その他」を作って塗る。"
+            + "Option(⌥)キーを押しながらで一時的に消しゴム）",
+            forSegment: 2
+        )
+        canvasModeControl.setToolTip(
+            "マスク消しゴム（ドラッグでマスクを消す。Option(⌥)キーを押しながらで一時的に追加ペン）",
+            forSegment: 3
+        )
         canvasModeControl.selectedSegment = 0
         canvasModeControl.target = self
         canvasModeControl.action = #selector(canvasModeChanged)
@@ -1766,6 +1775,9 @@ final class MosaicWindowController: NSObject {
         }
         canvas.onMaskStrokeCompleted = { [weak self] roiID, stroke in
             self?.applyMaskStroke(roiID: roiID, stroke: stroke)
+        }
+        canvas.onMaskStrokeNeedsNewLayer = { [weak self] rect in
+            self?.addLayerForMaskPaint(rect: rect)
         }
         canvas.onROIGroupSelectionByMarquee = { [weak self] ids in
             self?.syncROIListSelectionFromCanvasGroup(ids)
@@ -3587,9 +3599,10 @@ final class MosaicWindowController: NSObject {
         switch canvasModeControl.selectedSegment {
         case 1: canvas.interactionMode = .marqueeSelect
         case 2: canvas.interactionMode = .maskPaint
+        case 3: canvas.interactionMode = .maskErase
         default: canvas.interactionMode = .edit
         }
-        maskBrushRow?.isHidden = canvas.interactionMode != .maskPaint
+        maskBrushRow?.isHidden = !canvas.interactionMode.editsMask
     }
 
     /// 保存済みログを削除する（ローテーションの世代ファイルも含む）。
@@ -3610,8 +3623,10 @@ final class MosaicWindowController: NSObject {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         MosaicWindowController.debugLogFile.removeAll()
-        // 退避済みの位置も戻す（消したのに「もう退避済み」と判断して書き出さなくなるのを防ぐ）
-        MosaicWindowController.lastArchivedLogLine.value = ""
+        // 退避位置を「今の最後の行」まで進める。
+        // ここを空に戻すと、30秒ごとの退避処理が今回起動分を丸ごと書き戻してしまい、
+        // 消したはずのログが復活する（GUI報告 2026-08-02「消去ボタンを押しても削除されない」）。
+        MosaicWindowController.markCurrentLogAsArchived()
         refreshDebugLog()
         updateStatus("保存済みのデバッグログを削除しました")
         AppLog.ui.info("デバッグログを削除しました")
@@ -3621,6 +3636,29 @@ final class MosaicWindowController: NSObject {
     @objc private func maskBrushWidthChanged() {
         canvas.maskBrushWidth = maskBrushSlider.doubleValue
         maskBrushValueLabel.stringValue = "\(Int(maskBrushSlider.doubleValue * 100)) %"
+    }
+
+    /// マスク追加ペンでレイヤ未選択のとき、モザイク対象へ新しいレイヤ（その他）を作る。
+    ///
+    /// 作ったレイヤは「その他」グループへ入れる（自動検出のカテゴリ別グループと並ぶ）。
+    /// マスクは手描きのみで使うので、生成方式は図形にせずROI形状（矩形）をそのまま使う。
+    private func addLayerForMaskPaint(rect: NormalizedRect) -> UUID? {
+        guard loadedImage != nil else { return nil }
+        pushUndoSnapshot(currentEditorState())
+        let roi = MosaicROI(
+            rect: rect,
+            confidence: 1.0,
+            source: "manual",
+            shape: .rectangle,
+            category: .other,
+            roiGroupName: MosaicTargetCategory.other.displayName
+        )
+        canvas.rois.append(roi)
+        canvas.selectedROIID = roi.id
+        hasUnsavedChanges = true
+        reloadLayerList()
+        updateStatus("モザイク対象へ新しいレイヤを追加しました（\(MosaicTargetCategory.other.displayName)）")
+        return roi.id
     }
 
     /// ペンで塗った／消したストロークを選択中のROIへ反映する。
@@ -7508,6 +7546,17 @@ extension MosaicWindowController {
     /// 退避済みの最後の行（時刻始まりなので文字列比較で新旧を判定できる）。
     nonisolated static let lastArchivedLogLine = LockedValue("")
 
+    /// 今ある分を「退避済み」として扱う（実際には書き出さない）。
+    /// ログ消去の直後に呼び、消した内容が退避処理で復活しないようにする。
+    nonisolated static func markCurrentLogAsArchived() {
+        let lines = fetchCurrentProcessLogText()
+            .split(separator: "\n", omittingEmptySubsequences: false)
+            .map(String.init)
+        if let last = lines.last, !last.isEmpty {
+            lastArchivedLogLine.value = last
+        }
+    }
+
     /// 直近10分・最大500件の自アプリログ（subsystem `com.yoshikawa.newMosaic`）を取得し、
     /// 「時刻 [category] レベル: メッセージ」形式のテキストへ整形する。
     /// バックグラウンドスレッドから呼ぶこと（メインスレッドで呼ぶとUIが固まる）。
@@ -7997,7 +8046,17 @@ final class ImageCanvasView: NSView {
     /// ツールバーで切替える画像上の操作モード。編集モードでは空白部分のドラッグで新規ROIを
     /// 作成する（従来通り）。範囲選択モードでは同じ操作が既存ROIのラバーバンド一括選択になる。
     /// Option(⌥)キーを押しながら開始したドラッグは、そのドラッグ限定で一時的に逆モードになる。
-    enum InteractionMode { case edit, marqueeSelect, maskPaint }
+    enum InteractionMode {
+        case edit
+        case marqueeSelect
+        /// マスク追加ペン。ドラッグでマスクを塗る（Option(⌥)で一時的に消しゴム）。
+        case maskPaint
+        /// マスク消しゴム。ドラッグでマスクを消す（Option(⌥)で一時的に追加ペン）。
+        case maskErase
+
+        /// ペン系（マスクを直接編集するモード）か。
+        var editsMask: Bool { self == .maskPaint || self == .maskErase }
+    }
     var interactionMode: InteractionMode = .edit {
         didSet { refreshHoverCursor() }
     }
@@ -8015,6 +8074,9 @@ final class ImageCanvasView: NSView {
     private var maskStrokeInProgress: (roiID: UUID, points: [NormalizedPoint], isAdditive: Bool)?
     /// ペンでマスクを修正したときの通知（再描画・undo登録はコントローラ側で行う）。
     var onMaskStrokeCompleted: ((UUID, ManualMaskStroke) -> Void)?
+    /// マスク追加ペンで、対象レイヤが無いときに新しいレイヤを作る要求。
+    /// 戻り値は作成したROIのID（作れなければnil）。
+    var onMaskStrokeNeedsNewLayer: ((NormalizedRect) -> UUID?)?
     var personLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var poseLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var personLayerMasks: [CGImage?] = [] { didSet { needsDisplay = true } }
@@ -8527,9 +8589,12 @@ final class ImageCanvasView: NSView {
         dragCurrent = nil
         let point = convert(event.locationInWindow, from: nil)
 
-        // ペン（マスク修正）モード: 選択中のROIへ塗る／消す
-        if interactionMode == .maskPaint {
-            beginMaskStroke(at: point, erasing: event.modifierFlags.contains(.option))
+        // ペン系（マスク追加ペン／マスク消しゴム）: 選択中のROIへ塗る／消す。
+        // Option(⌥)を押している間は、もう一方の動作へ一時的に切り替わる。
+        if interactionMode.editsMask {
+            let inverted = event.modifierFlags.contains(.option)
+            let erasing = (interactionMode == .maskErase) != inverted
+            beginMaskStroke(at: point, erasing: erasing)
             return
         }
 
@@ -8674,7 +8739,7 @@ final class ImageCanvasView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
-        if interactionMode == .maskPaint {
+        if interactionMode.editsMask {
             extendMaskStroke(to: convert(event.locationInWindow, from: nil))
             return
         }
@@ -8814,7 +8879,7 @@ final class ImageCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
-        if interactionMode == .maskPaint {
+        if interactionMode.editsMask {
             finishMaskStroke()
             return
         }
@@ -9769,8 +9834,23 @@ extension ImageCanvasView {
     fileprivate func beginMaskStroke(at point: NSPoint, erasing: Bool) {
         let imageRect = imageDrawRect()
         // 選択中のROIを優先し、無ければクリック位置のROIを対象にする
-        let target = rois.first { $0.id == selectedROIID }
+        var target = rois.first { $0.id == selectedROIID }
             ?? rois.last { viewRect(from: $0.rect, imageRect: imageRect).contains(point) }
+
+        // 対象が無い場合、追加ペンなら新しいレイヤを作ってそこへ塗る
+        // （消しゴムでは何もしない。消す対象が無いため）。
+        if target == nil, !erasing, imageRect.width > 0, imageRect.height > 0 {
+            // クリック位置を中心に、筆の太さから決めた正方形の枠を作る
+            let side = max(maskBrushWidth * 2, 0.06)
+            let centerX = (point.x - imageRect.minX) / imageRect.width
+            let centerY = (point.y - imageRect.minY) / imageRect.height
+            let rect = NormalizedRect(
+                x: centerX - side / 2, y: centerY - side / 2, width: side, height: side
+            ).clamped()
+            if let newID = onMaskStrokeNeedsNewLayer?(rect) {
+                target = rois.first { $0.id == newID }
+            }
+        }
         guard let roi = target, let local = maskStrokePoint(at: point, roi: roi) else { return }
         selectedROIID = roi.id
         maskStrokeInProgress = (roi.id, [local], !erasing)
