@@ -740,6 +740,35 @@ GUI報告 2026-07-31「下段の性器（女性）が2箇所、うち1つは範�
 なお `learned-prior` はユーザーごとの学習データに依存するため、テスト用サンプルでは再現しない。
 再現には `analysis` 行のROI一覧（`src=` を含む）が要る。
 
+## 5.52 AIモデルの個別インストール運用（2026-07-31 v0.0.00109〜）
+
+ONNXモデル8点（計451MB）をGit管理外・アプリ同梱対象外にした。
+GitHubの1ファイル100MB上限（`anime_seg` 168MB / `anime_pose` 128MB）に掛かり、
+66コミットが push できない状態になっていたため（`CLAUDE.md` §2.0 の「都度プッシュ」が
+成立しない）。
+
+### 5.52.1 配置と解決
+
+- 配置先: `~/Library/Application Support/newMosaic/Models/`
+- 解決: `YOLOONNXModel.cachedModelURL(resourceName:)` が「アプリバンドル内 → 上記フォルダ」の順に探す。
+  この経路は `part_seg.onnx`（学習モデル形状）向けに既に存在していたものをそのまま使う。
+- 導入: `scripts/install_models.sh <フォルダ>` / 確認: `scripts/install_models.sh --verify`
+- 一覧・入手元・ライセンス: `Docs/MODELS.md`
+
+### 5.52.2 影響
+
+- クローン直後は検出機能が使えない。エラーメッセージに配置先と導入手順を出す。
+- `dist/newMosaic.app` にもモデルは含まれない。別のMacで動かす場合はそのMacでの配置が必要。
+  `scripts/package_macos_app.sh` は未導入時に警告する。
+- アプリ自体は起動し、手動でのROI追加・モザイク処理は行える。
+
+### 5.52.3 履歴に残る分
+
+`git rm --cached` は今後の追跡を止めるだけで、過去のコミットに含まれるblobは残る。
+リモートに既にある4モデル（`censor_detect` / `person_detect` / `photo_censor_detect` /
+`domain_cls`、計114MB）は履歴に残したままとした。除去には公開済み履歴の書き換えと
+force push が要るため、必要になった時点で別途判断する。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

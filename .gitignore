@@ -12,3 +12,7 @@ Tests/SampleImages/*
 !Tests/SampleImages/README.md
 # 期待値は座標のみで著作物を含まないため、基準として管理下に置く
 !Tests/SampleImages/*.expected.json
+
+# ONNXモデル（計451MB）はGit管理外。GitHubの100MBファイル上限に掛かるため。
+# 導入は scripts/install_models.sh、一覧と入手元は Docs/MODELS.md を参照。
+Sources/MosaicCore/Resources/*.onnx

@@ -106,3 +106,20 @@
 - テスト135件PASS。
 - 作業時間: 約0.8時間
 
+### 2026-07-31 JST - Claude Opus 5 - 種別: 依頼内容 - 巨大モデルの除外と個別インストール運用
+
+```
+★プッシュ時オープンソースのモデルなど巨大なファイルは除外し、個別インストール運用にする。
+```
+
+### 2026-07-31 JST - Claude Opus 5 - 種別: 作業結果 - v0.0.00109
+
+- 作業AIモデル: Claude Opus 5
+- モデル8点（451MB）を `/Volumes/DATA/newMosaic_Models_Backup` へ退避後、Git管理外・同梱対象外へ変更。
+- `Package.swift` のリソース宣言から除外、`.gitignore` へ追加、追跡中の4点を `git rm --cached`。
+- `scripts/install_models.sh` と `Docs/MODELS.md` を追加。未検出時のエラーに導入手順を追記。
+- テスト135件PASS（Application Support 経由でモデルが読めることを実測）。
+- **未完**: 未push範囲のコミットに含まれる巨大blobの除去（`git filter-branch`）は破壊的操作のため
+  権限で拒否された。ユーザーの承認と実行が必要。バックアップ `backup-before-model-strip` を作成済み。
+- 作業時間: 約0.6時間
+

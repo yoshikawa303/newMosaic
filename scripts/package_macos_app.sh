@@ -10,6 +10,14 @@ CONTENTS_DIR="$APP_DIR/Contents"
 MACOS_DIR="$CONTENTS_DIR/MacOS"
 
 cd "$ROOT_DIR"
+
+# ONNXモデルは同梱しない（Git管理外・個別インストール運用。Docs/MODELS.md 参照）。
+# 生成した .app を別のMacで動かす場合は、そのMacでもモデルの配置が必要になる。
+if ! bash "$ROOT_DIR/scripts/install_models.sh" --verify >/dev/null 2>&1; then
+  echo "警告: AIモデルが未導入です。生成した .app は検出機能を使えません。" >&2
+  echo "      導入: scripts/install_models.sh <モデルを置いたフォルダ>（詳細は Docs/MODELS.md）" >&2
+fi
+
 swift build -c release
 
 rm -rf "$APP_DIR"
@@ -58,9 +66,9 @@ cat > "$CONTENTS_DIR/Info.plist" <<'PLIST'
   <key>CFBundlePackageType</key>
   <string>APPL</string>
   <key>CFBundleShortVersionString</key>
-  <string>0.0.00108</string>
+  <string>0.0.00109</string>
   <key>CFBundleVersion</key>
-  <string>108</string>
+  <string>109</string>
   <key>LSMinimumSystemVersion</key>
   <string>14.0</string>
   <key>NSHighResolutionCapable</key>

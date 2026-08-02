@@ -1,5 +1,24 @@
 # Changelog
 
+## v0.0.00109 - 2026-07-31
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 変更: AIモデル（計451MB）をアプリ同梱から**個別インストール運用**へ変更した。導入手順は `Docs/MODELS.md`。
+- 注意: 別のMacでアプリを動かす場合、そのMacにもモデルの配置が必要になった。
+
+■更新履歴
+
+- ONNXモデル8点をGit管理外とし、`Package.swift` のリソース宣言からも外した。
+  GitHubの1ファイル100MB上限（`anime_seg` 168MB / `anime_pose` 128MB）でpushできなくなったため。
+- 配置先は `~/Library/Application Support/newMosaic/Models/`。実行時の解決は既存の
+  `YOLOONNXModel.cachedModelURL(resourceName:)`（バンドル→上記フォルダ）がそのまま使える。
+- `scripts/install_models.sh` を追加（導入と `--verify` による確認）。
+- `Docs/MODELS.md` を追加（配置先・導入手順・モデル一覧・入手元・ライセンス・未導入時の挙動）。
+- モデル未検出時のエラーメッセージに、配置先パスと導入手順の参照先を含めた。
+- `scripts/package_macos_app.sh` はモデル未導入時に警告を出す（生成した `.app` は検出機能を使えないため）。
+- テスト135件PASS（モデルはApplication Support経由で読めることを実測で確認）。
+
 ## v0.0.00108 - 2026-07-31
 
 ■更新履歴（Readme / ChangeLog 用）

@@ -147,7 +147,11 @@ final class YOLOONNXModel {
                 return cached
             }
             throw CocoaError(.fileNoSuchFile, userInfo: [
-                NSLocalizedDescriptionKey: "検出モデル（\(resourceName).onnx）が見つかりません"
+                NSLocalizedDescriptionKey: """
+                    AIモデル（\(resourceName).onnx）が見つかりません。
+                    \(modelsDirectory.path) へ配置してください。
+                    導入手順は Docs/MODELS.md、または scripts/install_models.sh を参照してください。
+                    """
             ])
         }
         try FileManager.default.createDirectory(at: modelsDirectory, withIntermediateDirectories: true)
