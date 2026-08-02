@@ -261,6 +261,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         settingsMenu.addItem(menuItem("読込…", action: "loadProject", key: "", target: target))
         settingsMenu.addItem(.separator())
         settingsMenu.addItem(menuItem("初期化…", action: "resetAllSettings", key: "", target: target))
+        settingsMenu.addItem(menuItem("バックアップ…", action: "backupAllSettings", key: "", target: target))
         settingsItem.submenu = settingsMenu
         fileMenu.addItem(settingsItem)
         fileItem.submenu = fileMenu
@@ -988,6 +989,16 @@ final class MosaicWindowController: NSObject {
     private let libraryEngine: LibraryEngine = (try? LibraryEngine.defaultLibrary())
         ?? LibraryEngine(rootURL: FileManager.default.temporaryDirectory.appendingPathComponent("newMosaic/Library"))
     private let learningEngine: LearningEngine? = try? LearningEngine.defaultStore()
+    /// 学習モード（ユーザーの修正結果を学習データとして記録し、候補生成へ反映するか）。
+    ///
+    /// 既定はOFF。以前は常に学習しており、テスト用に描いたROIまで学習されて、
+    /// 別の人物へ誤った候補が提案されていた（GUI報告 2026-07-31）。
+    /// 学習するかどうかはユーザーが決める、という方針にした。
+    static let learningModeDefaultsKey = "Learning.Enabled"
+    private let learningModeButton = SquareIconButton()
+    private var isLearningModeEnabled: Bool {
+        AppSettings.shared.object(forKey: Self.learningModeDefaultsKey) as? Bool ?? false
+    }
     // MARK: 動画対応（MosaicVideoKitプラグイン）
     /// 動画サムネイル（LRUキャッシュ付き）。
     private let videoThumbnailProvider = VideoThumbnailProvider()
@@ -1463,11 +1474,12 @@ final class MosaicWindowController: NSObject {
         // 配置（ユーザー指定）: ファイル系 | 一括処理・候補生成・適用・レイヤ削除 | 元に戻す・やり直す |
         // 編集/範囲選択モード切替。ライブラリ関連（リンク切れ修正・画像出力・Finderで表示・削除）は
         // ライブラリパネル側の操作行へ移動した。
+        configureLearningModeButton()
         let toolbar = NSStackView(views: [
             openButton, pasteButton, linkFolderButton, makeToolbarSeparator(),
             batchButton, detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
-            canvasModeControl,
+            canvasModeControl, learningModeButton,
             NSView(), makeToolbarSeparator(), zoomOutButton, zoomFitButton, zoomInButton, zoomLabel
         ])
         toolbar.orientation = .horizontal
@@ -2173,6 +2185,42 @@ final class MosaicWindowController: NSObject {
     /// `AppShortcut` レジストリのidからツールバーボタンを構築する。ツールチップの
     /// ショートカット表示（例:「画像を開く (⌘O)」）は登録データのdisplayStringから自動生成するため、
     /// メニュー・レジストリと食い違うことがない。
+    /// 学習モードのON/OFFボタン。状態は記号と色で示す。
+    private func configureLearningModeButton() {
+        configureToolbarButton(
+            learningModeButton,
+            symbol: "graduationcap",
+            help: "学習モード",
+            action: #selector(toggleLearningMode)
+        )
+        refreshLearningModeButton()
+    }
+
+    private func refreshLearningModeButton() {
+        let enabled = isLearningModeEnabled
+        let symbol = enabled ? "graduationcap.fill" : "graduationcap"
+        learningModeButton.image = NSImage(
+            systemSymbolName: symbol,
+            accessibilityDescription: enabled ? "学習モードON" : "学習モードOFF"
+        )
+        learningModeButton.contentTintColor = enabled ? .controlAccentColor : .secondaryLabelColor
+        let help = enabled
+            ? "学習モード: ON（修正結果を学習し、次回以降の候補生成へ反映します）"
+            : "学習モード: OFF（学習データの記録も利用も行いません）"
+        learningModeButton.toolTip = help
+    }
+
+    /// 学習モードを切り替える。
+    @objc func toggleLearningMode() {
+        let next = !isLearningModeEnabled
+        AppSettings.shared.set(next, forKey: Self.learningModeDefaultsKey)
+        refreshLearningModeButton()
+        updateStatus(next
+            ? "学習モードをONにしました（修正結果を学習し、次回以降の候補生成へ反映します）"
+            : "学習モードをOFFにしました（学習データの記録も利用も行いません）")
+        AppLog.ui.info("学習モード: \(next ? "ON" : "OFF", privacy: .public)")
+    }
+
     private func shortcutToolbarButton(_ id: String, symbol: String, helpOverride: String? = nil) -> NSButton {
         let button = SquareIconButton()
         configureShortcutToolbarButton(button, id: id, symbol: symbol, helpOverride: helpOverride)
@@ -4783,7 +4831,9 @@ final class MosaicWindowController: NSObject {
     ) {
         let snapshot = output.snapshot
         var rois = output.rois
-        if let learningEngine {
+        // 学習モードOFFのときは、記録も利用も行わない。
+        // 利用だけ残すと、OFFにしても過去の学習由来の候補が出続けて止める手段が無くなる。
+        if let learningEngine, isLearningModeEnabled {
             rois = learningEngine.refineCandidates(rois, persons: snapshot.personBounds, image: sourceImage)
         }
         let beforeFilterCount = rois.count
@@ -5861,6 +5911,7 @@ final class MosaicWindowController: NSObject {
     /// 保存時に採用ROI（正例）と削除された自動候補（負例）を学習ストアへ記録する。
     /// 同一ROIの二重計上は `learnedROIIDs` で防ぐ。画像切替でリセットされる。
     private func recordLearningSamples() {
+        guard isLearningModeEnabled else { return }
         guard let learningEngine, let loadedImage else { return }
         let accepted = canvas.rois.filter { !learnedROIIDs.contains($0.id) }
         let rejected = lastAutoROIs.filter { auto in
@@ -6601,19 +6652,105 @@ extension MosaicWindowController {
         }
     }
 
-    /// すべてのアプリ設定を初期化する（確認ダイアログ付き）。ライブラリの画像・ROIは対象外。
+    /// 初期化する項目をユーザーが選べる形で実行する（確認ダイアログ付き）。
+    ///
+    /// 以前は「すべてのアプリ設定」を一括で戻すだけで、学習内容だけ消したい・レイアウトは
+    /// 残したい、といった要求に応えられなかった（ユーザー要望 2026-07-31）。
     @objc func resetAllSettings() {
+        let picker = MaintenanceItemPicker { $0.isCheckedByDefaultForReset }
         let alert = NSAlert()
-        alert.messageText = "すべての設定を初期化しますか？"
-        alert.informativeText = "モザイクスタイル、レイアウト、検出設定などのアプリ設定がすべて既定値に戻ります。ライブラリの画像やROIは削除されません。この操作は取り消せません。"
+        alert.messageText = "初期化する項目を選んでください"
+        alert.informativeText = "チェックした項目だけを既定の状態へ戻します。この操作は取り消せません。"
+        alert.accessoryView = picker.view
         alert.addButton(withTitle: "初期化")
         alert.addButton(withTitle: "キャンセル")
         alert.buttons.first?.hasDestructiveAction = true
         guard alert.runModal() == .alertFirstButtonReturn else { return }
-        AppSettings.shared.resetAll()
-        refreshAllUIFromSettings()
-        updateStatus("すべての設定を初期化しました")
-        AppLog.ui.info("すべての設定を初期化しました")
+
+        let items = picker.selected
+        guard !items.isEmpty else {
+            updateStatus("初期化する項目が選ばれていません")
+            return
+        }
+        var done: [String] = []
+        var failures: [String] = []
+        for item in items {
+            switch item {
+            case .appSettings, .windowLayout:
+                // どちらも settings.json に入っているため、片方でも選ばれていれば1回だけ実行する
+                if !done.contains("設定") {
+                    AppSettings.shared.resetAll()
+                    refreshAllUIFromSettings()
+                    done.append("設定")
+                }
+            case .learningData:
+                do {
+                    try learningEngine?.removeAllLearningData()
+                    done.append(item.title)
+                } catch {
+                    failures.append("\(item.title): \(error.localizedDescription)")
+                }
+            case .libraryIndex:
+                do {
+                    try libraryEngine.deleteItems(ids: libraryEngine.loadItems().map(\.id))
+                    reloadLibrary()
+                    done.append(item.title)
+                } catch {
+                    failures.append("\(item.title): \(error.localizedDescription)")
+                }
+            }
+        }
+        let doneText = items.map(\.title).joined(separator: "、")
+        if failures.isEmpty {
+            updateStatus("初期化しました: \(doneText)")
+        } else {
+            updateStatus("一部の初期化に失敗しました: \(failures.joined(separator: " / "))")
+        }
+        AppLog.ui.info("初期化: \(doneText, privacy: .public) 失敗\(failures.count)件")
+    }
+
+    /// 各種設定・動作状態・学習内容を1つのフォルダへ一括バックアップする。
+    ///
+    /// 項目ごとにON/OFFを選べる（ユーザー要望 2026-07-31）。すべてローカルへの複製で、
+    /// 外部へは送信しない。
+    @objc func backupAllSettings() {
+        let picker = MaintenanceItemPicker { $0.isCheckedByDefaultForBackup }
+        let alert = NSAlert()
+        alert.messageText = "バックアップする項目を選んでください"
+        alert.informativeText = "チェックした項目を1つのフォルダへ書き出します。ライブラリの元画像ファイル本体とAIモデルは含みません（容量が大きいため）。"
+        alert.accessoryView = picker.view
+        alert.addButton(withTitle: "保存先を選ぶ…")
+        alert.addButton(withTitle: "キャンセル")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        let items = picker.selected
+        guard !items.isEmpty else {
+            updateStatus("バックアップする項目が選ばれていません")
+            return
+        }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.canCreateDirectories = true
+        panel.prompt = "ここへバックアップ"
+        panel.message = "バックアップの保存先フォルダを選んでください"
+        guard panel.runModal() == .OK, let destination = panel.url else { return }
+
+        do {
+            let created = try MaintenanceBackup.create(
+                items: items,
+                into: destination,
+                settingsFileURL: AppSettings.resolveSettingsFileURL(),
+                learningDirectory: learningEngine?.storageDirectory,
+                libraryDirectory: libraryEngine.rootURL
+            )
+            NSWorkspace.shared.activateFileViewerSelecting([created])
+            updateStatus("バックアップしました: \(created.lastPathComponent)")
+            AppLog.ui.info("バックアップ: \(items.count)項目")
+        } catch {
+            AppLog.ui.error("バックアップに失敗: \(error.localizedDescription, privacy: .public)")
+            showError(error)
+        }
     }
 
     /// 「検出」セクションの各コントロールを保存値（無ければ既定値）へ戻す。
@@ -6658,6 +6795,7 @@ extension MosaicWindowController {
         let savedRatio = AppSettings.shared.object(forKey: Self.groinPositionDefaultsKey) as? Double ?? 0.45
         groinPositionSlider.doubleValue = savedRatio
         groinPositionValueLabel.stringValue = "\(Int(savedRatio * 100)) %"
+        refreshLearningModeButton()
         loadGenerationFilter()
         loadMosaicStyleSettings()
         loadLibraryViewPreferences()
@@ -9084,4 +9222,162 @@ final class AppSettings {
         values = [:]
         persistNow()
     }
+}
+
+// MARK: - 初期化・バックアップ（設定の保守）
+
+/// 初期化・バックアップの対象項目。
+///
+/// ユーザーが項目ごとにON/OFFを選べるようにするため、UIとは独立した一覧としてここに置く
+/// （ユーザー要望 2026-07-31）。追加する場合はここへ1件足せば両方のダイアログへ反映される。
+enum MaintenanceItem: String, CaseIterable, Sendable {
+    case appSettings
+    case windowLayout
+    case learningData
+    case libraryIndex
+
+    var title: String {
+        switch self {
+        case .appSettings: return "アプリ設定"
+        case .windowLayout: return "画面レイアウト・動作状態"
+        case .learningData: return "モデルの学習内容"
+        case .libraryIndex: return "ライブラリ（画像とROI）"
+        }
+    }
+
+    var detail: String {
+        switch self {
+        case .appSettings:
+            return "モザイクスタイル、検出設定、候補カテゴリなど"
+        case .windowLayout:
+            return "サイドパネルの配置・幅、表示モード、ズーム設定など"
+        case .learningData:
+            return "修正結果から学習した位置・大きさの統計とサンプル"
+        case .libraryIndex:
+            return "登録した画像・動画の一覧と保存済みROI（元画像ファイルは削除しません）"
+        }
+    }
+
+    /// 初期化の既定チェック状態。ライブラリは失うものが大きいので既定OFF。
+    var isCheckedByDefaultForReset: Bool {
+        switch self {
+        case .appSettings, .windowLayout: return true
+        case .learningData, .libraryIndex: return false
+        }
+    }
+
+    /// バックアップは既定ですべて対象にする（失って困るものを漏らさないため）。
+    var isCheckedByDefaultForBackup: Bool { true }
+}
+
+/// 初期化・バックアップのダイアログで使う、項目ごとのチェックボックス一覧。
+@MainActor
+final class MaintenanceItemPicker {
+    private var checkboxes: [MaintenanceItem: NSButton] = [:]
+    let view: NSStackView
+
+    init(defaultChecked: (MaintenanceItem) -> Bool) {
+        var rows: [NSView] = []
+        for item in MaintenanceItem.allCases {
+            let checkbox = NSButton(checkboxWithTitle: item.title, target: nil, action: nil)
+            checkbox.state = defaultChecked(item) ? .on : .off
+            checkboxes[item] = checkbox
+
+            let detail = NSTextField(labelWithString: item.detail)
+            detail.font = .systemFont(ofSize: 11)
+            detail.textColor = .secondaryLabelColor
+            // チェックボックスのラベルと縦位置を揃えるため、左に字下げを入れる
+            let detailRow = NSStackView(views: [detail])
+            detailRow.orientation = .horizontal
+            detailRow.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
+
+            let row = NSStackView(views: [checkbox, detailRow])
+            row.orientation = .vertical
+            row.alignment = .leading
+            row.spacing = 1
+            rows.append(row)
+        }
+        view = NSStackView(views: rows)
+        view.orientation = .vertical
+        view.alignment = .leading
+        view.spacing = 10
+        view.translatesAutoresizingMaskIntoConstraints = false
+        view.frame = NSRect(x: 0, y: 0, width: 380, height: CGFloat(MaintenanceItem.allCases.count) * 46)
+    }
+
+    var selected: [MaintenanceItem] {
+        MaintenanceItem.allCases.filter { checkboxes[$0]?.state == .on }
+    }
+}
+
+/// バックアップの作成・内容説明。
+///
+/// 対象はいずれもローカルのファイルで、外部へ送信しない。
+enum MaintenanceBackup {
+    /// 選択項目を1つのフォルダへ書き出す。戻り値は作成したフォルダ。
+    static func create(
+        items: [MaintenanceItem],
+        into destination: URL,
+        settingsFileURL: URL,
+        learningDirectory: URL?,
+        libraryDirectory: URL
+    ) throws -> URL {
+        let manager = FileManager.default
+        let stamp = ISO8601DateFormatter.backupStampFormatter.string(from: Date())
+        let root = destination.appendingPathComponent("newMosaic_Backup_\(stamp)")
+        try manager.createDirectory(at: root, withIntermediateDirectories: true)
+
+        for item in items {
+            switch item {
+            case .appSettings, .windowLayout:
+                // どちらも settings.json に入っているため、1回だけコピーする
+                let copied = root.appendingPathComponent("settings.json")
+                if manager.fileExists(atPath: settingsFileURL.path), !manager.fileExists(atPath: copied.path) {
+                    try manager.copyItem(at: settingsFileURL, to: copied)
+                }
+            case .learningData:
+                guard let learningDirectory, manager.fileExists(atPath: learningDirectory.path) else { continue }
+                try manager.copyItem(at: learningDirectory, to: root.appendingPathComponent("Learning"))
+            case .libraryIndex:
+                let index = libraryDirectory.appendingPathComponent("index.json")
+                guard manager.fileExists(atPath: index.path) else { continue }
+                try manager.copyItem(at: index, to: root.appendingPathComponent("library_index.json"))
+            }
+        }
+        try readme(for: items).write(
+            to: root.appendingPathComponent("README.txt"), atomically: true, encoding: .utf8
+        )
+        return root
+    }
+
+    static func readme(for items: [MaintenanceItem]) -> String {
+        var lines = [
+            "newMosaic バックアップ",
+            "作成日時: \(ISO8601DateFormatter.backupStampFormatter.string(from: Date()))",
+            "",
+            "含まれる項目:"
+        ]
+        for item in items {
+            lines.append("  - \(item.title): \(item.detail)")
+        }
+        lines.append("")
+        lines.append("戻し方:")
+        lines.append("  settings.json        → アプリ設定ファイルの場所へ上書き（ヘルプ＞デバッグで場所を確認できます）")
+        lines.append("  Learning/            → ~/Library/Application Support/newMosaic/Learning へ上書き")
+        lines.append("  library_index.json   → ライブラリフォルダの index.json へ上書き")
+        lines.append("")
+        lines.append("注意: ライブラリの元画像ファイル本体はバックアップに含まれません（容量が大きいため）。")
+        lines.append("      AIモデルも含まれません（Docs/MODELS.md の手順で再導入できます）。")
+        return lines.joined(separator: "\n")
+    }
+}
+
+extension ISO8601DateFormatter {
+    /// バックアップフォルダ名に使う `yyyyMMdd-HHmmss` 形式。
+    static let backupStampFormatter: DateFormatter = {
+        let formatter = DateFormatter()
+        formatter.dateFormat = "yyyyMMdd-HHmmss"
+        formatter.locale = Locale(identifier: "en_US_POSIX")
+        return formatter
+    }()
 }

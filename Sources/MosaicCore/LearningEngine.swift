@@ -113,6 +113,9 @@ public final class LearningEngine {
         self.decoder.dateDecodingStrategy = .iso8601
     }
 
+    /// 学習データの保存フォルダ。バックアップ・初期化で参照する。
+    public var storageDirectory: URL { rootURL }
+
     public static func defaultStore() throws -> LearningEngine {
         let support = try FileManager.default.url(
             for: .applicationSupportDirectory,
@@ -121,6 +124,42 @@ public final class LearningEngine {
             create: true
         )
         return LearningEngine(rootURL: support.appendingPathComponent("newMosaic/Learning"))
+    }
+
+    /// 学習データ（サンプル・統計・パッチ画像）をすべて削除する。
+    ///
+    /// 「モデルの学習内容の初期化」で使う。テスト用に描いたROIなど、意図しない学習が
+    /// 提案に効き続けるのを断ち切るため（GUI報告 2026-07-31）。
+    /// フォルダごと消して作り直す（部分削除で不整合が残らないようにする）。
+    public func removeAllLearningData() throws {
+        try syncQueue.sync {
+            let manager = FileManager.default
+            for url in [samplesURL, statsURL, patchesURL] where manager.fileExists(atPath: url.path) {
+                try manager.removeItem(at: url)
+            }
+            cachedSamples = nil
+        }
+    }
+
+    /// 学習データの概況（件数と保存量）。初期化・バックアップの確認表示に使う。
+    public func storageSummary() -> (sampleCount: Int, byteCount: Int) {
+        let samples = (try? loadSamples()) ?? []
+        let manager = FileManager.default
+        var bytes = 0
+        for url in [samplesURL, statsURL] {
+            if let attributes = try? manager.attributesOfItem(atPath: url.path),
+               let size = attributes[.size] as? Int {
+                bytes += size
+            }
+        }
+        if let enumerator = manager.enumerator(at: patchesURL, includingPropertiesForKeys: [.fileSizeKey]) {
+            for case let url as URL in enumerator {
+                if let size = try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize {
+                    bytes += size
+                }
+            }
+        }
+        return (samples.count, bytes)
     }
 
     // MARK: - 収集
