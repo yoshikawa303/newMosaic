@@ -1,5 +1,29 @@
 # Changelog
 
+## v0.0.00113 - 2026-08-02
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: 詳細設定・テンキー割当などの設定画面を一度閉じると、再度開けなくなったりアプリが強制終了する問題を修正。
+
+■更新履歴
+
+- 補助ウィンドウ（画像出力・詳細設定・テンキー割当・ショートカット一覧・デバッグログ）に
+  `isReleasedWhenClosed = false` を設定した。既定は `true` で、閉じるとAppKitがreleaseする。
+  アプリ側は同じウィンドウを `var ...Window: NSWindow?` で強参照しているため、閉じた時点で
+  **過剰解放になり参照が解放済みメモリを指していた**。
+  次に開こうとすると「既に開いていれば前面へ」の経路が解放済みへ `makeKeyAndOrderFront:` を
+  送り、開けない／落ちるという症状になっていた
+  （クラッシュ報告 2026-08-02「キー割当後、再度キー割当設定画面が開けない」）。
+- `windowWillClose` で該当する参照を `nil` にし、次回は作り直すようにした
+  （`releaseAuxiliaryWindowReference`）。閉じたウィンドウを使い回すと内容が古いままになるため。
+- 主ウィンドウと同じdelegateを共有するため、保存確認（`windowShouldClose`）とウィンドウ枠の保存
+  （`saveWindowFrame`）は補助ウィンドウを除外する（`isAuxiliaryWindow`）。
+- クラッシュレポートのシンボル名（`@objc VideoPreviewView.togglePlay()`）は誤帰属だった。
+  動画プレビューを開いていない操作でも同じスタックが出ており、レジスタが示すセレクタは
+  `makeKeyAndOrderFront:`、`x19` は `showAdvancedSettings()` を指していた。
+  v0.0.00112 で入れた動画プレビューの後始末も、それ自体はライフサイクルの欠陥として妥当なので残す。
+
 ## v0.0.00112 - 2026-08-02
 
 ■更新履歴（Readme / ChangeLog 用）

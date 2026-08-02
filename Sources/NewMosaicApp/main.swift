@@ -4717,9 +4717,31 @@ final class MosaicWindowController: NSObject {
         videoPreviewWindow = nil
     }
 
+    /// 閉じられた補助ウィンドウへの参照を解放する。
+    ///
+    /// 参照を残したままだと `showAdvancedSettings()` 等の「既に開いていれば前面へ出す」経路が
+    /// 閉じたウィンドウを掴み続ける。次に開くときは作り直す方が状態の食い違いも起きない。
+    fileprivate func releaseAuxiliaryWindowReference(_ window: NSWindow) {
+        if window === advancedSettingsWindow { advancedSettingsWindow = nil }
+        if window === exportWindow { exportWindow = nil }
+        if window === shortcutsWindow { shortcutsWindow = nil }
+        if window === numpadAssignmentWindow { numpadAssignmentWindow = nil }
+        if window === debugLogWindow { debugLogWindow = nil }
+    }
+
     /// このウィンドウが動画プレビューか。主ウィンドウと同じdelegateを共有するため必要。
     fileprivate func isVideoPreviewWindow(_ window: NSWindow) -> Bool {
         window === videoPreviewWindow
+    }
+
+    /// 主ウィンドウ以外の、このコントローラがdelegateを兼ねているウィンドウか。
+    fileprivate func isAuxiliaryWindow(_ window: NSWindow) -> Bool {
+        window === videoPreviewWindow
+            || window === advancedSettingsWindow
+            || window === exportWindow
+            || window === shortcutsWindow
+            || window === numpadAssignmentWindow
+            || window === debugLogWindow
     }
 
     /// 閉じられたウィンドウが動画プレビューなら後始末する（`windowWillClose`から呼ぶ）。
@@ -6201,18 +6223,22 @@ final class MosaicWindowController: NSObject {
 
 extension MosaicWindowController: NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        // 動画プレビューは編集を持たないので、保存確認なしで閉じてよい
-        // （主ウィンドウと同じdelegateを共有しているため明示的に分ける）。
-        guard !isVideoPreviewWindow(sender) else { return true }
+        // 補助ウィンドウ（動画プレビュー・詳細設定・各種一覧）は編集を持たないので、
+        // 保存確認なしで閉じてよい。主ウィンドウと同じdelegateを共有しているため明示的に分ける。
+        guard !isAuxiliaryWindow(sender) else { return true }
         return confirmCurrentChangesBeforeLeaving()
     }
 
-    /// 閉じられたのが動画プレビューなら、再生とオブザーバを止めて参照を解放する。
-    /// これを行わないとコントロールの`target`が解放済みの自分自身を指したまま残る
-    /// （クラッシュ報告 2026-08-02）。
+    /// 補助ウィンドウが閉じられたときの後始末。
+    ///
+    /// 保持している参照を解放して、次に開くときは作り直させる。
+    /// これをしないと閉じたウィンドウを使い回そうとして、内容が古いまま表示されたり、
+    /// `isReleasedWhenClosed` と相まって解放済みメモリへメッセージが飛んだりする
+    /// （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
     func windowWillClose(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
         finishVideoPreviewIfNeeded(window)
+        releaseAuxiliaryWindowReference(window)
     }
 
     /// ウィンドウ枠（位置・サイズ）をポータブル設定へ保存する。
@@ -6233,8 +6259,8 @@ extension MosaicWindowController: NSWindowDelegate {
 
     private func saveWindowFrame(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
-        // 動画プレビューの枠を主ウィンドウの設定へ書き込まないようにする
-        guard !isVideoPreviewWindow(window) else { return }
+        // 補助ウィンドウの枠を主ウィンドウの設定へ書き込まないようにする
+        guard !isAuxiliaryWindow(window) else { return }
         AppSettings.shared.set(NSStringFromRect(window.frame), forKey: "Layout.windowFrame")
     }
 }
@@ -6402,6 +6428,13 @@ extension MosaicWindowController {
             defer: false
         )
         window.title = "画像出力"
+        // 保持している参照があるので、閉じてもAppKitに解放させない。
+        // `isReleasedWhenClosed` は既定が `true` で、閉じるとAppKitがreleaseする。
+        // ARCの強参照と組み合わさると過剰解放になり、次に開こうとした時点で
+        // 解放済みメモリへ `makeKeyAndOrderFront:` を送って落ちる
+        // （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.minSize = NSSize(width: 640, height: 420)
         window.contentView = container
         return window
@@ -6917,6 +6950,13 @@ extension MosaicWindowController {
             defer: false
         )
         window.title = "詳細設定"
+        // 保持している参照があるので、閉じてもAppKitに解放させない。
+        // `isReleasedWhenClosed` は既定が `true` で、閉じるとAppKitがreleaseする。
+        // ARCの強参照と組み合わさると過剰解放になり、次に開こうとした時点で
+        // 解放済みメモリへ `makeKeyAndOrderFront:` を送って落ちる
+        // （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         let container = NSView()
         container.addSubview(content)
         NSLayoutConstraint.activate([
@@ -7060,6 +7100,13 @@ extension MosaicWindowController {
             defer: false
         )
         window.title = "テンキー割当"
+        // 保持している参照があるので、閉じてもAppKitに解放させない。
+        // `isReleasedWhenClosed` は既定が `true` で、閉じるとAppKitがreleaseする。
+        // ARCの強参照と組み合わさると過剰解放になり、次に開こうとした時点で
+        // 解放済みメモリへ `makeKeyAndOrderFront:` を送って落ちる
+        // （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.minSize = NSSize(width: 380, height: 240)
         window.contentView = scroll
         window.center()
@@ -7162,6 +7209,13 @@ extension MosaicWindowController {
             defer: false
         )
         window.title = "ショートカット一覧"
+        // 保持している参照があるので、閉じてもAppKitに解放させない。
+        // `isReleasedWhenClosed` は既定が `true` で、閉じるとAppKitがreleaseする。
+        // ARCの強参照と組み合わさると過剰解放になり、次に開こうとした時点で
+        // 解放済みメモリへ `makeKeyAndOrderFront:` を送って落ちる
+        // （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.minSize = NSSize(width: 360, height: 300)
         window.contentView = scroll
         window.center()
@@ -7220,6 +7274,13 @@ extension MosaicWindowController {
             defer: false
         )
         window.title = "デバッグログ"
+        // 保持している参照があるので、閉じてもAppKitに解放させない。
+        // `isReleasedWhenClosed` は既定が `true` で、閉じるとAppKitがreleaseする。
+        // ARCの強参照と組み合わさると過剰解放になり、次に開こうとした時点で
+        // 解放済みメモリへ `makeKeyAndOrderFront:` を送って落ちる
+        // （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
+        window.isReleasedWhenClosed = false
+        window.delegate = self
         window.minSize = NSSize(width: 420, height: 260)
         window.contentView = content
         window.center()
