@@ -854,6 +854,51 @@ v0.0.00107 の `expandGenitalEllipses` は検出直後に一律1.15倍してい�
 診断ログの `clip=` は常に `shape` になる。`shapeConformCoverage`（0.85）は切り方の分岐には
 使わなくなり、「SAMが対象を分離できているか」の測定の目安としてのみ残す。
 
+## 5.55 デバッグログの永続化と動画プレビューの後始末（2026-08-02 v0.0.00112〜）
+
+### 5.55.1 ログをファイルへ残す
+
+従来のデバッグログは `OSLogStore(scope: .currentProcessIdentifier)` から直近10分を読むだけで、
+**プロセス内のログしか取れず再起動で前回分が消えていた**。不具合報告は再起動後になることが
+多く、肝心のログが失われていた（ユーザー要望 2026-08-02）。
+
+`RotatingLogFile`（MosaicCore）を新設し、`~/Library/Application Support/newMosaic/Logs/` へ
+1ファイル1MB・最大5世代で保存する。
+
+    newMosaic.log      ← 現在書き込み中（最新）
+    newMosaic.1.log    ← 1つ前
+    ...
+    newMosaic.4.log    ← 最も古い（これを超えた分は削除）
+
+退避のタイミングは起動直後・30秒ごと・終了時（`AppDelegate.startDebugLogArchiving`）。
+ファイルI/Oは主スレッドで行わない。デバッグログ画面は「保存済み＋今回起動分」を連結して表示する。
+
+### 5.55.2 動画プレビューの後始末（クラッシュ対応）
+
+クラッシュ報告 2026-08-02（v0.0.00110、`EXC_BAD_ACCESS` / `@objc VideoPreviewView.togglePlay()`
+内の `objc_msgSend`）への対応。
+
+プレビューウィンドウに delegate が無く、閉じるボタン（赤い×）で閉じても `closeVideoPreview()` が
+呼ばれなかった。そのため次のものが残り続けていた:
+
+- `AVPlayer` の再生と `addPeriodicTimeObserver` の登録
+- `playPauseButton` / `slider` の `target`（＝`VideoPreviewView` 自身）
+
+この状態で `VideoPreviewView` が解放されると、コントロールの `target` が解放済みメモリを指す。
+その後の操作で `togglePlay()` へ入り、内部の `player` / `playPauseButton` へのメッセージ送信で
+落ちる — 報告のスタックと一致する。
+
+対処:
+
+- `windowWillClose` で `stop()` を呼び、`videoPreviewWindow` を解放する
+- `stop()` は `playerLayer.player` とコントロールの `target`/`action` も解除する（冪等）
+- 主ウィンドウと同じ delegate を共有するため、`windowShouldClose`（保存確認）と
+  `saveWindowFrame`（枠の保存）はウィンドウ判定で分岐する
+
+**未確認**: 報告されたクラッシュの再現手順は不明で、上記が唯一の原因である確証は無い。
+ライフサイクルの欠陥としては明確なので先に塞ぐ。再発する場合は、
+§5.55.1 の保存済みログ（再起動後も残る）とあわせて操作手順を確認する。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

@@ -1,5 +1,36 @@
 # Changelog
 
+## v0.0.00112 - 2026-08-02
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 改善: デバッグログをファイルへ保存するようにした。アプリを再起動しても前回のログが残る（1ファイル1MB・最大5世代）。
+- 変更: ツールバーの「レイヤ削除」を「全レイヤ削除」に変更。
+- 修正: 動画プレビューを閉じたあとの操作でアプリが異常終了することがある問題に対処した。
+
+■更新履歴
+
+- `RotatingLogFile`（MosaicCore）を新設。1ファイル1MB・最大5世代でローテーションする。
+  保存先は `~/Library/Application Support/newMosaic/Logs/`。
+  - 従来は `OSLogStore(scope: .currentProcessIdentifier)` から直近10分を読むだけで、
+    プロセス内のログしか取れず**再起動で前回分が消えていた**。
+  - 起動直後・30秒ごと・終了時にファイルへ退避する（`AppDelegate.startDebugLogArchiving`）。
+    ファイルI/Oは主スレッドで行わない。
+  - デバッグログ画面は「保存済み（前回起動分を含む）＋今回起動分」を連結して表示する。
+- 「レイヤ削除」→「全レイヤ削除」へ改名（ツールバー・ショートカット一覧・関連コメント）。
+- 動画プレビューの後始末を確実にした（クラッシュ報告 2026-08-02、
+  `@objc VideoPreviewView.togglePlay()` 内の `objc_msgSend` で EXC_BAD_ACCESS）。
+  - プレビューウィンドウに delegate が無く、閉じるボタンで閉じても `stop()` が呼ばれなかった。
+    そのため再生・時刻オブザーバ・コントロールの `target`（＝自分自身）が残り続けていた。
+  - `windowWillClose` で `stop()` を呼び、参照を解放する。
+  - `stop()` は `playerLayer.player` とコントロールの `target`/`action` も解除する（冪等）。
+  - 主ウィンドウと同じ delegate を共有するため、`windowShouldClose` と枠の保存は
+    ウィンドウ判定で分岐する（プレビューでは保存確認も枠保存も行わない）。
+- ローカルに残っていたONNXモデル8点を `Sources/MosaicCore/Resources/` から削除した
+  （v0.0.00109 で Package の参照からは外したが実体が残り、SwiftPMが未処理ファイルとして警告していた）。
+  実行時の参照先は `~/Library/Application Support/newMosaic/Models/`（`Docs/MODELS.md`）。
+- テスト137件PASS（ログローテーションの2件を追加）。
+
 ## v0.0.00111 - 2026-07-31
 
 ■更新履歴（Readme / ChangeLog 用）

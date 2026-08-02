@@ -142,6 +142,10 @@ final class NewMosaicApplication {
 final class AppDelegate: NSObject, NSApplicationDelegate {
     private var window: NSWindow?
     private let controller = MosaicWindowController()
+    /// デバッグログをファイルへ退避する周期（秒）。
+    /// 退避しておかないと、アプリを再起動した時点で前回のログが失われる。
+    private static let logArchiveInterval: TimeInterval = 30
+    private var logArchiveTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         AppLog.ui.info("applicationDidFinishLaunching: \(Self.windowTitle(), privacy: .public)")
@@ -170,6 +174,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
         controller.installNumpadShortcutMonitor()
+        startDebugLogArchiving()
         DispatchQueue.main.async { [controller] in
             controller.applyInitialLayoutIfNeeded()
         }
@@ -886,12 +891,26 @@ private final class VideoPreviewView: NSView {
         playerLayer.frame = CGRect(x: 0, y: 36, width: bounds.width, height: max(0, bounds.height - 36))
     }
 
+    /// 再生停止・時刻オブザーバの解除・コントロールのtarget解除。
+    ///
+    /// **必ず呼ぶこと**（ウィンドウを閉じるとき・差し替えるとき）。呼ばないと:
+    /// - AVPlayerが再生を続け、時刻オブザーバも登録されたまま残る
+    /// - ボタン/スライダーの`target`が解放済みの自分自身を指したままになり、
+    ///   その後の操作で解放済みメモリへメッセージが飛ぶ（クラッシュ報告 2026-08-02。
+    ///   `@objc VideoPreviewView.togglePlay()` 内の `objc_msgSend` で EXC_BAD_ACCESS）
+    ///
+    /// 何度呼んでも安全（冪等）。
     func stop() {
         player.pause()
         if let timeObserver {
             player.removeTimeObserver(timeObserver)
             self.timeObserver = nil
         }
+        playerLayer.player = nil
+        playPauseButton.target = nil
+        playPauseButton.action = nil
+        slider.target = nil
+        slider.action = nil
     }
 
     @objc private func togglePlay() {
@@ -1039,7 +1058,7 @@ final class MosaicWindowController: NSObject {
     /// （`updateLibraryModeVisibility()`参照。グリッド以外ではサムネイルサイズに意味がないため）。
     private let thumbSmallerButton = SquareIconButton()
     private let thumbLargerButton = SquareIconButton()
-    /// 画像が開かれている時だけ有効にするツールバーボタン（候補生成・適用・レイヤ削除など）。
+    /// 画像が開かれている時だけ有効にするツールバーボタン（候補生成・適用・全レイヤ削除など）。
     private var imageDependentToolbarButtons: [NSButton] = []
     private let undoButton = NSButton(title: "元に戻す", target: nil, action: nil)
     private let redoButton = NSButton(title: "やり直す", target: nil, action: nil)
@@ -1363,7 +1382,7 @@ final class MosaicWindowController: NSObject {
                     key: "z", modifiers: [.command], isRecommended: true, action: #selector(performUndo)),
         AppShortcut(id: "performRedo", category: "編集", title: "やり直す",
                     key: "z", modifiers: [.command, .shift], isRecommended: true, action: #selector(performRedo)),
-        AppShortcut(id: "clearROIs", category: "編集", title: "レイヤ削除",
+        AppShortcut(id: "clearROIs", category: "編集", title: "全レイヤ削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(clearROIs)),
         AppShortcut(id: "generateCandidates", category: "処理", title: "自動候補生成",
                     key: "g", modifiers: [.command], isRecommended: true, action: #selector(generateCandidates)),
@@ -1469,7 +1488,7 @@ final class MosaicWindowController: NSObject {
         zoomLabel.alignment = .center
         zoomLabel.widthAnchor.constraint(equalToConstant: 44).isActive = true
 
-        // 配置（ユーザー指定）: ファイル系 | 一括処理・候補生成・適用・レイヤ削除 | 元に戻す・やり直す |
+        // 配置（ユーザー指定）: ファイル系 | 一括処理・候補生成・適用・全レイヤ削除 | 元に戻す・やり直す |
         // 編集/範囲選択モード切替。ライブラリ関連（リンク切れ修正・画像出力・Finderで表示・削除）は
         // ライブラリパネル側の操作行へ移動した。
         configureLearningModeButton()
@@ -4682,6 +4701,9 @@ final class MosaicWindowController: NSObject {
         window.title = "動画プレビュー: \(item.sourceName)"
         window.contentView = preview
         window.isReleasedWhenClosed = false
+        // 閉じるボタン（赤い×）で閉じたときも後始末する。delegateが無いと再生が続き、
+        // 時刻オブザーバとコントロールのtargetが残ったままになる（クラッシュ報告 2026-08-02）。
+        window.delegate = self
         window.center()
         window.makeKeyAndOrderFront(nil)
         videoPreviewWindow = window
@@ -4690,7 +4712,21 @@ final class MosaicWindowController: NSObject {
     /// 動画プレビューを閉じる（再生を止めてから破棄する）。
     private func closeVideoPreview() {
         (videoPreviewWindow?.contentView as? VideoPreviewView)?.stop()
+        videoPreviewWindow?.delegate = nil
         videoPreviewWindow?.orderOut(nil)
+        videoPreviewWindow = nil
+    }
+
+    /// このウィンドウが動画プレビューか。主ウィンドウと同じdelegateを共有するため必要。
+    fileprivate func isVideoPreviewWindow(_ window: NSWindow) -> Bool {
+        window === videoPreviewWindow
+    }
+
+    /// 閉じられたウィンドウが動画プレビューなら後始末する（`windowWillClose`から呼ぶ）。
+    fileprivate func finishVideoPreviewIfNeeded(_ window: NSWindow) {
+        guard window === videoPreviewWindow else { return }
+        (window.contentView as? VideoPreviewView)?.stop()
+        window.delegate = nil
         videoPreviewWindow = nil
     }
 
@@ -5195,7 +5231,7 @@ final class MosaicWindowController: NSObject {
         }
     }
 
-    /// ツールバー「レイヤ削除」: ROIだけでなく人物/骨格検出レイヤも含めた全レイヤを削除する
+    /// ツールバー「全レイヤ削除」: ROIだけでなく人物/骨格検出レイヤも含めた全レイヤを削除する
     /// （従来はROIのみクリアで「すべてのレイヤが削除されない」と報告があった）。
     @objc private func clearROIs() {
         let hasDetectionLayers = !canvas.personLayerRects.isEmpty || !canvas.poseLayerRects.isEmpty
@@ -5289,7 +5325,7 @@ final class MosaicWindowController: NSObject {
         updateImageActionAvailability()
     }
 
-    /// 画像を開いていない状態では、画像に対する操作（候補生成・モザイク適用・レイヤ削除）を無効化する。
+    /// 画像を開いていない状態では、画像に対する操作（候補生成・モザイク適用・全レイヤ削除）を無効化する。
     /// 従来は押せてしまい、「先に画像を開いてください」というエラーで初めて分かる作りだった。
     private func updateImageActionAvailability() {
         let hasImage = loadedImage != nil
@@ -6165,7 +6201,18 @@ final class MosaicWindowController: NSObject {
 
 extension MosaicWindowController: NSWindowDelegate {
     func windowShouldClose(_ sender: NSWindow) -> Bool {
-        confirmCurrentChangesBeforeLeaving()
+        // 動画プレビューは編集を持たないので、保存確認なしで閉じてよい
+        // （主ウィンドウと同じdelegateを共有しているため明示的に分ける）。
+        guard !isVideoPreviewWindow(sender) else { return true }
+        return confirmCurrentChangesBeforeLeaving()
+    }
+
+    /// 閉じられたのが動画プレビューなら、再生とオブザーバを止めて参照を解放する。
+    /// これを行わないとコントロールの`target`が解放済みの自分自身を指したまま残る
+    /// （クラッシュ報告 2026-08-02）。
+    func windowWillClose(_ notification: Notification) {
+        guard let window = notification.object as? NSWindow else { return }
+        finishVideoPreviewIfNeeded(window)
     }
 
     /// ウィンドウ枠（位置・サイズ）をポータブル設定へ保存する。
@@ -6186,6 +6233,8 @@ extension MosaicWindowController: NSWindowDelegate {
 
     private func saveWindowFrame(_ notification: Notification) {
         guard let window = notification.object as? NSWindow else { return }
+        // 動画プレビューの枠を主ウィンドウの設定へ書き込まないようにする
+        guard !isVideoPreviewWindow(window) else { return }
         AppSettings.shared.set(NSStringFromRect(window.frame), forKey: "Layout.windowFrame")
     }
 }
@@ -7214,10 +7263,45 @@ extension MosaicWindowController {
         }
     }
 
+    /// 保存済みログ（前回起動分を含む）＋今回起動分を連結して返す。
+    ///
+    /// 従来は`OSLogStore`から直近10分を読むだけで、アプリを再起動すると前回のログが
+    /// 消えていた（ユーザー要望 2026-08-02）。不具合の報告は再起動後になることが多いため、
+    /// 起動中は定期的にファイルへ退避し、表示時は保存済み＋今回分を合わせて出す。
+    nonisolated static func fetchDebugLogText() -> String {
+        let archived = debugLogFile.readAll()
+        let current = fetchCurrentProcessLogText()
+        if archived.isEmpty { return current }
+        return archived + "\n--- ここから今回の起動 ---\n" + current
+    }
+
+    /// ローテーション付きの保存先（1ファイル1MB・最大5世代）。
+    nonisolated static let debugLogFile: RotatingLogFile = {
+        let support = (try? FileManager.default.url(
+            for: .applicationSupportDirectory, in: .userDomainMask, appropriateFor: nil, create: true
+        )) ?? FileManager.default.temporaryDirectory
+        return RotatingLogFile(directory: support.appendingPathComponent("newMosaic/Logs"))
+    }()
+
+    /// 今回の起動分のうち、まだファイルへ退避していない行を書き出す。
+    /// 起動直後・一定間隔・終了時に呼ぶ。
+    nonisolated static func archiveDebugLog() {
+        let text = fetchCurrentProcessLogText()
+        guard !text.isEmpty else { return }
+        let lines = text.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        let newLines = lines.filter { $0 > lastArchivedLogLine.value }
+        guard !newLines.isEmpty else { return }
+        debugLogFile.append(lines: newLines)
+        if let last = newLines.last { lastArchivedLogLine.value = last }
+    }
+
+    /// 退避済みの最後の行（時刻始まりなので文字列比較で新旧を判定できる）。
+    nonisolated static let lastArchivedLogLine = LockedValue("")
+
     /// 直近10分・最大500件の自アプリログ（subsystem `com.yoshikawa.newMosaic`）を取得し、
     /// 「時刻 [category] レベル: メッセージ」形式のテキストへ整形する。
     /// バックグラウンドスレッドから呼ぶこと（メインスレッドで呼ぶとUIが固まる）。
-    nonisolated private static func fetchDebugLogText() -> String {
+    nonisolated private static func fetchCurrentProcessLogText() -> String {
         guard let store = try? OSLogStore(scope: .currentProcessIdentifier) else {
             return "ログストアを取得できませんでした。"
         }
@@ -7235,7 +7319,7 @@ extension MosaicWindowController {
             lines.append("\(time) [\(logEntry.category)] \(logEntry.level.description): \(entry.composedMessage)")
             if lines.count >= 500 { break }
         }
-        return lines.isEmpty ? "直近10分のログはありません。" : lines.joined(separator: "\n")
+        return lines.joined(separator: "\n")
     }
 }
 
@@ -9380,4 +9464,42 @@ extension ISO8601DateFormatter {
         formatter.locale = Locale(identifier: "en_US_POSIX")
         return formatter
     }()
+}
+
+/// ロックで守った可変値。`nonisolated static let` から安全に読み書きするための最小の入れ物。
+final class LockedValue<Value>: @unchecked Sendable {
+    private var storage: Value
+    private let lock = NSLock()
+
+    init(_ initial: Value) { storage = initial }
+
+    var value: Value {
+        get { lock.lock(); defer { lock.unlock() }; return storage }
+        set { lock.lock(); defer { lock.unlock() }; storage = newValue }
+    }
+}
+
+extension AppDelegate {
+    /// デバッグログの定期退避を開始する。
+    ///
+    /// `OSLogStore` はプロセス内のログしか読めないため、退避しないと再起動で前回分が消える
+    /// （ユーザー要望 2026-08-02）。定期的に、および終了時にファイルへ書き出す。
+    fileprivate func startDebugLogArchiving() {
+        MosaicWindowController.archiveDebugLog()
+        let timer = Timer.scheduledTimer(withTimeInterval: Self.logArchiveInterval, repeats: true) { _ in
+            // ファイルI/Oを主スレッドで行わない
+            DispatchQueue.global(qos: .utility).async {
+                MosaicWindowController.archiveDebugLog()
+            }
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        logArchiveTimer = timer
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        logArchiveTimer?.invalidate()
+        logArchiveTimer = nil
+        // 終了直前の分まで残す（クラッシュ直前の状況を追えるようにする）
+        MosaicWindowController.archiveDebugLog()
+    }
 }

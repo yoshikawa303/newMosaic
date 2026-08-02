@@ -2018,3 +2018,52 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         #expect(proposal.rect.height <= smallPerson.height + 0.001)
     }
 }
+
+/// ローテーション付きログ: 上限を超えたら世代を繰り上げ、保持数を超えた分は消える。
+@Test func rotatingLogFileRotatesAndKeepsLimitedGenerations() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("log-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    // 検証しやすいよう小さめの上限にする（方式は本番と同じ）
+    let log = RotatingLogFile(directory: directory, maxBytes: 1024, maxFiles: 3)
+
+    // 1行約100バイト。上限1024を何度も跨ぐまで書く
+    let line = String(repeating: "あ", count: 32)
+    for index in 0..<60 {
+        log.append("\(index) \(line)")
+    }
+
+    // 現在＋世代2つ＝最大3ファイルまで
+    #expect(log.existingURLs().count == 3)
+    #expect(!FileManager.default.fileExists(atPath: log.rotatedURL(index: 3).path))
+
+    // 各ファイルは上限をおおむね超えない（1行分は超え得る）
+    for url in log.existingURLs() {
+        let size = try FileManager.default.attributesOfItem(atPath: url.path)[.size] as? Int ?? 0
+        #expect(size <= 1024 + 200, "size=\(size) url=\(url.lastPathComponent)")
+    }
+
+    // 連結すると古い順に並び、最後の行は最新
+    let all = log.readAll()
+    #expect(all.contains("59 "))
+    let lines = all.split(separator: "\n")
+    #expect(lines.last?.hasPrefix("59 ") == true)
+}
+
+/// ローテーション付きログ: 追記・全消去が期待どおり動く。
+@Test func rotatingLogFileAppendsAndClears() {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("log-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let log = RotatingLogFile(directory: directory)
+
+    #expect(log.readAll().isEmpty)
+    log.append(lines: ["1行目", "2行目"])
+    log.append("3行目")
+    let all = log.readAll()
+    #expect(all == "1行目\n2行目\n3行目\n")
+
+    log.removeAll()
+    #expect(log.readAll().isEmpty)
+    #expect(log.existingURLs().isEmpty)
+}

@@ -97,3 +97,14 @@
 - **プライバシー方針の例外**: 本記録のみ、ユーザー要望（2026-07-31）により**ソース画像のファイル名とMD5**を残す。
   同一ファイルかどうかを照合するため。フルパス（フォルダ構成）と画像内容は残さない。
 - 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Detection"' --last 10m | grep analysis`
+
+## ログの永続化とローテーション（v0.0.00112〜）
+
+- 保存先: `~/Library/Application Support/newMosaic/Logs/`
+- 形式: `newMosaic.log`（最新）＋ `newMosaic.1.log` 〜 `newMosaic.4.log`（世代）
+- 上限: 1ファイル1MB・最大5世代（`RotatingLogFile.defaultMaxBytes` / `defaultMaxFiles`）
+- 退避タイミング: 起動直後・30秒ごと・アプリ終了時
+- 経緯: `OSLogStore(scope: .currentProcessIdentifier)` はプロセス内のログしか読めず、
+  再起動すると前回分が失われていた。報告は再起動後になることが多いためファイルへ残す。
+- デバッグログ画面は「保存済み（前回起動分を含む）＋今回起動分」を連結して表示する。
+- 完全ローカルのファイル操作で、外部へは送信しない。
