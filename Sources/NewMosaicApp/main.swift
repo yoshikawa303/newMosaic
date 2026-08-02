@@ -1072,8 +1072,13 @@ final class MosaicWindowController: NSObject {
     private let zoomLabel = NSTextField(labelWithString: "100%")
     /// ツールバーのモード切替（編集モード/範囲選択モード）。既定は編集モード（従来通りの挙動）。
     /// Option(⌥)キーを押しながらのドラッグで、そのドラッグ限定に一時的にモードを入れ替えられる。
+    /// ペン（マスク修正）の太さ設定。マスク修正モードのときだけ表示する。
+    private let maskBrushSlider = NSSlider(value: 0.15, minValue: 0.01, maxValue: 0.6, target: nil, action: nil)
+    private let maskBrushValueLabel = NSTextField(labelWithString: "15 %")
+    private var maskBrushRow: NSView?
+
     private let canvasModeControl = NSSegmentedControl(
-        labels: ["", ""],
+        labels: ["", "", ""],
         trackingMode: .selectOne,
         target: nil,
         action: nil
@@ -1519,8 +1524,10 @@ final class MosaicWindowController: NSObject {
         // 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル（選択するモード）。
         canvasModeControl.setImage(NSImage(systemSymbolName: "rectangle.dashed", accessibilityDescription: "編集モード"), forSegment: 0)
         canvasModeControl.setImage(NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: "範囲選択モード"), forSegment: 1)
+        canvasModeControl.setImage(NSImage(systemSymbolName: "paintbrush.pointed", accessibilityDescription: "マスク修正モード"), forSegment: 2)
         canvasModeControl.setToolTip("編集モード（ドラッグでROIを新規作成。従来通り）", forSegment: 0)
         canvasModeControl.setToolTip("範囲選択モード（ドラッグで複数ROIを一括選択。Option(⌥)キーで一時的に編集モードへ切替）", forSegment: 1)
+        canvasModeControl.setToolTip("マスク修正モード（選択中のレイヤのマスクをドラッグで塗る。Option(⌥)キーを押しながらで消す）", forSegment: 2)
         canvasModeControl.selectedSegment = 0
         canvasModeControl.target = self
         canvasModeControl.action = #selector(canvasModeChanged)
@@ -1767,6 +1774,9 @@ final class MosaicWindowController: NSObject {
             self.loadMosaicStyleForSelection(roi)
             self.loadDetectionSettingForSelection(roi)
             self.syncROIListSelectionFromCanvas()
+        }
+        canvas.onMaskStrokeCompleted = { [weak self] roiID, stroke in
+            self?.applyMaskStroke(roiID: roiID, stroke: stroke)
         }
         canvas.onROIGroupSelectionByMarquee = { [weak self] ids in
             self?.syncROIListSelectionFromCanvasGroup(ids)
@@ -2598,6 +2608,18 @@ final class MosaicWindowController: NSObject {
         maskThresholdValueLabel.stringValue = maskThresholdSlider.doubleValue < 0.01
             ? "自動" : "\(Int(maskThresholdSlider.doubleValue * 100)) %"
         let maskThresholdRow = inspectorRow("形状しきい値", control: maskThresholdSlider, trailing: maskThresholdValueLabel)
+
+        // ペン（マスク修正）の筆の太さ。マスク修正モードのときだけ表示する。
+        maskBrushSlider.minValue = ManualMaskPainter.minimumWidth
+        maskBrushSlider.maxValue = 0.6
+        maskBrushSlider.doubleValue = canvas.maskBrushWidth
+        maskBrushSlider.target = self
+        maskBrushSlider.action = #selector(maskBrushWidthChanged)
+        maskBrushSlider.toolTip = "ペンの太さ（選択範囲の短辺に対する割合）"
+        maskBrushValueLabel.stringValue = "\(Int(canvas.maskBrushWidth * 100)) %"
+        let brushRow = inspectorRow("ペンの太さ", control: maskBrushSlider, trailing: maskBrushValueLabel)
+        brushRow.isHidden = true
+        maskBrushRow = brushRow
         let domainRow = inspectorRow("画像種別", control: domainModeControl)
         let generateLayerRow = NSStackView(views: [generatePersonCheckbox, generatePoseCheckbox])
         generateLayerRow.orientation = .horizontal
@@ -3573,7 +3595,32 @@ final class MosaicWindowController: NSObject {
 
     /// ツールバーの編集モード/範囲選択モード切替。
     @objc private func canvasModeChanged() {
-        canvas.interactionMode = canvasModeControl.selectedSegment == 1 ? .marqueeSelect : .edit
+        switch canvasModeControl.selectedSegment {
+        case 1: canvas.interactionMode = .marqueeSelect
+        case 2: canvas.interactionMode = .maskPaint
+        default: canvas.interactionMode = .edit
+        }
+        maskBrushRow?.isHidden = canvas.interactionMode != .maskPaint
+    }
+
+    /// ペン（マスク修正）の太さ変更。
+    @objc private func maskBrushWidthChanged() {
+        canvas.maskBrushWidth = maskBrushSlider.doubleValue
+        maskBrushValueLabel.stringValue = "\(Int(maskBrushSlider.doubleValue * 100)) %"
+    }
+
+    /// ペンで塗った／消したストロークを選択中のROIへ反映する。
+    ///
+    /// 1ストロークを1回の「元に戻す」単位にする（塗るたびに全部消えるのを避ける）。
+    private func applyMaskStroke(roiID: UUID, stroke: ManualMaskStroke) {
+        guard let index = canvas.rois.firstIndex(where: { $0.id == roiID }) else { return }
+        pushUndoSnapshot(currentEditorState())
+        canvas.rois[index].manualMaskStrokes.append(stroke)
+        hasUnsavedChanges = true
+        resumeMosaicPreviewIfNeeded()
+        updateStatus(stroke.isAdditive
+            ? "マスクを塗りました（Option(⌥)キーを押しながらで消せます）"
+            : "マスクを消しました")
     }
 
     /// 選択中のレイヤをグループ化する。選択行は「未グループのレイヤ」だけでなく、
@@ -7849,13 +7896,19 @@ final class ImageCanvasView: NSView {
     /// ツールバーで切替える画像上の操作モード。編集モードでは空白部分のドラッグで新規ROIを
     /// 作成する（従来通り）。範囲選択モードでは同じ操作が既存ROIのラバーバンド一括選択になる。
     /// Option(⌥)キーを押しながら開始したドラッグは、そのドラッグ限定で一時的に逆モードになる。
-    enum InteractionMode { case edit, marqueeSelect }
+    enum InteractionMode { case edit, marqueeSelect, maskPaint }
     var interactionMode: InteractionMode = .edit {
         didSet { refreshHoverCursor() }
     }
     /// 範囲選択モードで複数ROIをラバーバンド選択したとき、レイヤ一覧側の選択にも反映するための通知。
     var onROIGroupSelectionByMarquee: ((Set<UUID>) -> Void)?
     private var dragIsMarqueeSelect = false
+    /// ペン（マスク修正）の筆の太さ。ROIの短辺に対する割合。
+    var maskBrushWidth: Double = 0.15
+    /// 描画中のストローク（ROIローカル座標）。mouseUpで対象ROIへ確定する。
+    private var maskStrokeInProgress: (roiID: UUID, points: [NormalizedPoint], isAdditive: Bool)?
+    /// ペンでマスクを修正したときの通知（再描画・undo登録はコントローラ側で行う）。
+    var onMaskStrokeCompleted: ((UUID, ManualMaskStroke) -> Void)?
     var personLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var poseLayerVisibility: [Bool] = [] { didSet { needsDisplay = true } }
     var personLayerMasks: [CGImage?] = [] { didSet { needsDisplay = true } }
@@ -8368,6 +8421,12 @@ final class ImageCanvasView: NSView {
         dragCurrent = nil
         let point = convert(event.locationInWindow, from: nil)
 
+        // ペン（マスク修正）モード: 選択中のROIへ塗る／消す
+        if interactionMode == .maskPaint {
+            beginMaskStroke(at: point, erasing: event.modifierFlags.contains(.option))
+            return
+        }
+
         // Option+クリック: 多角形の頂点追加（辺上）/削除（頂点上）
         if event.clickCount < 2, event.modifierFlags.contains(.option),
            handlePolygonVertexOptionClick(at: point, imageRect: imageDrawRect()) {
@@ -8509,6 +8568,10 @@ final class ImageCanvasView: NSView {
     }
 
     override func mouseDragged(with event: NSEvent) {
+        if interactionMode == .maskPaint {
+            extendMaskStroke(to: convert(event.locationInWindow, from: nil))
+            return
+        }
         let point = convert(event.locationInWindow, from: nil)
 
         if let vertexDrag = vertexDragState {
@@ -8645,6 +8708,10 @@ final class ImageCanvasView: NSView {
     }
 
     override func mouseUp(with event: NSEvent) {
+        if interactionMode == .maskPaint {
+            finishMaskStroke()
+            return
+        }
         let point = convert(event.locationInWindow, from: nil)
 
         if let vertexDrag = vertexDragState {
@@ -9571,5 +9638,55 @@ extension AppDelegate {
         logArchiveTimer = nil
         // 終了直前の分まで残す（クラッシュ直前の状況を追えるようにする）
         MosaicWindowController.archiveDebugLog()
+    }
+}
+
+// MARK: - ペン（マスク修正）
+
+extension ImageCanvasView {
+    /// ビュー座標を、選択中ROIのローカル座標（0〜1・左上原点）へ変換する。
+    /// ROI外は0〜1の外側になるが、そのまま渡してよい（描画時にROI枠で切られる）。
+    fileprivate func maskStrokePoint(at point: NSPoint, roi: MosaicROI) -> NormalizedPoint? {
+        let imageRect = imageDrawRect()
+        guard imageRect.width > 0, imageRect.height > 0 else { return nil }
+        let rect = roi.rect.clamped()
+        guard rect.width > 0, rect.height > 0 else { return nil }
+        let normalizedX = (point.x - imageRect.minX) / imageRect.width
+        let normalizedY = (point.y - imageRect.minY) / imageRect.height
+        return NormalizedPoint(
+            x: (normalizedX - rect.x) / rect.width,
+            y: (normalizedY - rect.y) / rect.height
+        )
+    }
+
+    /// 選択中のROI（無ければクリック位置のROI）へストロークを開始する。
+    fileprivate func beginMaskStroke(at point: NSPoint, erasing: Bool) {
+        let imageRect = imageDrawRect()
+        // 選択中のROIを優先し、無ければクリック位置のROIを対象にする
+        let target = rois.first { $0.id == selectedROIID }
+            ?? rois.last { viewRect(from: $0.rect, imageRect: imageRect).contains(point) }
+        guard let roi = target, let local = maskStrokePoint(at: point, roi: roi) else { return }
+        selectedROIID = roi.id
+        maskStrokeInProgress = (roi.id, [local], !erasing)
+        needsDisplay = true
+    }
+
+    fileprivate func extendMaskStroke(to point: NSPoint) {
+        guard var state = maskStrokeInProgress,
+              let roi = rois.first(where: { $0.id == state.roiID }),
+              let local = maskStrokePoint(at: point, roi: roi) else { return }
+        state.points.append(local)
+        maskStrokeInProgress = state
+        needsDisplay = true
+    }
+
+    fileprivate func finishMaskStroke() {
+        guard let state = maskStrokeInProgress else { return }
+        maskStrokeInProgress = nil
+        guard !state.points.isEmpty else { return }
+        onMaskStrokeCompleted?(state.roiID, ManualMaskStroke(
+            points: state.points, width: maskBrushWidth, isAdditive: state.isAdditive
+        ))
+        needsDisplay = true
     }
 }

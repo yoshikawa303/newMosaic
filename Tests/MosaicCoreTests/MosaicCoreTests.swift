@@ -2103,3 +2103,109 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(roi.analysisInsetScale == nil)
     #expect(roi.analysisRect == roi.rect)
 }
+
+/// 手描き補正: 塗ったところがマスクに追加され、消したところが削られること。
+@Test func manualMaskStrokesAddAndEraseAreasOfTheMask() {
+    let extent = CGRect(x: 0, y: 0, width: 100, height: 100)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0.2, y: 0.2, width: 0.6, height: 0.6),
+        confidence: 1.0, source: "manual", shape: .rectangle, category: .other
+    )
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func brightness(of image: CIImage, atX x: Int, y: Int) -> UInt8 {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            image, toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return pixel[0]
+    }
+
+    // 何も塗っていない黒いマスクへ、ROI中央を通る横線を塗る
+    let black = CIImage(color: .black).cropped(to: extent)
+    let painted = ManualMaskPainter.apply(
+        strokes: [ManualMaskStroke(
+            points: [NormalizedPoint(x: 0.1, y: 0.5), NormalizedPoint(x: 0.9, y: 0.5)],
+            width: 0.2, isAdditive: true
+        )],
+        to: black, roi: roi, extent: extent
+    )
+    // ROI中央（画像座標で50,50付近）は塗られている
+    #expect(brightness(of: painted, atX: 50, y: 50) > 200)
+    // ROIの外は塗られていない
+    #expect(brightness(of: painted, atX: 5, y: 5) < 40)
+
+    // 塗った線の上を消すと元へ戻る
+    let erased = ManualMaskPainter.apply(
+        strokes: [ManualMaskStroke(
+            points: [NormalizedPoint(x: 0.1, y: 0.5), NormalizedPoint(x: 0.9, y: 0.5)],
+            width: 0.3, isAdditive: false
+        )],
+        to: painted, roi: roi, extent: extent
+    )
+    #expect(brightness(of: erased, atX: 50, y: 50) < 40)
+}
+
+/// 手描き補正が無いROIはマスクをそのまま返すこと（既存の挙動を変えない）。
+@Test func maskIsUnchangedWithoutManualStrokes() {
+    let extent = CGRect(x: 0, y: 0, width: 40, height: 40)
+    let roi = MosaicROI(
+        rect: NormalizedRect(x: 0, y: 0, width: 1, height: 1),
+        confidence: 1.0, source: "manual", shape: .rectangle, category: .other
+    )
+    let base = CIImage(color: .white).cropped(to: extent)
+    let result = ManualMaskPainter.apply(strokes: [], to: base, roi: roi, extent: extent)
+    #expect(result == base)
+}
+
+/// 手描き補正の座標系が、既存のマスク生成（`hardShapeMask`）と一致していること。
+///
+/// 上下反転はこのコードベースで何度も起きているため（ARCHITECTURE §5.41等）、
+/// 自前で座標を組み立てず「既存のマスクと同じ場所に出るか」で検証する。
+/// ROIを画像の四隅へ動かして、どの位置でも一致することを見る。
+@Test func manualMaskStrokesAlignWithTheShapeMaskAtAnyROIPosition() {
+    let extent = CGRect(x: 0, y: 0, width: 80, height: 80)
+    let context = CIContext(options: [.cacheIntermediates: false])
+    func isBright(_ image: CIImage, x: Int, y: Int) -> Bool {
+        var pixel = [UInt8](repeating: 0, count: 4)
+        context.render(
+            image, toBitmap: &pixel, rowBytes: 4,
+            bounds: CGRect(x: x, y: y, width: 1, height: 1),
+            format: .RGBA8, colorSpace: CGColorSpaceCreateDeviceRGB()
+        )
+        return pixel[0] > 128
+    }
+
+    let quadrants = [
+        NormalizedRect(x: 0.05, y: 0.05, width: 0.3, height: 0.3),
+        NormalizedRect(x: 0.65, y: 0.05, width: 0.3, height: 0.3),
+        NormalizedRect(x: 0.05, y: 0.65, width: 0.3, height: 0.3),
+        NormalizedRect(x: 0.65, y: 0.65, width: 0.3, height: 0.3)
+    ]
+    for rect in quadrants {
+        let roi = MosaicROI(rect: rect, confidence: 1.0, source: "manual",
+                            shape: .rectangle, category: .other)
+        // ROI全体を覆う太いストローク
+        let painted = ManualMaskPainter.apply(
+            strokes: [ManualMaskStroke(
+                points: [NormalizedPoint(x: 0.5, y: 0.5)], width: 1.0, isAdditive: true
+            )],
+            to: CIImage(color: .black).cropped(to: extent), roi: roi, extent: extent
+        )
+        let shape = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
+
+        // ROIの中心は、形状マスクでも手描き層でも明るい
+        let center = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        let cx = Int(center.midX)
+        let cy = Int(center.midY)
+        #expect(isBright(shape, x: cx, y: cy), "形状マスクの中心が暗い rect=\(rect)")
+        #expect(isBright(painted, x: cx, y: cy), "手描き層の中心が暗い rect=\(rect)")
+
+        // 画像の反対側の隅は、どちらも暗い（上下・左右の取り違えがあればここで落ちる）
+        let farX = cx < 40 ? 75 : 5
+        let farY = cy < 40 ? 75 : 5
+        #expect(!isBright(shape, x: farX, y: farY), "形状マスクが反対側まで及んでいる rect=\(rect)")
+        #expect(!isBright(painted, x: farX, y: farY), "手描き層が反対側まで及んでいる rect=\(rect)")
+    }
+}

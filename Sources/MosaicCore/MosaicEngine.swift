@@ -383,6 +383,21 @@ public final class MosaicEngine {
         extent: CGRect,
         segmentEngine: Segmenting
     ) throws -> [CIImage] {
+        // 手描き補正は「どの生成方式を使ったか」に関係なく最後に反映する
+        let generated = try generatedMasks(
+            for: rois, in: image, extent: extent, segmentEngine: segmentEngine
+        )
+        return zip(rois, generated).map { roi, mask in
+            ManualMaskPainter.apply(strokes: roi.manualMaskStrokes, to: mask, roi: roi, extent: extent)
+        }
+    }
+
+    private static func generatedMasks(
+        for rois: [MosaicROI],
+        in image: CGImage,
+        extent: CGRect,
+        segmentEngine: Segmenting
+    ) throws -> [CIImage] {
         let forcedShapeCategories: Set<MosaicTargetCategory> = [.eyes, .lowerFace]
         guard rois.contains(where: { forcedShapeCategories.contains($0.category) }) else {
             return try segmentEngine.createMasks(for: rois, in: image, extent: extent)

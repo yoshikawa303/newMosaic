@@ -314,6 +314,13 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     public var maskEngine: String?
     /// このROI個別の形状しきい値。nilは全体設定を継承する。
     public var maskThreshold: Double?
+    /// マスク形状の手描き補正（ペンで塗った／消したストローク）。
+    ///
+    /// 自動生成したマスクが対象からずれたときに、ユーザーが直せるようにするためのもの。
+    /// 座標はROIローカル（0〜1）なので、ROIを移動・リサイズしても補正が追従する。
+    /// 空なら補正なし（生成したマスクをそのまま使う）。
+    public var manualMaskStrokes: [ManualMaskStroke] = []
+
     /// `rect` を「解析に使う枠」へ戻すための縮小倍率。nilは `rect` をそのまま使う。
     ///
     /// 楕円・多角形は四隅を削るため、`DetectedROIRefiner.expandGenitalROIsToCoverShape` が
@@ -356,7 +363,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         roiGroupName: String? = nil,
         maskEngine: String? = nil,
         maskThreshold: Double? = nil,
-        analysisInsetScale: Double? = nil
+        analysisInsetScale: Double? = nil,
+        manualMaskStrokes: [ManualMaskStroke] = []
     ) {
         self.id = id
         self.rect = rect.clamped()
@@ -371,6 +379,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.maskEngine = maskEngine
         self.maskThreshold = maskThreshold
         self.analysisInsetScale = analysisInsetScale
+        self.manualMaskStrokes = manualMaskStrokes
     }
 
     private enum CodingKeys: String, CodingKey {
