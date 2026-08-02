@@ -45,8 +45,18 @@ public struct LearningCategoryStats: Codable, Equatable, Sendable {
     public var sampleCount: Int
     public var personGrid: [Int]
     public var imageGrid: [Int]
+    /// 画像全体に対する平均の大きさ。人物が検出できない画像での提案に使う。
     public var meanWidth: Double
     public var meanHeight: Double
+    /// **人物枠**に対する平均の大きさ。人物ごとに提案するときはこちらを使う。
+    ///
+    /// `personGrid` は人物相対の位置なのに、以前は大きさだけ画像相対の `meanWidth/meanHeight` を
+    /// 使っていた。アップのコマ（人物が画像の大半を占める）で学習した大きさが、引きのコマの
+    /// 小さな人物にもそのまま適用され、人物より大きなROIが提案されていた
+    /// （GUI報告 2026-07-31「下段の性器（女性）の範囲が大きい」）。
+    /// 旧statsファイルにはこの項目が無いためOptionalとし、無い場合は人物ごとの提案を行わない。
+    public var meanPersonRelativeWidth: Double?
+    public var meanPersonRelativeHeight: Double?
 
     static func empty(gridCells: Int) -> LearningCategoryStats {
         LearningCategoryStats(
@@ -54,7 +64,9 @@ public struct LearningCategoryStats: Codable, Equatable, Sendable {
             personGrid: Array(repeating: 0, count: gridCells),
             imageGrid: Array(repeating: 0, count: gridCells),
             meanWidth: 0,
-            meanHeight: 0
+            meanHeight: 0,
+            meanPersonRelativeWidth: 0,
+            meanPersonRelativeHeight: 0
         )
     }
 }
@@ -236,10 +248,16 @@ public final class LearningEngine {
                 y: sample.rect.y + sample.rect.height / 2
             )] += 1
             if let relative = sample.personRelativeRect {
-                stats.personGrid[Self.gridIndex(
+                let cell = Self.gridIndex(
                     x: relative.x + relative.width / 2,
                     y: relative.y + relative.height / 2
-                )] += 1
+                )
+                let relativeCount = Double(stats.personGrid.reduce(0, +))
+                stats.personGrid[cell] += 1
+                stats.meanPersonRelativeWidth =
+                    ((stats.meanPersonRelativeWidth ?? 0) * relativeCount + relative.width) / (relativeCount + 1)
+                stats.meanPersonRelativeHeight =
+                    ((stats.meanPersonRelativeHeight ?? 0) * relativeCount + relative.height) / (relativeCount + 1)
             }
             categories[sample.category.rawValue] = stats
         }
@@ -337,8 +355,20 @@ public final class LearningEngine {
         var proposals: [MosaicROI] = []
         var occupied = existing
 
+        // 検出器（部位検出モデル）が見つけられたカテゴリには提案を足さない。
+        // 骨格由来プライア（`dropChestPriors` / `dropGroinPriors`）と同じ方針で、
+        // 学習提案はあくまで検出器が取りこぼしたときのフォールバックとして扱う。
+        // これを入れないと、検出器が正しく出した部位の隣に学習提案が並ぶ
+        // （GUI報告 2026-07-31「下段の性器（女性）は誤検知」）。
+        let detectedCategories = Set(
+            existing
+                .filter { $0.source.hasPrefix("anime-censor") || $0.source.hasPrefix("photo-censor") }
+                .map(\.category)
+        )
+
         for (categoryKey, categoryStats) in stats.categories.sorted(by: { $0.key < $1.key }) {
             guard let category = MosaicTargetCategory(rawValue: categoryKey),
+                  !detectedCategories.contains(category),
                   categoryStats.sampleCount >= 5,
                   categoryStats.meanWidth > 0.001, categoryStats.meanHeight > 0.001 else { continue }
 
@@ -346,6 +376,11 @@ public final class LearningEngine {
             let anchors: [NormalizedRect] = persons.isEmpty
                 ? [NormalizedRect(x: 0, y: 0, width: 1, height: 1)]
                 : persons
+            // 人物ごとに提案する場合は、大きさも人物相対で扱う（画像相対の平均を使うと
+            // 引きのコマの小さな人物に、アップのコマ由来の巨大なROIが付く）。
+            let relativeWidth = categoryStats.meanPersonRelativeWidth ?? 0
+            let relativeHeight = categoryStats.meanPersonRelativeHeight ?? 0
+            if !persons.isEmpty, relativeWidth <= 0.001 || relativeHeight <= 0.001 { continue }
 
             for (cell, count) in grid.enumerated() where count >= 3 {
                 let frequency = Double(count) / Double(categoryStats.sampleCount)
@@ -357,11 +392,14 @@ public final class LearningEngine {
                         x: anchor.x + cellCenter.x * anchor.width,
                         y: anchor.y + cellCenter.y * anchor.height
                     )
+                    let size = persons.isEmpty
+                        ? CGSize(width: categoryStats.meanWidth, height: categoryStats.meanHeight)
+                        : CGSize(width: relativeWidth * anchor.width, height: relativeHeight * anchor.height)
                     let rect = NormalizedRect(
-                        x: center.x - categoryStats.meanWidth / 2,
-                        y: center.y - categoryStats.meanHeight / 2,
-                        width: categoryStats.meanWidth,
-                        height: categoryStats.meanHeight
+                        x: center.x - size.width / 2,
+                        y: center.y - size.height / 2,
+                        width: size.width,
+                        height: size.height
                     ).clamped()
                     let overlapsExisting = occupied.contains {
                         $0.category == category && $0.rect.intersection(rect) != nil

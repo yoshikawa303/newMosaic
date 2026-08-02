@@ -5080,8 +5080,10 @@ final class MosaicWindowController: NSObject {
             enabledCategories: Array(checkedCategories),
             rois: rois
         )
+        // `.notice` にするのは、`.info` より確実にログストアへ残るため
+        // （報告時に添付してもらう前提の記録なので取りこぼしを避ける）。
         for line in lines {
-            AppLog.analysis.info("\(line, privacy: .public)")
+            AppLog.analysis.notice("\(line, privacy: .public)")
         }
     }
 

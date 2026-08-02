@@ -1952,3 +1952,71 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     // 端でも広がってはいる
     #expect(result.width > edge.rect.width)
 }
+
+/// 学習提案（`learned-prior`）は、検出器が見つけたカテゴリには足さない。
+///
+/// GUI報告 2026-07-31「下段の性器（女性）は誤検知」。検出器が正しく出した部位の隣に
+/// 学習提案が並んでいた。骨格由来プライアと同じく、学習提案はフォールバック扱いとする。
+@Test func learnedProposalsAreSkippedForCategoriesTheDetectorFound() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("learn-\(UUID().uuidString)")
+    let engine = LearningEngine(rootURL: directory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    // 人物枠の中央付近に女性器を6件学習させる（提案が出る条件 sampleCount >= 5 を満たす）
+    let person = NormalizedRect(x: 0.0, y: 0.0, width: 0.5, height: 1.0)
+    let image = MemoryFootprintTests.makeImage(width: 64, height: 64)
+    let learned = MosaicROI(
+        rect: NormalizedRect(x: 0.20, y: 0.50, width: 0.10, height: 0.10),
+        confidence: 1.0, source: "manual", shape: .ellipse, category: .femaleGenital
+    )
+    for _ in 0..<6 {
+        _ = try engine.record(acceptedROIs: [learned], rejectedROIs: [], persons: [person], image: image)
+    }
+
+    // 検出器が女性器を見つけている場合は提案を足さない
+    let detected = MosaicROI(
+        rect: NormalizedRect(x: 0.21, y: 0.51, width: 0.10, height: 0.10),
+        confidence: 0.7, source: "anime-censor", shape: .ellipse, category: .femaleGenital
+    )
+    let withDetection = engine.refineCandidates([detected], persons: [person], image: image)
+    #expect(!withDetection.contains { $0.source == "learned-prior" })
+
+    // 検出器が何も見つけていない場合はフォールバックとして提案する
+    let withoutDetection = engine.refineCandidates([], persons: [person], image: image)
+    #expect(withoutDetection.contains { $0.source == "learned-prior" })
+}
+
+/// 小さく描かれた人物には、その人物の大きさに見合った学習提案が付く。
+///
+/// 以前は位置だけ人物相対・大きさは画像相対の平均を使っていたため、引きのコマの小さな人物にも
+/// アップのコマ由来の巨大なROIが提案されていた（GUI報告 2026-07-31「範囲が大きい」）。
+@Test func learnedProposalSizeScalesWithPersonSize() throws {
+    let directory = FileManager.default.temporaryDirectory
+        .appendingPathComponent("learn-\(UUID().uuidString)")
+    let engine = LearningEngine(rootURL: directory)
+    defer { try? FileManager.default.removeItem(at: directory) }
+
+    // 画像の大半を占める人物で学習する（画像相対では大きいROIになる）
+    let bigPerson = NormalizedRect(x: 0.0, y: 0.0, width: 1.0, height: 1.0)
+    let image = MemoryFootprintTests.makeImage(width: 64, height: 64)
+    let learned = MosaicROI(
+        rect: NormalizedRect(x: 0.40, y: 0.50, width: 0.20, height: 0.20),
+        confidence: 1.0, source: "manual", shape: .ellipse, category: .femaleGenital
+    )
+    for _ in 0..<6 {
+        _ = try engine.record(acceptedROIs: [learned], rejectedROIs: [], persons: [bigPerson], image: image)
+    }
+
+    // 画像の1/10しか占めない小さな人物へ提案させる
+    let smallPerson = NormalizedRect(x: 0.0, y: 0.8, width: 0.1, height: 0.1)
+    let proposals = engine
+        .refineCandidates([], persons: [smallPerson], image: image)
+        .filter { $0.source == "learned-prior" }
+    #expect(!proposals.isEmpty)
+    for proposal in proposals {
+        // 人物枠より大きな提案は出ない
+        #expect(proposal.rect.width <= smallPerson.width + 0.001)
+        #expect(proposal.rect.height <= smallPerson.height + 0.001)
+    }
+}

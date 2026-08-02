@@ -706,6 +706,40 @@ GUI報告の切り分けが「手元のサンプルでは再現しない」で�
 **ファイル名とMD5のみ**を残す（ユーザー要望。同一ファイルかどうかの照合に必要）。
 フルパス（フォルダ構成）と画像内容は残さない。
 
+## 5.51 学習提案（`learned-prior`）の2つの不具合（2026-07-31 v0.0.00108〜）
+
+GUI報告 2026-07-31「下段の性器（女性）が2箇所、うち1つは範囲が大きく、もう1つは誤検知」の原因。
+検出器の出力ではなく `LearningEngine.learnedProposals` の提案だった
+（診断テスト `reportFinalROIsAsAssembledByApp` と `AnalysisDiagnostics` で切り分けた）。
+
+### 5.51.1 大きさの単位の取り違え
+
+提案の**位置**は人物枠相対のグリッド（`personGrid`）で決めるのに、**大きさ**だけ
+画像相対の `meanWidth` / `meanHeight` を使っていた。アップのコマ（人物が画像の大半を占める）で
+学習した大きさが、引きのコマの小さな人物にもそのまま適用され、人物枠より大きなROIが提案される。
+
+`LearningCategoryStats` に人物相対の平均 `meanPersonRelativeWidth` / `meanPersonRelativeHeight` を
+追加し、人物ごとの提案では「人物相対の平均 × その人物枠の大きさ」を使う。
+旧statsファイルには該当項目が無いためOptionalとし、無い場合は人物ごとの提案を行わない
+（次回の学習記録で `rebuildStats` により再構築される）。
+
+### 5.51.2 検出器が見つけたカテゴリにも提案していた
+
+骨格由来プライアは §5.45 で「検出器が見つけたら落とす」方針にしたが、学習提案には同じ規則が
+無く、検出器が正しく出した部位の隣に提案が並んでいた。
+`learnedProposals` で、検出器（`source` が `anime-censor` / `photo-censor` で始まるもの）が
+そのカテゴリを1件でも出していれば提案を足さないようにした。学習提案は取りこぼし時の
+フォールバックとして扱う。
+
+### 5.51.3 切り分けの手順（今後の同種報告向け）
+
+1. `AnalysisDiagnostics` の `analysis` 行（ヘルプ＞デバッグ＞デバッグログ）でファイル名・MD5・設定を確認する
+2. 同じ画像を `Tests/SampleImages/` へ置き `reportFinalROIsAsAssembledByApp` を実行する
+3. 各ROIの `src=` で由来を特定する（`anime-censor` / `pose-chest` / `pose-groin` / `face-region` / `learned-prior` / `manual`）
+
+なお `learned-prior` はユーザーごとの学習データに依存するため、テスト用サンプルでは再現しない。
+再現には `analysis` 行のROI一覧（`src=` を含む）が要る。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。
