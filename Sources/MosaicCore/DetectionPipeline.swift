@@ -773,57 +773,22 @@ public final class SensitiveROIGenerator: ROIGenerating {
 
     /// 乳首ROIの縦位置。肩(0.0)から腰(1.0)へ向かう胴体上の比率。
     /// 実画像フィードバック「上過ぎる」を受け 0.32→0.42 へ下方修正。
-    public var chestPositionRatio: Double
 
-    public init(groinPositionRatio: Double = 0.45, chestPositionRatio: Double = 0.42) {
+    public init(groinPositionRatio: Double = 0.45) {
         self.groinPositionRatio = groinPositionRatio
-        self.chestPositionRatio = chestPositionRatio
     }
 
     public func generateROIs(from poseHints: [PoseHint], imageSize: CGSize) -> [MosaicROI] {
         poseHints.flatMap { hint in
-            var rois = chestROIs(for: hint)
+            // 胸部（乳首・乳輪）の骨格由来プライアは廃止した（ユーザー判断 2026-08-02）。
+            // 肩関節からの幾何推定は、姿勢が斜め・背中向き・複数コマの漫画では位置も個数も
+            // 当たらず、誤検知として3度報告された（§5.45 / §5.51 / §5.60）。
+            // 取りこぼしはペンによるマスク修正や手動ROI追加で補う。
+            var rois: [MosaicROI] = []
             if let groin = groinROI(for: hint) {
                 rois.append(groin)
             }
             return rois
-        }
-    }
-
-    private func chestROIs(for hint: PoseHint) -> [MosaicROI] {
-        guard let left = hint.joint(.leftShoulder), let right = hint.joint(.rightShoulder) else { return [] }
-        let shoulderWidth = abs(left.x - right.x)
-        guard shoulderWidth > 0.01 else { return [] }
-        let centerX = (left.x + right.x) / 2
-        let shoulderY = (left.y + right.y) / 2
-        let hipY = hipCenter(for: hint)?.y ?? (shoulderY + shoulderWidth * 1.4)
-        let torsoHeight = max(0.02, hipY - shoulderY)
-        // 実画像フィードバック（上過ぎ・大き過ぎ・幅広過ぎで手や他部位を覆う）を受け、
-        // 位置0.32→chestPositionRatio(0.42)、サイズ0.24→0.14、横オフセット0.27→0.22へ調整。
-        let nippleY = shoulderY + torsoHeight * min(max(chestPositionRatio, 0.1), 0.9)
-        let size = max(0.015, shoulderWidth * 0.14)
-        let confidence = Double(min(left.confidence, right.confidence))
-        // 体が傾いている（横臥・斜め姿勢）場合、肩のラインが水平でなくなるため、ROIの見た目の
-        // 向きを肩の傾きへ回転させる（`rotation`のみ）。
-        // 中心位置は従来通り水平オフセットのみで算出する（回転方向への投影オフセットを加えると、
-        // 肩関節の推定角度が僅かにずれただけで中心が実際の乳首位置から外れやすく、直接検出器
-        // （AnimeCensorDetector等）の正しい検出とIoUベースの重複除去でマッチしなくなり、斜めに
-        // ずれた誤ROIが正しいROIと並んで残ってしまう不具合があった。実画像フィードバックで
-        // 調整済みの水平オフセット位置は変更しない）。
-        let shoulderAngle = Self.tiltAngleDegrees(
-            from: CGPoint(x: left.x, y: left.y),
-            to: CGPoint(x: right.x, y: right.y)
-        )
-        return [-1.0, 1.0].map { side in
-            let centerXOffset = centerX + shoulderWidth * 0.22 * side
-            return MosaicROI(
-                rect: NormalizedRect(x: centerXOffset - size / 2, y: nippleY - size / 2, width: size, height: size),
-                confidence: confidence,
-                source: "pose-chest",
-                shape: .ellipse,
-                category: .nipple,
-                rotation: shoulderAngle
-            )
         }
     }
 
@@ -941,15 +906,6 @@ public final class StaticImageMosaicPipeline {
 /// カテゴリが異なる（鼠径部は`.other`）場合はIoUベースの重複除去でも統合されず残るため、
 /// ここで明示的に落とす。GUI報告で繰り返し問題になった箇所のため、純ロジックとして切り出す。
 public enum PoseDerivedROIFilter {
-    /// 骨格由来の推定乳首ROI（source "pose-chest"）。検出器が乳首を1件でも見つけたら取り除く。
-    public static func dropChestPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
-        guard detected.contains(where: { $0.category == .nipple }) else { return rois }
-        return rois.filter { $0.source != "pose-chest" }
-    }
-
-    /// 骨格由来の推定鼠径部ROI（source "pose-groin"、カテゴリ`.other`）。
-    /// 検出器が性器を1件でも見つけたら取り除く。人数分だけ「その他」の大きな誤ROIが並ぶ
-    /// （3人検出で「その他1〜3」が生成され、うち1件はコマ全体を覆っていた）ため。
     public static func dropGroinPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
         let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
         guard detected.contains(where: { genitals.contains($0.category) }) else { return rois }

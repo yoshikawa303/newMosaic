@@ -596,7 +596,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     )
                     animeDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
-                    rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
                 } catch {
@@ -610,7 +609,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     let detected = try detector.detect(in: input.image, personBounds: snapshot.personBounds)
                     photoDetectionCount = detected.count
                     rois = Self.mergeCandidates(base: rois, adding: detected)
-                    rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
                 } catch {
@@ -640,15 +638,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
             result.append(roi)
         }
         return result
-    }
-
-    /// 直接検出器（部位検出モデル）が乳首を1つでも検出できた場合、骨格由来の推定乳首ROI
-    /// （source "pose-chest"）は全て取り除く。骨格推定の乳首位置は肩関節からの幾何プライアで
-    /// 精度が低く、体が傾いていると位置・個数（常に左右2個生成）ともに実際と合わず、
-    /// 検出器の正しいROIとIoUが重ならないため重複除去をすり抜けて誤ROIとして残っていた
-    /// （GUI報告で確定）。検出器が乳首を見つけられなかった画像でのみフォールバックとして残す。
-    private static func dropPoseChestPriors(from rois: [MosaicROI], ifDetectorFound detected: [MosaicROI]) -> [MosaicROI] {
-        PoseDerivedROIFilter.dropChestPriors(from: rois, ifDetectorFound: detected)
     }
 
     /// 直接検出器が性器を1つでも検出できた場合、骨格由来の推定鼠径部ROI（source "pose-groin"、
@@ -3603,6 +3592,31 @@ final class MosaicWindowController: NSObject {
         maskBrushRow?.isHidden = canvas.interactionMode != .maskPaint
     }
 
+    /// 保存済みログを削除する（ローテーションの世代ファイルも含む）。
+    ///
+    /// 取り消せないので確認ダイアログを出す。今回の起動分（`OSLogStore`にあるもの）は
+    /// アプリ側から消せないため、その旨も伝える。
+    @objc private func clearDebugLog() {
+        let alert = NSAlert()
+        alert.messageText = "保存済みのデバッグログを削除しますか？"
+        alert.informativeText = """
+            \(MosaicWindowController.debugLogFile.existingURLs().count)個のログファイル（世代分を含む）を削除します。
+            この操作は取り消せません。
+            今回の起動分はシステム側のログに残るため、アプリを再起動するまで表示に残ります。
+            """
+        alert.addButton(withTitle: "削除")
+        alert.addButton(withTitle: "キャンセル")
+        alert.buttons.first?.hasDestructiveAction = true
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+
+        MosaicWindowController.debugLogFile.removeAll()
+        // 退避済みの位置も戻す（消したのに「もう退避済み」と判断して書き出さなくなるのを防ぐ）
+        MosaicWindowController.lastArchivedLogLine.value = ""
+        refreshDebugLog()
+        updateStatus("保存済みのデバッグログを削除しました")
+        AppLog.ui.info("デバッグログを削除しました")
+    }
+
     /// ペン（マスク修正）の太さ変更。
     @objc private func maskBrushWidthChanged() {
         canvas.maskBrushWidth = maskBrushSlider.doubleValue
@@ -3826,6 +3840,47 @@ final class MosaicWindowController: NSObject {
         applyLayerVisibility()
         syncLegacyLayerCheckboxes()
         reloadLayerList()
+    }
+
+    /// カテゴリグループの表示状態（全表示=on、全非表示=off、混在=mixed）。
+    private func roiGroupVisibilityState(_ group: ROIListGroup) -> NSControl.StateValue {
+        let hiddenCount = group.children.filter { canvas.hiddenROIIDs.contains($0.roiID) }.count
+        if hiddenCount == 0 { return .on }
+        if hiddenCount == group.children.count { return .off }
+        return .mixed
+    }
+
+    /// モザイク対象1件の表示ON/OFF。**画面表示だけの設定で、画像出力には影響しない。**
+    private func toggleROIVisibility(_ roiID: UUID) {
+        if canvas.hiddenROIIDs.contains(roiID) {
+            canvas.hiddenROIIDs.remove(roiID)
+        } else {
+            canvas.hiddenROIIDs.insert(roiID)
+        }
+        refreshAfterROIVisibilityChange()
+    }
+
+    /// カテゴリグループ単位の表示ON/OFF。1つでも表示中なら全て非表示にする。
+    private func toggleROIGroupVisibility(_ group: ROIListGroup) {
+        let makeHidden = roiGroupVisibilityState(group) != .off
+        for child in group.children {
+            if makeHidden {
+                canvas.hiddenROIIDs.insert(child.roiID)
+            } else {
+                canvas.hiddenROIIDs.remove(child.roiID)
+            }
+        }
+        refreshAfterROIVisibilityChange()
+    }
+
+    private func refreshAfterROIVisibilityChange() {
+        editorRevision += 1
+        resumeMosaicPreviewIfNeeded()
+        reloadLayerList()
+        let hidden = canvas.hiddenROIIDs.count
+        updateStatus(hidden == 0
+            ? "すべてのモザイク対象を表示しています"
+            : "\(hidden)件のモザイク対象を非表示にしています（画面表示のみ。画像出力には反映されます）")
     }
 
     private func allLayerLeaves() -> [LayerLeaf] {
@@ -4785,6 +4840,19 @@ final class MosaicWindowController: NSObject {
         if window === debugLogWindow { debugLogWindow = nil }
     }
 
+    /// 開いている補助ウィンドウをすべて閉じる（主ウィンドウを閉じたときの後始末）。
+    ///
+    /// `close()` はそれぞれの `windowWillClose` を呼ぶので、動画プレビューの停止や
+    /// 参照の解放はそちらで行われる。
+    fileprivate func closeAllAuxiliaryWindows() {
+        for window in [
+            videoPreviewWindow, advancedSettingsWindow, exportWindow,
+            shortcutsWindow, numpadAssignmentWindow, debugLogWindow
+        ].compactMap({ $0 }) {
+            window.close()
+        }
+    }
+
     /// このウィンドウが動画プレビューか。主ウィンドウと同じdelegateを共有するため必要。
     fileprivate func isVideoPreviewWindow(_ window: NSWindow) -> Bool {
         window === videoPreviewWindow
@@ -4961,6 +5029,14 @@ final class MosaicWindowController: NSObject {
         }
         // 形状が決まってから広げる（形状ごとに必要な倍率が違うため）
         rois = DetectedROIRefiner.expandGenitalROIsToCoverShape(rois)
+        // 自動検出の結果は候補カテゴリごとにグループへまとめる（ユーザー要望 2026-08-02）。
+        // 手描き（manual）はユーザーが自分でまとめる想定なので触らない。
+        rois = rois.map { roi in
+            guard roi.source != "manual", roi.roiGroupName == nil else { return roi }
+            var grouped = roi
+            grouped.roiGroupName = roi.category.displayName
+            return grouped
+        }
 
         logAnalysisDiagnostics(rois: rois, sourceImage: sourceImage, output: output, checkedCategories: checkedCategories)
 
@@ -5112,10 +5188,12 @@ final class MosaicWindowController: NSObject {
     /// ROIからモザイク適用結果を作る（表示はしない）。ROIが空・画像未読み込みならnil。
     /// 「元に戻す」で描画済み画像を復元する代わりに作り直すために使う。
     private func renderMosaicOutput(for rois: [MosaicROI]) throws -> CGImage? {
-        guard let loadedImage, !rois.isEmpty else { return nil }
+        // 表示OFFのレイヤはプレビューに出さない（画面表示だけの設定）。
+        let visible = rois.filter { !canvas.hiddenROIIDs.contains($0.id) }
+        guard let loadedImage, !visible.isEmpty else { return nil }
         return try mosaicEngine.applyMosaic(
             to: loadedImage.cgImage,
-            rois: rois,
+            rois: visible,
             style: defaultMosaicStyleForRendering(),
             segmentEngine: currentSegmentEngine(),
             patternImageProvider: { [weak self] in self?.patternImage(for: $0) },
@@ -6301,6 +6379,12 @@ extension MosaicWindowController: NSWindowDelegate {
         guard let window = notification.object as? NSWindow else { return }
         finishVideoPreviewIfNeeded(window)
         releaseAuxiliaryWindowReference(window)
+        // 主ウィンドウを閉じたら、開いたままの補助ウィンドウも閉じる。
+        // 残しておくと本体が終了できず、画面にウィンドウだけ取り残される
+        // （ユーザー要望 2026-08-02）。
+        if !isAuxiliaryWindow(window) {
+            closeAllAuxiliaryWindows()
+        }
     }
 
     /// ウィンドウ枠（位置・サイズ）をポータブル設定へ保存する。
@@ -7315,10 +7399,13 @@ extension MosaicWindowController {
         applyScaledFont(refreshButton, size: 12)
         let exportButton = NSButton(title: "書き出し…", target: self, action: #selector(exportDebugLog))
         applyScaledFont(exportButton, size: 12)
-        let infoLabel = NSTextField(labelWithString: "件数を絞って直近分のみ表示します（subsystem: com.yoshikawa.newMosaic）")
+        let clearButton = NSButton(title: "消去…", target: self, action: #selector(clearDebugLog))
+        applyScaledFont(clearButton, size: 12)
+        clearButton.toolTip = "保存済みのログファイル（世代分を含む）をすべて削除します"
+        let infoLabel = NSTextField(labelWithString: "保存済み（前回起動分を含む）＋今回起動分を表示します（subsystem: com.yoshikawa.newMosaic）")
         applyScaledFont(infoLabel, size: 10)
         infoLabel.textColor = .secondaryLabelColor
-        let buttonRow = NSStackView(views: [infoLabel, NSView(), refreshButton, exportButton])
+        let buttonRow = NSStackView(views: [infoLabel, NSView(), clearButton, refreshButton, exportButton])
         buttonRow.orientation = .horizontal
         buttonRow.spacing = 8
         buttonRow.translatesAutoresizingMaskIntoConstraints = false
@@ -7771,13 +7858,21 @@ extension MosaicWindowController: NSOutlineViewDataSource, NSOutlineViewDelegate
             cell.configure(title: leaf.kind.title, state: leaf.isVisible ? .on : .off, allowsMixed: false)
             cell.onToggle = { [weak self] in self?.toggleLeafVisibility(leaf) }
         } else if let entry = item as? ROIListEntry {
-            // ROI選択リストの行（表示チェックなし。クリックでキャンバス上のROIを選択）
-            cell.configure(title: entry.title, state: .off, allowsMixed: false, showsCheckbox: false)
-            cell.onToggle = nil
+            // モザイク対象1件の行。チェックで表示ON/OFF（画面表示のみ。出力には影響しない）
+            cell.configure(
+                title: entry.title,
+                state: canvas.hiddenROIIDs.contains(entry.roiID) ? .off : .on,
+                allowsMixed: false
+            )
+            cell.onToggle = { [weak self] in self?.toggleROIVisibility(entry.roiID) }
         } else if let roiGroup = item as? ROIListGroup {
-            // ROIグループの見出し行（表示チェックなし。グループ名のみ）
-            cell.configure(title: roiGroup.name, state: .off, allowsMixed: false, showsCheckbox: false)
-            cell.onToggle = nil
+            // カテゴリごとのグループ見出し。まとめて表示ON/OFFできる
+            cell.configure(
+                title: roiGroup.name,
+                state: roiGroupVisibilityState(roiGroup),
+                allowsMixed: true
+            )
+            cell.onToggle = { [weak self] in self?.toggleROIGroupVisibility(roiGroup) }
         }
         return cell
     }
@@ -7909,6 +8004,11 @@ final class ImageCanvasView: NSView {
     /// 範囲選択モードで複数ROIをラバーバンド選択したとき、レイヤ一覧側の選択にも反映するための通知。
     var onROIGroupSelectionByMarquee: ((Set<UUID>) -> Void)?
     private var dragIsMarqueeSelect = false
+    /// 表示をOFFにしたレイヤ（ROI）。**画面表示だけの設定で、画像出力には影響しない。**
+    /// 既存の「表示: ROI/モザイク/人物/骨格」と同じ扱いにする（隠したまま出力して
+    /// 検閲漏れになるのを避けるため）。
+    var hiddenROIIDs: Set<UUID> = [] { didSet { needsDisplay = true } }
+
     /// ペン（マスク修正）の筆の太さ。ROIの短辺に対する割合。
     var maskBrushWidth: Double = 0.15
     /// 描画中のストローク（ROIローカル座標）。mouseUpで対象ROIへ確定する。
@@ -8891,7 +8991,7 @@ final class ImageCanvasView: NSView {
     }
 
     private func drawROIs(in target: NSRect) {
-        for roi in rois {
+        for roi in rois where !hiddenROIIDs.contains(roi.id) {
             let rect = viewRect(from: roi.rect, imageRect: target)
             let color: NSColor = roi.source == "manual" ? .systemGreen : .systemRed
             if showROIOutlines {

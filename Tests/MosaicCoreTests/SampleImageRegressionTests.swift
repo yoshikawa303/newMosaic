@@ -357,7 +357,6 @@ import Testing
                 rois.removeAll { $0.source != "manual" && $0.rect.iou(with: roi.rect) > 0.5 }
                 rois.append(roi)
             }
-            rois = PoseDerivedROIFilter.dropChestPriors(from: rois, ifDetectorFound: detected)
             rois = PoseDerivedROIFilter.dropGroinPriors(from: rois, ifDetectorFound: detected)
             rois = DetectedROIRefiner.splitNippleAndAreola(rois)
             rois = DetectedROIRefiner.expandGenitalROIsToCoverShape(rois)

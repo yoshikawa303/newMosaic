@@ -203,35 +203,6 @@ import Testing
     }
 }
 
-@Test func roiGeneratorUsesPoseJointsForChestAndGroin() {
-    let joints = [
-        PoseJoint(name: .leftShoulder, x: 0.35, y: 0.30, confidence: 0.9),
-        PoseJoint(name: .rightShoulder, x: 0.65, y: 0.30, confidence: 0.9),
-        PoseJoint(name: .leftHip, x: 0.42, y: 0.60, confidence: 0.9),
-        PoseJoint(name: .rightHip, x: 0.58, y: 0.60, confidence: 0.9),
-        PoseJoint(name: .leftKnee, x: 0.42, y: 0.80, confidence: 0.9),
-        PoseJoint(name: .rightKnee, x: 0.58, y: 0.80, confidence: 0.9)
-    ]
-    let hint = PoseHint(
-        bodyBounds: NormalizedRect(x: 0.2, y: 0.1, width: 0.6, height: 0.8),
-        lowerBodyBounds: NormalizedRect(x: 0.3, y: 0.5, width: 0.4, height: 0.3),
-        joints: joints
-    )
-
-    let rois = SensitiveROIGenerator().generateROIs(from: [hint], imageSize: CGSize(width: 800, height: 1200))
-
-    let nipples = rois.filter { $0.category == .nipple }
-    #expect(nipples.count == 2)
-    #expect(rois.contains { $0.source == "pose-groin" })
-    for roi in nipples {
-        let centerY = roi.rect.y + roi.rect.height / 2
-        #expect(abs(centerY - (0.30 + 0.30 * 0.42)) < 0.05)
-    }
-    if let groin = rois.first(where: { $0.source == "pose-groin" }) {
-        let centerX = groin.rect.x + groin.rect.width / 2
-        #expect(abs(centerX - 0.5) < 0.03)
-    }
-}
 
 @Test func roiGeneratorGroinPositionRatioShiftsROIDownward() {
     let joints = [
@@ -1788,19 +1759,28 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(filtered.contains { $0.source == "pose-groin" })
 }
 
-/// 乳首側のフィルタも同じ規則で動くこと（既存挙動の固定）。
-@Test func chestPriorsAreDroppedOnlyWhenDetectorFoundNipple() {
-    func roi(_ source: String, _ category: MosaicTargetCategory) -> MosaicROI {
-        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2),
-                  confidence: 0.9, source: source, category: category)
-    }
-    let candidates = [roi("pose-chest", .nipple), roi("anime-censor", .nipple)]
-    #expect(PoseDerivedROIFilter.dropChestPriors(
-        from: candidates, ifDetectorFound: [roi("anime-censor", .nipple)]
-    ).count == 1)
-    #expect(PoseDerivedROIFilter.dropChestPriors(
-        from: candidates, ifDetectorFound: [roi("anime-censor", .maleGenital)]
-    ).count == 2)
+/// 骨格からは乳首・乳輪のプライアを作らないこと（ユーザー判断 2026-08-02 で廃止）。
+///
+/// 肩関節からの幾何推定は、姿勢が斜め・背中向き・複数コマの漫画では位置も個数も当たらず、
+/// 誤検知として3度報告された。取りこぼしはペンによるマスク修正や手動ROI追加で補う。
+@Test func poseGeneratorDoesNotProduceChestPriors() {
+    let hint = PoseHint(
+        bodyBounds: NormalizedRect(x: 0.1, y: 0.1, width: 0.5, height: 0.8),
+        lowerBodyBounds: NormalizedRect(x: 0.1, y: 0.5, width: 0.5, height: 0.4),
+        joints: [
+            PoseJoint(name: .leftShoulder, x: 0.2, y: 0.2, confidence: 0.9),
+            PoseJoint(name: .rightShoulder, x: 0.5, y: 0.2, confidence: 0.9),
+            PoseJoint(name: .leftHip, x: 0.25, y: 0.5, confidence: 0.9),
+            PoseJoint(name: .rightHip, x: 0.45, y: 0.5, confidence: 0.9)
+        ]
+    )
+    let rois = SensitiveROIGenerator().generateROIs(
+        from: [hint], imageSize: CGSize(width: 200, height: 300)
+    )
+    #expect(!rois.contains { $0.source == "pose-chest" }, "骨格から乳首プライアが作られている")
+    #expect(!rois.contains { $0.category == .nipple }, "骨格から乳首カテゴリのROIが作られている")
+    // 鼠径部のプライアは残す（こちらは誤検知報告が無く、検出器が性器を見つければ落ちる）
+    #expect(rois.contains { $0.source == "pose-groin" })
 }
 
 /// 検出器の乳首枠を「乳首（縮小）」と「乳輪（枠そのまま）」の2つへ分けること。
