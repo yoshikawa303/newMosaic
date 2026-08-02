@@ -1,5 +1,25 @@
 # Changelog
 
+## v0.0.00115 - 2026-08-02
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: ウィンドウを閉じてアプリを終了しようとすると強制終了する問題を修正。
+
+■更新履歴
+
+- **主ウィンドウと動画書き出しシートに `isReleasedWhenClosed = false` を設定した。**
+  v0.0.00113 で補助ウィンドウ5つは直したが、この2つを見落としていた。
+  - 主ウィンドウは `AppDelegate.window` で強参照しているのに既定の `true` のままだった。
+    閉じるとAppKitがreleaseして参照が解放済みメモリを指し、
+    「最後のウィンドウを閉じた」→終了判定→`applicationShouldTerminate` の
+    `if let window` で `objc_retain` して落ちていた（クラッシュ報告 2026-08-02、スタックと一致）。
+- **再発防止として `scripts/ci/agent_governance_guard.sh` にチェックを追加した。**
+  `Sources/NewMosaicApp/main.swift` の `NSWindow(` 生成箇所すべてについて、後ろ40行以内に
+  `isReleasedWhenClosed` が無ければFAILにする。同じ原因で2度クラッシュ報告が出たため、
+  目視ではなく機械的に検出する。故意に設定を外してFAILすることも確認済み。
+- テスト140件PASS。
+
 ## v0.0.00114 - 2026-08-02
 
 ■更新履歴（Readme / ChangeLog 用）

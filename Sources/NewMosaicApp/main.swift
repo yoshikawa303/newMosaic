@@ -156,6 +156,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             defer: false
         )
         window.title = Self.windowTitle()
+        // 保持している参照があるので、閉じてもAppKitに解放させない。
+        // `isReleasedWhenClosed` は既定が `true` で、閉じるとAppKitがreleaseする。
+        // ARCの強参照と組み合わさると過剰解放になり、次に参照した時点で解放済みメモリを触る。
+        // 主ウィンドウの場合は「最後のウィンドウを閉じた」→終了判定→
+        // `applicationShouldTerminate` 内の `if let window` で落ちていた
+        // （クラッシュ報告 2026-08-02。v0.0.00113で補助ウィンドウ5つは直したが主ウィンドウを見落としていた）。
+        window.isReleasedWhenClosed = false
         window.contentMinSize = NSSize(width: 760, height: 560)
         // ウィンドウ枠はポータブル設定（AppSettings）を優先して復元する。
         // 保存時と画面構成が変わっている（外部ディスプレイを外した・解像度変更）場合、
@@ -4366,6 +4373,8 @@ final class MosaicWindowController: NSObject {
             defer: false
         )
         sheet.title = "動画の書き出し"
+        // `videoExportSheet` で保持するため、AppKitに解放させない（上記と同じ理由）。
+        sheet.isReleasedWhenClosed = false
         sheet.contentView = content
         return sheet
     }

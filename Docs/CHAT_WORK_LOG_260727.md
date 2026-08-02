@@ -232,3 +232,21 @@
 - テスト140件PASS、両ゲート通過。
 - 作業時間: 約0.7時間
 
+### 2026-08-02 JST - Claude Opus 5 - 種別: 依頼内容 - アプリ強制終了（再発）
+
+```
+★アプリ強制終了
+（クラッシュレポート添付: v0.0.00114、EXC_BAD_ACCESS、applicationShouldTerminate内のobjc_retain）
+```
+
+### 2026-08-02 JST - Claude Opus 5 - 種別: 作業結果 - v0.0.00115
+
+- 作業AIモデル: Claude Opus 5
+- **前回 v0.0.00113 の修正漏れ**。補助ウィンドウ5つは直したが、`AppDelegate` が保持する
+  主ウィンドウと動画書き出しシートを見落としていた。主ウィンドウが解放済みになり、
+  「最後のウィンドウを閉じた」→終了判定→`applicationShouldTerminate` の `if let window` で落ちていた。
+- 全8箇所の `NSWindow(` 生成を機械的に監査して残り2箇所を修正。
+- 再発防止として `agent_governance_guard.sh` にチェックを追加（故意にFAILすることも確認）。
+- テスト140件PASS、両ゲート通過。
+- 作業時間: 約0.4時間
+
