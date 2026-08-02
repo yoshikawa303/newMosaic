@@ -5441,6 +5441,9 @@ final class MosaicWindowController: NSObject {
             filterRow.topAnchor.constraint(equalTo: modeRow.bottomAnchor, constant: 6),
             filterRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             filterRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            // 一覧が潰れきると、上のフィルタ行と下のアイコン行が重なる（GUI報告 2026-07-31）。
+            // 最小高さを与えて、パネル全体の最小高さが内容から決まるようにする。
+            libraryScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 60),
             libraryScrollView.topAnchor.constraint(equalTo: filterRow.bottomAnchor, constant: 8),
             libraryScrollView.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             libraryScrollView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
@@ -7254,6 +7257,17 @@ extension MosaicWindowController: NSSplitViewDelegate {
     /// 現在フレーム＋最小幅から算出する。Auto Layoutの必須制約でNSSplitViewの
     /// フレーム操作と競合させない（サイドパネル幅がまったく動かせないバグの修正）。
     func splitView(_ splitView: NSSplitView, constrainMinCoordinate proposedMinimumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        // 縦分割（左ペイン/右ペイン内のパネル積み重ね）は下限が無く、境界を上へドラッグすると
+        // パネルが内容より小さくされ、Auto Layoutの必須制約が壊れてアイコンや行が重なっていた
+        // （GUI報告 2026-07-31）。内容が要求する最小高さで止める。
+        if splitView === leftPaneSplitView || splitView === rightPaneSplitView {
+            guard !isRestoringSplitPositions else { return proposedMinimumPosition }
+            let subviews = splitView.arrangedSubviews
+            guard dividerIndex >= 0, dividerIndex < subviews.count else { return proposedMinimumPosition }
+            let leadingView = subviews[dividerIndex]
+            guard !leadingView.isHidden else { return proposedMinimumPosition }
+            return leadingView.frame.minY + minimumHeight(forPanel: leadingView)
+        }
         // setPosition(_:ofDividerAt:)はプログラムからの呼び出しでもこのdelegateを経由するため、
         // インタラクティブなドラッグ用に書かれた本制約（隣接ビューの現在フレームに依存）を
         // 初期化・復元などの一括レイアウト設定中に適用すると、まだ古いフレーム値のままの
@@ -7277,6 +7291,15 @@ extension MosaicWindowController: NSSplitViewDelegate {
     /// 余白を含めた値をここで一元管理する。
     static let inspectorPaneDefaultWidth: CGFloat = 360
 
+    /// パネルの最小高さ。内容が要求する高さ（Auto Layoutの制約から算出）を使う。
+    ///
+    /// 数値を直書きするとパネルの中身を変えたときに追従しないため `fittingSize` から取る。
+    /// 上限を設けるのは、スクロール可能な中身を持つパネル（インスペクタ等）で極端に大きな値が
+    /// 返ると境界をまったく動かせなくなるため。
+    private func minimumHeight(forPanel panel: NSView) -> CGFloat {
+        min(max(panel.fittingSize.height, 80), 280)
+    }
+
     private func minimumWidth(forPane pane: NSView) -> CGFloat {
         if pane === canvasContainer { return 200 }
         if let inspector = sidePanels[.inspector],
@@ -7288,6 +7311,14 @@ extension MosaicWindowController: NSSplitViewDelegate {
     }
 
     func splitView(_ splitView: NSSplitView, constrainMaxCoordinate proposedMaximumPosition: CGFloat, ofSubviewAt dividerIndex: Int) -> CGFloat {
+        if splitView === leftPaneSplitView || splitView === rightPaneSplitView {
+            guard !isRestoringSplitPositions else { return proposedMaximumPosition }
+            let subviews = splitView.arrangedSubviews
+            guard dividerIndex + 1 >= 0, dividerIndex + 1 < subviews.count else { return proposedMaximumPosition }
+            let trailingView = subviews[dividerIndex + 1]
+            guard !trailingView.isHidden else { return proposedMaximumPosition }
+            return trailingView.frame.maxY - minimumHeight(forPanel: trailingView)
+        }
         guard !isRestoringSplitPositions else { return proposedMaximumPosition }
         guard splitView === mainSplitView else { return proposedMaximumPosition }
         let subviews = splitView.arrangedSubviews
