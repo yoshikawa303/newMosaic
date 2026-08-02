@@ -116,7 +116,10 @@ import Testing
         #expect(iou > 0.8, "IoU=\(iou) maskArea=\(maskArea)")
     }
 
-    /// 埋め込みキャッシュ: 同じ画像での2回目のマスク生成が大幅に速いこと（エンコーダ再実行なし）。
+    /// 埋め込みキャッシュ: 同じ画像での2回目のマスク生成でエンコーダを再実行しないこと。
+    ///
+    /// 以前は実行時間を比較していたが、機械の負荷で揺れて不安定だった
+    /// （5回に1〜2回の割合で失敗）。エンコーダの実行回数で判定する。
     @Test func embeddingCacheAvoidsReencoding() throws {
         let (image, _) = try makeMangaLikeImage()
         let roi = MosaicROI(
@@ -125,14 +128,14 @@ import Testing
         )
         let extent = CGRect(x: 0, y: 0, width: 640, height: 640)
         let engine = SAMSegmentEngine()
-        let start1 = Date()
+
         _ = try engine.createMasks(for: [roi], in: image, extent: extent)
-        let first = Date().timeIntervalSince(start1)
-        let start2 = Date()
+        let afterFirst = SAMSegmentEngine.encoderRunCountForMeasurement
         _ = try engine.createMasks(for: [roi], in: image, extent: extent)
-        let second = Date().timeIntervalSince(start2)
-        // 2回目はエンコーダ（支配的コスト）を飛ばすため、初回より十分速い
-        #expect(second < first * 0.7, "first=\(first)s second=\(second)s")
+        let afterSecond = SAMSegmentEngine.encoderRunCountForMeasurement
+
+        #expect(afterSecond == afterFirst,
+                "2回目でエンコーダが再実行された（\(afterFirst) → \(afterSecond)）")
     }
 
 

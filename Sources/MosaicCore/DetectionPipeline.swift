@@ -959,16 +959,28 @@ public enum PoseDerivedROIFilter {
 
 /// 検出器の出力を、より使いやすいROIへ整えるための後処理（純ロジック。単体テスト可能）。
 public enum DetectedROIRefiner {
-    /// 性器の楕円ROIを外側へ広げる倍率。
+    /// 性器ROIを「選択した形状が元の検出枠を包み込む」大きさへ広げる倍率（形状ごと）。
     ///
-    /// 楕円は外接矩形より約21%（1 - π/4）小さく、**四隅を削ぎ落とす**。検出枠は水平・垂直の
-    /// 矩形で返るため、斜めに描かれた男性器では先端と根本がちょうど対角に来て楕円から外れる
-    /// （GUI報告 2026-07-31: 楕円マスク時に男性性器の先端・根本が範囲選択されない）。
-    /// 枠を1.15倍に広げてから楕円にすることで、元の検出枠の対角付近まで楕円が届くようにする。
+    /// 検出枠は水平・垂直の矩形だが、楕円・多角形は**四隅を削ぎ落とす**ため、斜めに描かれた
+    /// 男性器では先端と根本が形状から外れる（GUI報告 2026-07-31）。
+    /// そこで「形状が元の検出枠を完全に含む」最小倍率を形状ごとに与える。
     ///
-    /// 対象は検出器が出した性器ROIの楕円のみ。手描きROI（`source == "manual"`）は
-    /// ユーザーの意図した範囲なので変更しない。矩形・多角形は四隅を削らないため対象外。
-    public static let genitalEllipseExpansionScale = 1.15
+    /// - 矩形: 削らないので拡大しない（1.0）。拡大すると単に大きすぎる範囲になる。
+    /// - 楕円: 半径 (a,b) の楕円が半幅 (w,h) の矩形を含む条件は (w/a)²+(h/b)² ≤ 1。
+    ///   a=kw, b=kh を代入すると 2/k² ≤ 1、すなわち k ≥ √2。
+    /// - 多角形（既定の六角形）: 頂点は楕円上にあり楕円より内側なので、より大きな倍率が要る。
+    ///   頂点 (0.866, 0.5)〜(0, 1) を通る辺の直線は 0.5x + 0.866y = 0.866。
+    ///   枠の角 (1, 1) では左辺が 1.366 になるため k ≥ 1.366/0.866 ≒ 1.58。
+    ///
+    /// 範囲が広がっても、マスク自体はSAMが取った対象の輪郭で切られるため、
+    /// 実際にモザイクが乗るのは対象の形のままになる。
+    public static func genitalExpansionScale(for shape: ROIShape) -> Double {
+        switch shape {
+        case .rectangle: return 1.0
+        case .ellipse: return 2.0.squareRoot()
+        case .polygon: return 1.58
+        }
+    }
 
     /// 検出器の乳首枠を「乳首」と「乳輪」の2つのROIへ分ける倍率。
     ///
@@ -978,24 +990,26 @@ public enum DetectedROIRefiner {
     public static let nippleShrinkScale = 0.55
 
 
-    /// 性器の楕円ROIを `genitalEllipseExpansionScale` 倍に広げる。
+    /// 性器ROIを、選択中の形状が元の検出枠を包み込む大きさへ広げる。
     ///
-    /// 楕円が四隅を削ることで対象の先端・根本がマスクから外れる（＝検閲漏れ）のを防ぐ。
-    /// 画像の外へはみ出す分は `NormalizedRect.clamped()` で切り詰められる。
-    public static func expandGenitalEllipses(_ rois: [MosaicROI]) -> [MosaicROI] {
+    /// 形状（矩形／楕円／多角形）はユーザー設定で後から一括指定されるため、
+    /// **形状が決まったあとに呼ぶこと**。形状が決まる前に呼ぶと、矩形を選んでいても
+    /// 楕円向けの倍率で広がってしまう（GUI報告 2026-07-31「矩形範囲が大きめに認識される」）。
+    ///
+    /// 対象は検出器が出した性器ROIのみ。手描き（`source == "manual"`）はユーザーの意図した
+    /// 範囲なので変更しない。画像外へはみ出す分は `clamped()` で切り詰める。
+    public static func expandGenitalROIsToCoverShape(_ rois: [MosaicROI]) -> [MosaicROI] {
         let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
         return rois.map { roi in
-            guard roi.shape == .ellipse,
-                  genitals.contains(roi.category),
-                  roi.source != "manual" else { return roi }
+            guard genitals.contains(roi.category), roi.source != "manual" else { return roi }
+            let scale = genitalExpansionScale(for: roi.shape)
+            guard scale > 1.0 else { return roi }
             var expanded = roi
-            expanded.rect = roi.rect.expanded(scale: genitalEllipseExpansionScale).clamped()
+            expanded.rect = roi.rect.expanded(scale: scale).clamped()
             return expanded
         }
     }
-    /// 乳首検出から乳輪ROIを派生させ、乳首ROI自体は乳首相当の大きさへ縮小する。
-    /// どちらを使うかは候補カテゴリのチェックで選ぶ（両方ONでも面積比が0.3程度のため
-    /// IoUベースの重複除去では統合されず、両方残る）。
+
     public static func splitNippleAndAreola(_ rois: [MosaicROI]) -> [MosaicROI] {
         rois.flatMap { roi -> [MosaicROI] in
             guard roi.category == .nipple, roi.source != "manual" else { return [roi] }

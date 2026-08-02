@@ -22,10 +22,9 @@ public final class SAMSegmentEngine: Segmenting {
     static let inputLongSide = 1024
     /// 採用するマスクの最小被覆率（ROI矩形内）。これ未満は「ほぼ空」でフォールバックする。
     static let minimumUsableCoverage = 0.02
-    /// ROIの形状（楕円等）で切り取るかの判定しきい値。SAMのマスクがROI矩形内でこの割合を
-    /// 超えて広がっている＝対象を分離できていないとみなし、選択範囲の形状に合わせる。
-    /// 下回る場合はSAMが対象の輪郭を取れているので、形状で切ると対象の一部が欠ける
-    /// （楕円は外接矩形より約21%小さく四隅を削る）ため、矩形制限のみに留める。
+    /// 「SAMが対象を分離できている」とみなす被覆率の上限（診断・測定の目安）。
+    /// これを超える＝枠を塗り潰しており対象の輪郭を取れていない。
+    /// v0.0.00111 以降、マスクは常に選択範囲の形状で切るため切り方の分岐には使わない。
     static let shapeConformCoverage = 0.85
 
     private let fallback = ShapeSegmentEngine()
@@ -71,6 +70,10 @@ public final class SAMSegmentEngine: Segmenting {
         private var source: CGImage?
         private var entries: [String: ORTValue] = [:]
         private let lock = NSLock()
+        /// エンコーダを実際に走らせた回数（＝キャッシュに入れた回数）。
+        /// キャッシュの効きをテストで確認するための計測用。実行時間の比較は機械の負荷で
+        /// 揺れて不安定なため、回数で判定する。
+        private var storeCount = 0
 
         func value(source: CGImage, key: String) -> ORTValue? {
             lock.lock()
@@ -88,11 +91,21 @@ public final class SAMSegmentEngine: Segmenting {
             }
             if entries.count >= Self.capacity { entries.removeAll() }
             entries[key] = value
+            storeCount += 1
+        }
+
+        var encoderRunCount: Int {
+            lock.lock()
+            defer { lock.unlock() }
+            return storeCount
         }
     }
     private static let embeddingCache = EmbeddingCache()
 
     public init() {}
+
+    /// エンコーダを実際に走らせた累計回数（テストでキャッシュの効きを確認するための計測）。
+    static var encoderRunCountForMeasurement: Int { embeddingCache.encoderRunCount }
 
     /// メモリ実測用にセッションだけ先に読み込む（テスト専用）。
     static func warmUpSessionsForMeasurement() {
@@ -399,34 +412,24 @@ public final class SAMSegmentEngine: Segmenting {
             ))
         }
 
-        // まずROIの外接矩形で制限する（SAMのマスクは画像全体に及ぶため、ROI外への漏れを防ぐ）。
+        // マスクは常に**選択範囲の形状**で切る。
+        //
+        // 以前は「SAMが対象を分離できていれば矩形だけで切る」としていた（§5.46）。
+        // 楕円で切ると対象の一部が外れて検閲漏れになるためだったが、その結果
+        // 「楕円・多角形を選んでいるのにマスクが範囲の外へはみ出す」状態になっていた
+        // （GUI報告 2026-07-31）。
+        //
+        // 現在は `DetectedROIRefiner.expandGenitalROIsToCoverShape` が、選択した形状が
+        // 元の検出枠を包み込む大きさまでROIを広げている。したがって形状で切っても
+        // 対象は欠けない。表示している範囲とマスクが一致する方が動作として正しい。
         let black = CIImage(color: .black).cropped(to: extent)
         let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
         let opaque = mask.composited(over: black)
-        let rectMask = ShapeSegmentEngine.rectangleMask(rect: roiRect, extent: extent, rotation: roi.rotation)
-        let rectClipped = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
-            kCIInputBackgroundImageKey: rectMask
+        let shapeMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
+        let restricted = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
+            kCIInputBackgroundImageKey: shapeMask
         ]).cropped(to: extent)
-        let rectCoverage = coverageRatio(of: rectClipped, in: roiRect)
-
-        // ROIの形状（楕円等）でさらに切り取るかを、SAMが対象を分離できたかで決める。
-        //
-        // 楕円は外接矩形より約21%小さく、**四隅を削ぎ落とす**。対象が枠いっぱいに描かれていると
-        // 楕円で切った瞬間に対象の一部がマスクから外れ、検閲漏れになる（GUI報告: 男性器が
-        // 楕円からはみ出す）。一方、SAMが枠のほぼ全面を返した場合は対象を分離できておらず、
-        // そのまま使うと「楕円のROIなのに四角いモザイク」になる（GUI報告）。
-        // そこで、SAMが対象を分離できている（枠を埋め尽くしていない）ときは形状で切らずに
-        // 輪郭をそのまま残し、分離できていないときだけ選択範囲の形状に合わせる。
-        let conformsToShape = rectCoverage > Self.shapeConformCoverage
-        let restricted: CIImage
-        if conformsToShape {
-            let shapeMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
-            restricted = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
-                kCIInputBackgroundImageKey: shapeMask
-            ]).cropped(to: extent)
-        } else {
-            restricted = rectClipped
-        }
+        let rectCoverage = coverageRatio(of: restricted, in: roiRect)
 
         let coverage = coverageRatio(of: restricted, in: roiRect)
         segmentLogger.info("""
@@ -435,7 +438,7 @@ public final class SAMSegmentEngine: Segmenting {
             path=\(usesCrop ? "crop" : "full", privacy: .public) \
             boxSideInInput=\(Int(boxSideInInput)) \
             rectCoverage=\(String(format: "%.2f", rectCoverage), privacy: .public) \
-            clip=\(conformsToShape ? "shape" : "rect", privacy: .public) \
+            clip=shape \
             coverage=\(String(format: "%.2f", coverage), privacy: .public)
             """)
         // ほぼ空のマスクは検閲漏れになるため採用せず、図形フォールバックへ倒す

@@ -587,7 +587,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
-                    rois = DetectedROIRefiner.expandGenitalEllipses(rois)
                 } catch {
                     detectorFailures.append("アニメ部位検出: \(error.localizedDescription)")
                 }
@@ -602,7 +601,6 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
                     rois = Self.dropPoseChestPriors(from: rois, ifDetectorFound: detected)
                     rois = Self.dropPoseGroinPriors(from: rois, ifDetectorFound: detected)
                     rois = DetectedROIRefiner.splitNippleAndAreola(rois)
-                    rois = DetectedROIRefiner.expandGenitalEllipses(rois)
                 } catch {
                     detectorFailures.append("実写部位検出: \(error.localizedDescription)")
                 }
@@ -4847,6 +4845,8 @@ final class MosaicWindowController: NSObject {
             }
             return updated
         }
+        // 形状が決まってから広げる（形状ごとに必要な倍率が違うため）
+        rois = DetectedROIRefiner.expandGenitalROIsToCoverShape(rois)
 
         logAnalysisDiagnostics(rois: rois, sourceImage: sourceImage, output: output, checkedCategories: checkedCategories)
 
