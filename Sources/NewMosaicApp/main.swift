@@ -122,6 +122,9 @@ enum AppLog {
     static let library = Logger(subsystem: subsystem, category: "Library")
     static let export = Logger(subsystem: subsystem, category: "Export")
     static let project = Logger(subsystem: subsystem, category: "Project")
+    /// 自動検出（解析）の診断。`Detection` カテゴリに揃えて既存のデバッグログ画面で拾えるようにする。
+    /// ここだけはユーザー要望により**ソース画像のファイル名とMD5**を記録する（フルパス・画像内容は残さない）。
+    static let analysis = Logger(subsystem: subsystem, category: "Detection")
 }
 
 @main
@@ -4793,6 +4796,8 @@ final class MosaicWindowController: NSObject {
             return updated
         }
 
+        logAnalysisDiagnostics(rois: rois, sourceImage: sourceImage, output: output, checkedCategories: checkedCategories)
+
         pushUndoSnapshot(previousState)
         suspendMosaicPreview()
         canvas.rois = rois
@@ -5048,6 +5053,42 @@ final class MosaicWindowController: NSObject {
         case .learnedShape: return LearnedShapeSegmentEngine()
         case .samShape: return SAMSegmentEngine()
         }
+    }
+
+    /// 解析1回分の診断をデバッグログへ残す。
+    ///
+    /// GUI報告の切り分けを推測ではなく事実で行うため（ユーザー要望 2026-07-31）。
+    /// 「どの画像に対して・どの設定で・何が出たか」を揃えて残す。
+    /// 記録するのはファイル名・MD5・画素サイズ・設定・ROI情報のみで、フルパスと画像内容は残さない。
+    private func logAnalysisDiagnostics(
+        rois: [MosaicROI],
+        sourceImage: CGImage,
+        output: CandidateGenerationOutput,
+        checkedCategories: Set<MosaicTargetCategory>
+    ) {
+        let url = loadedImage?.url
+        let lines = AnalysisDiagnostics.report(
+            appVersion: Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "unknown",
+            fileName: url?.lastPathComponent ?? "unknown",
+            md5: url.flatMap { AnalysisDiagnostics.md5Hex(ofFileAt: $0) },
+            imageSize: CGSize(width: sourceImage.width, height: sourceImage.height),
+            domain: String(describing: output.domain),
+            confidenceThreshold: AnimeCensorDetector.defaultConfidenceThreshold,
+            maskEngine: currentSegmentEngineKind().rawValue,
+            enabledCategories: Array(checkedCategories),
+            rois: rois
+        )
+        for line in lines {
+            AppLog.analysis.info("\(line, privacy: .public)")
+        }
+    }
+
+    /// インスペクタで選択中のマスク生成方式。
+    private func currentSegmentEngineKind() -> SegmentEngineKind {
+        let index = segmentEngineControl.indexOfSelectedItem
+        let kinds = SegmentEngineKind.allCases
+        guard index >= 0, index < kinds.count else { return .shape }
+        return kinds[index]
     }
 
     private func currentSegmentEngine() -> Segmenting {

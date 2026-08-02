@@ -84,3 +84,16 @@
   - `Patches/Positives/` / `Patches/Negatives/`: ROIパッチ画像PNG（最大256pxに縮小）。将来の部位検出モデル学習データを兼ねる。
 - 個人情報: モザイク対象範囲の画像断片を含む。**外部送信は一切行わない**（ARCHITECTURE §5 準拠）。
 - 削除方法: `Learning/` フォルダを削除すれば学習データは完全に消去され、アプリは空の状態から再学習する。
+
+## 自動検出（解析）の診断記録（v0.0.00107〜）
+
+- 目的: GUI報告の切り分けを推測ではなく事実で行う。「どの画像に対して・どの設定で・何が出たか」を1解析ごとに残す。
+- 経路: macOS Unified Logging（subsystem `com.yoshikawa.newMosaic`、category `Detection`）。
+- 実装: `AnalysisDiagnostics`（MosaicCore）＋ `MosaicWindowController.logAnalysisDiagnostics`。
+- 内容:
+  - ヘッダ1行: `analysis v=<アプリ版数> file=<ファイル名> md5=<MD5> size=<幅>x<高> domain=<画像種別> threshold=<検出しきい値> maskEngine=<マスク生成方式> categories=[<候補カテゴリ>]`
+  - `roiCount=<件数>`
+  - ROIごと1行: `roi[NN] <カテゴリ> src=<生成元> x= y= w= h= rot= conf= shape= maskEngine=<個別/inherit> maskThreshold=<個別/inherit>`
+- **プライバシー方針の例外**: 本記録のみ、ユーザー要望（2026-07-31）により**ソース画像のファイル名とMD5**を残す。
+  同一ファイルかどうかを照合するため。フルパス（フォルダ構成）と画像内容は残さない。
+- 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Detection"' --last 10m | grep analysis`
