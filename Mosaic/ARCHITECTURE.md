@@ -842,6 +842,15 @@ v0.0.00107 の `expandGenitalEllipses` は検出直後に一律1.15倍してい�
 `SAMSegmentEngine` は被覆率による分岐をやめ、常に `ShapeSegmentEngine.hardShapeMask` で切る。
 表示している範囲とマスクが一致する方が動作として正しい。
 
+### 5.54.3 埋め込みキャッシュの検証（テストの安定化）
+
+`SAMSegmentEngine` の埋め込みキャッシュはプロセス共有で、対象画像が変わると全て捨てる
+（アプリは1枚ずつ扱うためこれで足りる）。一方テストは並列実行されるため、他のテストが
+対象画像を入れ替えると「2回目なのに再エンコードされた」と誤検出する。
+キャッシュの効きを検証するテストは `SAMSegmentEngine.withIsolatedCacheForTesting()` で
+専用キャッシュを持つエンジンを使う。判定は実行時間ではなく `encoderRunCount`（実行回数）で行う
+（時間比較は機械の負荷で揺れる）。
+
 診断ログの `clip=` は常に `shape` になる。`shapeConformCoverage`（0.85）は切り方の分岐には
 使わなくなり、「SAMが対象を分離できているか」の測定の目安としてのみ残す。
 

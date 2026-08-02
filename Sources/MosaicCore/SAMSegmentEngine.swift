@@ -102,10 +102,27 @@ public final class SAMSegmentEngine: Segmenting {
     }
     private static let embeddingCache = EmbeddingCache()
 
-    public init() {}
+    /// このエンジンが使う埋め込みキャッシュ。既定はプロセス共有（アプリは1枚ずつ扱うため）。
+    /// テストは並列実行され、他のテストが共有キャッシュの対象画像を入れ替えてしまうので、
+    /// キャッシュの効きを検証するテストだけ専用のキャッシュを使う。
+    private let cache: EmbeddingCache
 
-    /// エンコーダを実際に走らせた累計回数（テストでキャッシュの効きを確認するための計測）。
-    static var encoderRunCountForMeasurement: Int { embeddingCache.encoderRunCount }
+    public init() {
+        cache = Self.embeddingCache
+    }
+
+    /// キャッシュの効きを検証するテスト用に、専用の埋め込みキャッシュを持つエンジンを作る。
+    /// 共有キャッシュの状態（他テストの並列実行）に影響されない。
+    static func withIsolatedCacheForTesting() -> SAMSegmentEngine {
+        SAMSegmentEngine(cache: EmbeddingCache())
+    }
+
+    private init(cache: EmbeddingCache) {
+        self.cache = cache
+    }
+
+    /// このエンジンがエンコーダを実際に走らせた累計回数（テスト計測用）。
+    var encoderRunCount: Int { cache.encoderRunCount }
 
     /// メモリ実測用にセッションだけ先に読み込む（テスト専用）。
     static func warmUpSessionsForMeasurement() {
@@ -119,7 +136,7 @@ public final class SAMSegmentEngine: Segmenting {
         }
         let embedding: ORTValue
         do {
-            embedding = try Self.imageEmbedding(for: image, encoder: sessions.encoder)
+            embedding = try Self.imageEmbedding(for: image, encoder: sessions.encoder, cache: cache)
         } catch {
             segmentLogger.info("samShape encodeFailed fallback=shape")
             return try fallback.createMasks(for: rois, in: image, extent: extent)
@@ -144,8 +161,12 @@ public final class SAMSegmentEngine: Segmenting {
 
     // MARK: - エンコード
 
-    private static func imageEmbedding(for image: CGImage, encoder: ORTSession) throws -> ORTValue {
-        try imageEmbedding(of: image, source: image, cacheKey: "full", encoder: encoder)
+    private static func imageEmbedding(
+        for image: CGImage,
+        encoder: ORTSession,
+        cache: EmbeddingCache = embeddingCache
+    ) throws -> ORTValue {
+        try imageEmbedding(of: image, source: image, cacheKey: "full", encoder: encoder, cache: cache)
     }
 
     /// `target` をエンコードする。`source`/`cacheKey` はキャッシュの同一性判定にのみ使う
@@ -154,9 +175,10 @@ public final class SAMSegmentEngine: Segmenting {
         of target: CGImage,
         source: CGImage,
         cacheKey: String,
-        encoder: ORTSession
+        encoder: ORTSession,
+        cache: EmbeddingCache = embeddingCache
     ) throws -> ORTValue {
-        if let cached = embeddingCache.value(source: source, key: cacheKey) {
+        if let cached = cache.value(source: source, key: cacheKey) {
             return cached
         }
         let image = target
@@ -183,7 +205,7 @@ public final class SAMSegmentEngine: Segmenting {
         guard let value = outputs[outputName] else {
             throw CocoaError(.fileReadUnknown)
         }
-        embeddingCache.store(source: source, key: cacheKey, value: value)
+        cache.store(source: source, key: cacheKey, value: value)
         return value
     }
 
@@ -318,13 +340,16 @@ public final class SAMSegmentEngine: Segmenting {
         box: CGRect,
         encoder: ORTSession,
         decoder: ORTSession,
-        image: CGImage
+        image: CGImage,
+        cache: EmbeddingCache = embeddingCache
     ) throws -> CGImage? {
         let imageSize = CGSize(width: image.width, height: image.height)
         guard let window = contextWindow(around: box, imageSize: imageSize),
               let cropped = image.cropping(to: window) else { return nil }
         let key = "crop:\(Int(window.minX)),\(Int(window.minY)),\(Int(window.width)),\(Int(window.height))"
-        let embedding = try imageEmbedding(of: cropped, source: image, cacheKey: key, encoder: encoder)
+        let embedding = try imageEmbedding(
+            of: cropped, source: image, cacheKey: key, encoder: encoder, cache: cache
+        )
         let localBox = box.offsetBy(dx: -window.minX, dy: -window.minY)
         guard let localMask = try binaryMask(
             box: localBox, embedding: embedding, decoder: decoder, image: cropped
@@ -394,7 +419,7 @@ public final class SAMSegmentEngine: Segmenting {
         let maskImage: CGImage?
         if usesCrop, let encoder = Self.sharedSessions?.encoder {
             maskImage = try Self.binaryMaskViaCrop(
-                box: box, encoder: encoder, decoder: decoder, image: image
+                box: box, encoder: encoder, decoder: decoder, image: image, cache: cache
             ) ?? Self.binaryMask(box: box, embedding: embedding, decoder: decoder, image: image)
         } else {
             maskImage = try Self.binaryMask(
