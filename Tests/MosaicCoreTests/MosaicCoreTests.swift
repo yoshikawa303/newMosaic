@@ -2209,3 +2209,72 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         #expect(!isBright(painted, x: farX, y: farY), "手描き層が反対側まで及んでいる rect=\(rect)")
     }
 }
+
+/// マスク生成回数を数える検証用エンジン。
+private final class CountingSegmentEngine: Segmenting {
+    private(set) var callCount = 0
+    private(set) var roiCount = 0
+
+    func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        callCount += 1
+        roiCount += rois.count
+        return rois.map { _ in CIImage(color: .white).cropped(to: extent) }
+    }
+}
+
+/// スタイルだけを変えたとき、マスクを作り直さないこと。
+///
+/// マスク生成は「対象形状（SAM）」だとROIごとにONNX推論が走る。モザイクの見た目を変えるたびに
+/// 作り直すとUIが固まる（GUI報告 2026-08-02）。マスクはスタイルに依存しないのでキャッシュする。
+@Test func changingOnlyTheStyleDoesNotRegenerateMasks() throws {
+    let image = MemoryFootprintTests.makeImage(width: 60, height: 60)
+    let rois = [
+        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3),
+                  confidence: 1, source: "test", shape: .rectangle, category: .other),
+        MosaicROI(rect: NormalizedRect(x: 0.5, y: 0.5, width: 0.3, height: 0.3),
+                  confidence: 1, source: "test", shape: .ellipse, category: .other)
+    ]
+    let engine = MosaicEngine()
+    let segment = CountingSegmentEngine()
+
+    var style = MosaicStyle()
+    style.blockScale = 20
+    _ = try engine.applyMosaic(to: image, rois: rois, style: style, segmentEngine: segment)
+    #expect(segment.roiCount == 2, "初回は2件ぶん生成する")
+
+    // 見た目だけ変えて何度も描き直す
+    for scale in [24.0, 28.0, 32.0] {
+        style.blockScale = scale
+        _ = try engine.applyMosaic(to: image, rois: rois, style: style, segmentEngine: segment)
+    }
+    #expect(segment.roiCount == 2, "スタイル変更でマスクを作り直している（\(segment.roiCount)件）")
+}
+
+/// ROIの形や位置を変えたら、そのROIだけ作り直すこと。
+@Test func changingROIGeometryRegeneratesOnlyThatMask() throws {
+    let image = MemoryFootprintTests.makeImage(width: 60, height: 60)
+    var rois = [
+        MosaicROI(rect: NormalizedRect(x: 0.1, y: 0.1, width: 0.3, height: 0.3),
+                  confidence: 1, source: "test", shape: .rectangle, category: .other),
+        MosaicROI(rect: NormalizedRect(x: 0.5, y: 0.5, width: 0.3, height: 0.3),
+                  confidence: 1, source: "test", shape: .ellipse, category: .other)
+    ]
+    let engine = MosaicEngine()
+    let segment = CountingSegmentEngine()
+    let style = MosaicStyle()
+
+    _ = try engine.applyMosaic(to: image, rois: rois, style: style, segmentEngine: segment)
+    #expect(segment.roiCount == 2)
+
+    // 片方だけ動かす
+    rois[0].rect = NormalizedRect(x: 0.15, y: 0.1, width: 0.3, height: 0.3)
+    _ = try engine.applyMosaic(to: image, rois: rois, style: style, segmentEngine: segment)
+    #expect(segment.roiCount == 3, "動かしていない方まで作り直している（\(segment.roiCount)件）")
+
+    // 手描き補正を足した場合も作り直す
+    rois[1].manualMaskStrokes = [ManualMaskStroke(
+        points: [NormalizedPoint(x: 0.5, y: 0.5)], width: 0.2, isAdditive: true
+    )]
+    _ = try engine.applyMosaic(to: image, rois: rois, style: style, segmentEngine: segment)
+    #expect(segment.roiCount == 4, "手描き補正の変更が反映されていない（\(segment.roiCount)件）")
+}

@@ -201,8 +201,74 @@ struct SeededRandomGenerator: RandomNumberGenerator {
 public final class MosaicEngine {
     private let context: CIContext
 
+    /// マスクのキャッシュ。
+    ///
+    /// マスク生成は「対象形状（SAM）」ならROIごとにONNX推論が走る。`applyMosaic` は
+    /// モザイクの見た目を変えるたびに呼ばれるため、毎回作り直すとUIが固まる
+    /// （GUI報告 2026-08-02「モザイク対象の1つのモザイクを編集する毎にアプリが一時ハングする」）。
+    /// マスクはROIの形状・位置・生成方式・手描き補正だけで決まりスタイルには依存しないので、
+    /// それらを鍵にして使い回す。
+    private struct MaskCacheKey: Hashable {
+        let image: ObjectIdentifier
+        let extent: String
+        let engine: String
+        let roi: String
+    }
+    private var maskCache: [MaskCacheKey: CIImage] = [:]
+    /// 保持する上限。1画像あたりのROI数を超える程度あればよい。
+    private static let maskCacheCapacity = 256
+
     public init(context: CIContext = CIContext(options: [.cacheIntermediates: false])) {
         self.context = context
+    }
+
+    /// マスクのキャッシュを捨てる。画像やマスク生成方式を切り替えたときに呼ぶ。
+    public func invalidateMaskCache() {
+        maskCache.removeAll()
+    }
+
+    /// キャッシュを見てからマスクを作る。
+    private func cachedMasks(
+        for rois: [MosaicROI],
+        in image: CGImage,
+        extent: CGRect,
+        segmentEngine: Segmenting
+    ) throws -> [CIImage] {
+        // エンジンの種類が変わったらキャッシュは無効。型名で識別する
+        // （同じ型なら同じ生成規則。しきい値等はROI側の`maskIdentity`に含まれる）。
+        let engineName = String(describing: type(of: segmentEngine))
+        let extentKey = "\(Int(extent.width))x\(Int(extent.height))"
+        var results = [CIImage?](repeating: nil, count: rois.count)
+        var missingIndices: [Int] = []
+        for (index, roi) in rois.enumerated() {
+            let key = MaskCacheKey(
+                image: ObjectIdentifier(image), extent: extentKey,
+                engine: engineName, roi: roi.maskIdentity
+            )
+            if let cached = maskCache[key] {
+                results[index] = cached
+            } else {
+                missingIndices.append(index)
+            }
+        }
+        if !missingIndices.isEmpty {
+            let missingROIs = missingIndices.map { rois[$0] }
+            let generated = try Self.createMasks(
+                for: missingROIs, in: image, extent: extent, segmentEngine: segmentEngine
+            )
+            if maskCache.count + generated.count > Self.maskCacheCapacity {
+                maskCache.removeAll()
+            }
+            for (offset, index) in missingIndices.enumerated() {
+                let mask = generated[offset]
+                results[index] = mask
+                maskCache[MaskCacheKey(
+                    image: ObjectIdentifier(image), extent: extentKey,
+                    engine: engineName, roi: rois[index].maskIdentity
+                )] = mask
+            }
+        }
+        return results.map { $0 ?? CIImage(color: .black).cropped(to: extent) }
     }
 
     /// 後方互換API（スタイル未指定はモザイク・不透明）。
@@ -230,7 +296,7 @@ public final class MosaicEngine {
         let original = output
         var layerCache: [MosaicROIStyle: (fill: CIImage, stripeAlpha: CIImage?)] = [:]
 
-        let masks = try Self.createMasks(for: rois, in: image, extent: extent, segmentEngine: segmentEngine)
+        let masks = try cachedMasks(for: rois, in: image, extent: extent, segmentEngine: segmentEngine)
         for (roi, baseMask) in zip(rois, masks) {
             let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
             guard rect.width > 1, rect.height > 1 else { continue }

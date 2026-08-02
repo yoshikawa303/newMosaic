@@ -337,6 +337,34 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     /// 分ける。倍率で持つのは、ユーザーがROIを移動・リサイズしても比率が保たれるようにするため。
     public var analysisInsetScale: Double?
 
+    /// マスク生成に影響する要素だけを取り出した識別子。
+    ///
+    /// マスクはROIの形状・位置・生成方式・手描き補正だけで決まり、モザイクの見た目
+    /// （パターン・色・ブロックサイズ等）には依存しない。キャッシュのキーに使うことで、
+    /// スタイルを変えるたびにAI推論をやり直さずに済む
+    /// （GUI報告 2026-08-02「モザイクを編集する毎にアプリが一時ハングする」）。
+    public var maskIdentity: String {
+        var parts = [
+            String(format: "%.6f,%.6f,%.6f,%.6f", rect.x, rect.y, rect.width, rect.height),
+            String(describing: shape),
+            String(format: "%.3f", rotation),
+            maskEngine ?? "-",
+            maskThreshold.map { String(format: "%.3f", $0) } ?? "-",
+            analysisInsetScale.map { String(format: "%.4f", $0) } ?? "-"
+        ]
+        if let polygonPoints {
+            parts.append(polygonPoints.map { String(format: "%.4f:%.4f", $0.x, $0.y) }.joined(separator: ";"))
+        }
+        for stroke in manualMaskStrokes {
+            parts.append(String(
+                format: "s%@%.3f:%@",
+                stroke.isAdditive ? "+" : "-", stroke.width,
+                stroke.points.map { String(format: "%.4f_%.4f", $0.x, $0.y) }.joined(separator: ",")
+            ))
+        }
+        return parts.joined(separator: "|")
+    }
+
     /// マスク生成エンジンが対象を切り出すのに使う枠。
     /// `analysisInsetScale` があれば `rect` をその倍率で縮めたもの、無ければ `rect` そのもの。
     public var analysisRect: NormalizedRect {

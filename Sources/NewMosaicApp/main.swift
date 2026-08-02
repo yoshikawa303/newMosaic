@@ -5126,6 +5126,10 @@ final class MosaicWindowController: NSObject {
     @objc private func maskThresholdChanged() {
         let value = maskThresholdSlider.doubleValue
         maskThresholdValueLabel.stringValue = value < 0.01 ? "自動" : "\(Int(value * 100)) %"
+        // 形状しきい値はマスクの内容を変えるので、キャッシュを捨ててから作り直す
+        // （キャッシュはエンジンの型名で識別しており、同じ型で設定だけ変わる場合は
+        //  明示的に捨てないと古いマスクが残る）。
+        mosaicEngine.invalidateMaskCache()
         if applyDetectionSettingToSelectedLayers() { return }
         AppSettings.shared.set(value, forKey: Self.maskThresholdDefaultsKey)
         // モザイク表示中は変更を即時反映する
@@ -5134,6 +5138,8 @@ final class MosaicWindowController: NSObject {
 
     /// 「マスク生成」方式の変更。「個別」ONで選択中レイヤがあれば、そのレイヤにだけ方式を書き込む。
     @objc private func segmentEngineChanged() {
+        // 生成方式が変わればマスクは別物になる
+        mosaicEngine.invalidateMaskCache()
         let kinds = SegmentEngineKind.allCases
         let index = segmentEngineControl.indexOfSelectedItem
         if index >= 0, index < kinds.count, kinds[index] == .learnedShape, !LearnedShapeSegmentEngine.isAvailable {
