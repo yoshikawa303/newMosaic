@@ -79,6 +79,8 @@ public struct MosaicStyle: @unchecked Sendable {
     /// ボーダー: 帯幅・間隔を揺らしたランダム斜めボーダーにするか
     public var stripeRandom: Bool
     /// ボーダー: 帯を網点（漫画トーン風）で塗るか
+    /// すべてのパターン共通の網点（漫画トーン風）ON/OFF。
+    public var patternTone: Bool = false
     public var stripeTone: Bool
     /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い（ランダムON時）
     public var stripeWobble: Double
@@ -105,6 +107,7 @@ public struct MosaicStyle: @unchecked Sendable {
         stripeSpacing: Double = 12,
         stripeVertical: Bool = true,
         stripeRandom: Bool = false,
+        patternTone: Bool = false,
         stripeTone: Bool = false,
         stripeWobble: Double = 0,
         cloudDensity: Double = 0.5,
@@ -123,6 +126,7 @@ public struct MosaicStyle: @unchecked Sendable {
         self.stripeSpacing = stripeSpacing
         self.stripeVertical = stripeVertical
         self.stripeRandom = stripeRandom
+        self.patternTone = patternTone
         self.stripeTone = stripeTone
         self.stripeWobble = stripeWobble
         self.cloudDensity = cloudDensity
@@ -145,6 +149,7 @@ public struct MosaicStyle: @unchecked Sendable {
             stripeSpacing: stripeSpacing,
             stripeVertical: stripeVertical,
             stripeRandom: stripeRandom,
+            patternTone: patternTone,
             stripeTone: stripeTone,
             stripeWobble: stripeWobble,
             cloudDensity: cloudDensity,
@@ -168,6 +173,7 @@ public struct MosaicStyle: @unchecked Sendable {
             stripeSpacing: roiStyle.stripeSpacing,
             stripeVertical: roiStyle.stripeVertical,
             stripeRandom: roiStyle.stripeRandom,
+            patternTone: roiStyle.patternTone,
             stripeTone: roiStyle.stripeTone,
             stripeWobble: roiStyle.stripeWobble,
             cloudDensity: roiStyle.cloudDensity,
@@ -597,6 +603,17 @@ public final class MosaicEngine {
                     .applyingFilter("CIPixellate", parameters: [kCIInputScaleKey: max(4, style.blockScale)])
                     .cropped(to: extent)
             }
+        }
+
+        // 全パターン共通のトーン（網点）。パターン固有のトーン（ボーダー・雲・フラッシュ）は
+        // それぞれの生成側で処理済みなので、ここでは二重に掛けない。
+        if style.patternTone, !style.pattern.isStripes, style.pattern != .clouds, style.pattern != .flash {
+            fill = fill.applyingFilter("CIDotScreen", parameters: [
+                kCIInputCenterKey: CIVector(x: extent.midX, y: extent.midY),
+                kCIInputAngleKey: 0.3,
+                kCIInputWidthKey: max(3, style.blockScale / 4),
+                kCIInputSharpnessKey: 0.7
+            ]).cropped(to: extent)
         }
 
         // 色付け（ボーダーは帯色として適用済みのため対象外。ただしトーンONは帯色を使わず

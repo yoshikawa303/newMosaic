@@ -1916,20 +1916,25 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     }
 }
 
-/// 画像の端にある性器ROIを広げても、範囲は画像内に収まる。
-@Test func expandedGenitalEllipseStaysInsideImage() {
+/// 画像の端にある性器ROIは、広げた結果が画像の外へ出てもよい。
+///
+/// ここでクランプすると `analysisInsetScale` による逆算が元の検出枠へ戻らず、
+/// 形状ごとに解析枠がずれてマスクが変わる（実サンプルで確認。§5.57.5）。
+/// はみ出す分は描画・切り出しの各所で `clamped()` される。
+@Test func expandedGenitalROIMayExtendOutsideTheImage() {
     let edge = MosaicROI(
         rect: NormalizedRect(x: 0.0, y: 0.92, width: 0.1, height: 0.08),
         confidence: 0.6, source: "anime-censor", shape: .ellipse, category: .femaleGenital
     )
-    let result = DetectedROIRefiner.expandGenitalROIsToCoverShape([edge])[0].rect
-    #expect(result.x >= 0)
-    #expect(result.y >= 0)
-    #expect(result.x + result.width <= 1.0001)
-    #expect(result.y + result.height <= 1.0001)
-    // 端でも広がってはいる
-    #expect(result.width > edge.rect.width)
+    let expanded = DetectedROIRefiner.expandGenitalROIsToCoverShape([edge])[0]
+    // 広がっている
+    #expect(expanded.rect.width > edge.rect.width)
+    // 解析枠は元の検出枠へ正確に戻る（クランプすると戻らない）
+    #expect(abs(expanded.analysisRect.width - edge.rect.width) < 0.0005)
+    #expect(abs(expanded.analysisRect.x - edge.rect.x) < 0.0005)
+    #expect(abs(expanded.analysisRect.y - edge.rect.y) < 0.0005)
 }
+
 
 /// 学習提案（`learned-prior`）は、検出器が見つけたカテゴリには足さない。
 ///

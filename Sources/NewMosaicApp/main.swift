@@ -1148,6 +1148,8 @@ final class MosaicWindowController: NSObject {
     )
     private let styleBorderRandomCheckbox = NSButton(checkboxWithTitle: "ランダム", target: nil, action: nil)
     private let styleBorderToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
+    /// すべてのパターンで使える網点（漫画トーン風）のON/OFF。
+    private let stylePatternToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
     /// ボーダー: 並行揺れ（各線を中央軸にランダムで傾ける度合い。ランダムON時のみ有効）
     private let styleStripeWobbleSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let styleStripeWobbleValueLabel = NSTextField(labelWithString: "0 %")
@@ -2480,6 +2482,11 @@ final class MosaicWindowController: NSObject {
         styleBorderRandomCheckbox.target = self
         styleBorderRandomCheckbox.action = #selector(mosaicStyleChanged)
         styleBorderRandomCheckbox.toolTip = "帯の太さ・間隔をランダムに揺らす（方向は「方向」設定に従う）"
+        stylePatternToneCheckbox.target = self
+        stylePatternToneCheckbox.action = #selector(mosaicStyleChanged)
+        stylePatternToneCheckbox.toolTip = "塗りつぶしを網点（漫画トーン風）にする"
+        applyScaledFont(stylePatternToneCheckbox, size: 12)
+
         styleBorderToneCheckbox.target = self
         styleBorderToneCheckbox.action = #selector(mosaicStyleChanged)
         styleBorderToneCheckbox.toolTip = "帯を網点（漫画トーン風）で塗る"
@@ -2674,7 +2681,11 @@ final class MosaicWindowController: NSObject {
             [styleRowLabel("密度"), sliderValueRow(styleCloudDensitySlider, styleCloudDensityValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("トーン"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
             [styleRowLabel("フラッシュ"), styleFlashResetButton, NSGridCell.emptyContentView],
-            [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView]
+            [stylePatternImageButton, stylePatternImageLabel, NSGridCell.emptyContentView],
+            // 15=トーン（全パターン共通）。既存の行番号をずらさないよう末尾へ追加する。
+            // ボーダー・雲・フラッシュは各々専用のトーン設定を持つため、そちらでは出さない
+            // （1つのパターンにトーンのチェックが2つ並ぶのを避ける）。
+            [styleRowLabel("トーン"), stylePatternToneCheckbox, NSGridCell.emptyContentView]
         ])
         styleGridView = styleGrid
         styleGrid.rowSpacing = 7
@@ -2883,6 +2894,7 @@ final class MosaicWindowController: NSObject {
         style.stripeVertical = styleBorderDirectionControl.selectedSegment == 0
         style.stripeRandom = styleBorderRandomCheckbox.state == .on
         style.stripeTone = styleBorderToneCheckbox.state == .on
+        style.patternTone = stylePatternToneCheckbox.state == .on
         style.stripeWobble = styleStripeWobbleSlider.doubleValue
         style.cloudDensity = styleCloudDensitySlider.doubleValue
         style.cloudTone = styleCloudToneCheckbox.state == .on
@@ -3025,8 +3037,8 @@ final class MosaicWindowController: NSObject {
         let isClouds = pattern == .clouds
         let usesBlockScale = pattern != .border && pattern != .overlayImage
         // 行番号: 0=パターン 1=透明度 2=塗りつぶし色 3=細かさ 4=輪郭ぼかし 5=帯の太さ
-        // 6=帯の間隔 7=方向 8=ボーダー 9=並行揺れ 10=種別(フラッシュ) 11=密度 12=トーン
-        // 13=フラッシュ 14=画像選択
+        // 6=帯の間隔 7=方向 8=ボーダー 9=並行揺れ 10=種別(フラッシュ) 11=密度 12=トーン(雲/フラッシュ)
+        // 13=フラッシュ 14=画像選択 15=トーン(全パターン共通)
         let visibility: [Int: Bool] = [
             2: pattern != .overlayImage,
             3: usesBlockScale,
@@ -3040,7 +3052,8 @@ final class MosaicWindowController: NSObject {
             11: isClouds || isFlash,
             12: isClouds || isFlash,
             13: isFlash,
-            14: pattern.requiresPatternImage
+            14: pattern.requiresPatternImage,
+            15: !isBorder && !isClouds && !isFlash && pattern != .overlayImage
         ]
         for (rowIndex, visible) in visibility where rowIndex < grid.numberOfRows {
             grid.row(at: rowIndex).isHidden = !visible
@@ -3221,6 +3234,7 @@ final class MosaicWindowController: NSObject {
         defaults.set(styleBorderDirectionControl.selectedSegment == 0, forKey: prefix + "stripeVertical")
         defaults.set(styleBorderRandomCheckbox.state == .on, forKey: prefix + "stripeRandom")
         defaults.set(styleBorderToneCheckbox.state == .on, forKey: prefix + "stripeTone")
+        defaults.set(stylePatternToneCheckbox.state == .on, forKey: prefix + "patternTone")
         defaults.set(styleStripeWobbleSlider.doubleValue, forKey: prefix + "stripeWobble")
         defaults.set(styleCloudDensitySlider.doubleValue, forKey: prefix + "cloudDensity")
         defaults.set(styleCloudToneCheckbox.state == .on, forKey: prefix + "cloudTone")
@@ -3267,8 +3281,11 @@ final class MosaicWindowController: NSObject {
                 alpha: 1
             )
         }
+        // 「細かさ」の既定値はパターンごとに変える。ノイズは粒が細かい方が自然なため4px
+        // （ユーザー要望 2026-08-03）。他のパターンは従来どおり。
+        let blockScaleFallback = pattern == .noise ? 4.0 : fallback.blockScale
         styleBlockScaleSlider.doubleValue = defaults.object(forKey: prefix + "blockScale") != nil
-            ? defaults.double(forKey: prefix + "blockScale") : fallback.blockScale
+            ? defaults.double(forKey: prefix + "blockScale") : blockScaleFallback
         styleFeatherSlider.doubleValue = defaults.object(forKey: prefix + "edgeFeather") != nil
             ? defaults.double(forKey: prefix + "edgeFeather") : fallback.edgeFeather
         styleStripeWidthSlider.doubleValue = defaults.object(forKey: prefix + "stripeWidth") != nil
@@ -3279,6 +3296,7 @@ final class MosaicWindowController: NSObject {
             ? defaults.bool(forKey: prefix + "stripeVertical") : fallback.stripeVertical) ? 0 : 1
         styleBorderRandomCheckbox.state = defaults.bool(forKey: prefix + "stripeRandom") ? .on : .off
         styleBorderToneCheckbox.state = defaults.bool(forKey: prefix + "stripeTone") ? .on : .off
+        stylePatternToneCheckbox.state = defaults.bool(forKey: prefix + "patternTone") ? .on : .off
         styleStripeWobbleSlider.doubleValue = defaults.object(forKey: prefix + "stripeWobble") != nil
             ? defaults.double(forKey: prefix + "stripeWobble") : fallback.stripeWobble
         if let rawKind = defaults.string(forKey: prefix + "flashKind"),
@@ -5649,6 +5667,10 @@ final class MosaicWindowController: NSObject {
         librarySearchField.action = #selector(librarySearchChanged)
         librarySearchField.translatesAutoresizingMaskIntoConstraints = false
         librarySearchField.widthAnchor.constraint(greaterThanOrEqualToConstant: 100).isActive = true
+        // 行の余白を検索欄が吸収するようにする（絞り込みコントロールは固有幅のまま）
+        librarySearchField.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        librarySearchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        libraryProcessedFilterControl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         applyScaledFont(librarySearchField, size: 12)
         let filterRow = NSStackView(views: [libraryProcessedFilterControl, librarySearchField])
         filterRow.orientation = .horizontal
@@ -5726,7 +5748,9 @@ final class MosaicWindowController: NSObject {
             modeRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
             filterRow.topAnchor.constraint(equalTo: modeRow.bottomAnchor, constant: 6),
             filterRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
-            filterRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            // 検索欄をパネル幅へ追従させる。`lessThanOrEqualTo` だと行が縮んだままで
+            // サイドパネルを広げても検索欄が伸びなかった（GUI報告 2026-08-03）。
+            filterRow.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             // 一覧が潰れきると、上のフィルタ行と下のアイコン行が重なる（GUI報告 2026-07-31）。
             // 最小高さを与えて、パネル全体の最小高さが内容から決まるようにする。
             libraryScrollView.heightAnchor.constraint(greaterThanOrEqualToConstant: 60),

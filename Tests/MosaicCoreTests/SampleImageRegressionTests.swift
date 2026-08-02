@@ -417,4 +417,39 @@ import Testing
             }
         }
     }
+
+    /// 実写画像の人物マスク被覆率を実測する。
+    ///
+    /// GUI報告 2026-08-02「各人物のマスク範囲がおかしい」。実写経路（`StaticImageMosaicPipeline`）は
+    /// Visionのインスタンスマスクをそのまま使っており、イラスト経路にある品質判定
+    /// （被覆率が高すぎたらSAMへフォールバック。§5.49）が無い。差を数値で確認する。
+    @Test func reportPhotoPersonMaskCoverage() throws {
+        let urls = Self.sampleImageURLs()
+        guard !urls.isEmpty else { return }
+        let detector = VisionPersonDetector()
+
+        for url in urls {
+            guard let image = Self.loadImage(url) else { continue }
+            let persons = (try? detector.detectPersons(in: image)) ?? []
+            guard !persons.isEmpty else { continue }
+            print("=== \(url.lastPathComponent)（\(image.width)x\(image.height)）===")
+            for (index, person) in persons.enumerated() {
+                guard let mask = person.maskImage else {
+                    print("  人物\(index + 1): マスクなし 枠面積 \(String(format: "%.3f", person.bounds.area))")
+                    continue
+                }
+                let coverage = PersonSilhouetteProvider.coverage(of: mask, within: person.bounds)
+                // 同じ枠をSAMへプロンプトとして与えた場合と比べる
+                let samCoverage = SAMSegmentEngine().instanceMask(in: image, box: person.bounds)
+                    .map { PersonSilhouetteProvider.coverage(of: $0, within: person.bounds) }
+                print(String(
+                    format: "  人物%d: Vision=%.2f SAM=%@ 枠面積 %.3f 枠(%.3f, %.3f, %.3f, %.3f)",
+                    index + 1, coverage,
+                    samCoverage.map { String(format: "%.2f", $0) } ?? "--",
+                    person.bounds.area,
+                    person.bounds.x, person.bounds.y, person.bounds.width, person.bounds.height
+                ))
+            }
+        }
+    }
 }

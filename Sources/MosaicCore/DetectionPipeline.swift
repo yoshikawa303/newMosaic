@@ -961,7 +961,11 @@ public enum DetectedROIRefiner {
             let scale = genitalExpansionScale(for: roi.shape)
             guard scale > 1.0 else { return roi }
             var expanded = roi
-            expanded.rect = roi.rect.expanded(scale: scale).clamped()
+            // **クランプしない。** 画像の端で切り詰めると `analysisInsetScale` による逆算が
+            // 元の検出枠へ戻らず、形状ごとに解析枠がずれる（新しいサンプル画像で
+            // `samProducesTheSameMaskRegardlessOfROIShape` が検出）。
+            // 画像外へはみ出す分は、描画・切り出しの各所で `clamped()` される。
+            expanded.rect = roi.rect.expanded(scale: scale)
             // マスク生成エンジンには元の検出枠を渡す。広げた枠のまま渡すと、
             // SAMのプロンプトや前景抽出のクロップが変わって別物を切り出してしまう
             // （GUI報告 2026-08-02「楕円・多角形で同じ性器が同じようにマスクされない」）。

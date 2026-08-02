@@ -186,6 +186,13 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
     public var stripeVertical: Bool
     /// ボーダー: 帯幅・間隔を揺らしたランダム斜めボーダーにするか。
     public var stripeRandom: Bool
+    /// すべてのパターン共通の網点（漫画トーン風）ON/OFF。
+    ///
+    /// 従来はボーダー（`stripeTone`）と雲・フラッシュ（`cloudTone`）にしか無かったが、
+    /// モザイク・ノイズ・ぼかし等でもトーン化したいという要望（2026-08-03）に対応する。
+    /// 塗りつぶしレイヤの生成後に一律で網点化するため、どのパターンでも効く。
+    public var patternTone: Bool = false
+
     /// ボーダー: 帯を網点（漫画トーン風）で塗るか。
     public var stripeTone: Bool
     /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い。
@@ -210,6 +217,7 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         stripeSpacing: Double = 12,
         stripeVertical: Bool = true,
         stripeRandom: Bool = false,
+        patternTone: Bool = false,
         stripeTone: Bool = false,
         stripeWobble: Double = 0,
         cloudDensity: Double = 0.5,
@@ -227,6 +235,7 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         self.stripeSpacing = stripeSpacing
         self.stripeVertical = stripeVertical
         self.stripeRandom = stripeRandom
+        self.patternTone = patternTone
         self.stripeTone = stripeTone
         self.stripeWobble = stripeWobble
         self.cloudDensity = cloudDensity
@@ -238,7 +247,7 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case pattern, opacity, tint, blockScale, edgeFeather, stripeWidth, stripeSpacing,
-             stripeVertical, stripeRandom, stripeTone, stripeWobble, cloudDensity, cloudTone,
+             stripeVertical, stripeRandom, patternTone, stripeTone, stripeWobble, cloudDensity, cloudTone,
              flashCenter, flashKind, patternImageIdentifier
     }
 
@@ -262,6 +271,8 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
         cloudDensity = try container.decode(Double.self, forKey: .cloudDensity)
         cloudTone = try container.decode(Bool.self, forKey: .cloudTone)
         stripeWobble = try container.decodeIfPresent(Double.self, forKey: .stripeWobble) ?? 0
+        // v0.0.00120で追加。旧データには無いのでOFF扱い
+        patternTone = try container.decodeIfPresent(Bool.self, forKey: .patternTone) ?? false
         flashCenter = try container.decodeIfPresent(NormalizedPoint.self, forKey: .flashCenter)
         if let kind = try container.decodeIfPresent(MosaicFlashKind.self, forKey: .flashKind) {
             flashKind = kind
