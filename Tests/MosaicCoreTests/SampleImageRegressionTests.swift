@@ -507,4 +507,31 @@ import Testing
             }
         }
     }
+
+    /// SAMが対象の一部しか分離できなかった場合に、図形（矩形）へフォールバックすること。
+    ///
+    /// GUI報告 2026-08-03「右下性器位置誤判定」。実際のマスクを画像として書き出して
+    /// 目視確認したところ、coverage=0.26 は亀頭部分が完全に露出する検閲漏れだった
+    /// （coverage=0.58 / 0.71 は対象を綺麗に覆えていた）。
+    /// `minimumUsableCoverage` をこの実測に基づいて0.02→0.40へ引き上げた。
+    /// このROI（ログの roi[06] そのまま）で、SAMのマスクではなく図形フォールバックが
+    /// 使われる＝ROI矩形全体が対象になることを確認する。
+    @Test func lowCoverageSAMMaskFallsBackToShape() throws {
+        let url = URL(fileURLWithPath: "/Volumes/DATA/XCode_Project/newMosaic/Tests/SampleImages/8C52ADAB-238A-4FED-8823-28F2DD89FF7D_original.png")
+        guard let image = Self.loadImage(url) else { return }
+        let roi = MosaicROI(
+            rect: NormalizedRect(x: 0.6086, y: 0.7841, width: 0.1716, height: 0.1615),
+            confidence: 0.72, source: "anime-censor", shape: .rectangle, category: .maleGenital
+        )
+        let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let ciMask = try SAMSegmentEngine().createMasks(for: [roi], in: image, extent: extent)[0]
+        let context = CIContext(options: [.cacheIntermediates: false])
+        guard let cgMask = context.createCGImage(ciMask, from: extent) else {
+            Issue.record("マスク画像の生成に失敗")
+            return
+        }
+        let coverage = PersonSilhouetteProvider.coverage(of: cgMask, within: roi.rect)
+        // フォールバック（矩形全体）なら被覆率はほぼ1.0。SAMの部分マスク（実測0.26）のままなら失敗。
+        #expect(coverage > 0.95, "図形フォールバックが使われていない（被覆率\(coverage)）")
+    }
 }

@@ -20,8 +20,18 @@ import Foundation
 public final class SAMSegmentEngine: Segmenting {
     /// SAM標準の入力解像度（長辺）。
     static let inputLongSide = 1024
-    /// 採用するマスクの最小被覆率（ROI矩形内）。これ未満は「ほぼ空」でフォールバックする。
-    static let minimumUsableCoverage = 0.02
+    /// 採用するマスクの最小被覆率（ROI矩形内）。これ未満は図形（矩形/選択形状）へフォールバックする。
+    ///
+    /// 従来は0.02（「ほぼ空」のみ弾く）だったが、部分的な検閲漏れを見逃していた
+    /// （GUI報告 2026-08-03「右下性器位置誤判定」）。実際に生成されたマスクを画像として
+    /// 書き出して目視確認したところ（`SampleImageRegressionTests.diagnoseLowCoverageMask`）:
+    ///
+    ///     coverage=0.26: 亀頭部分が完全に露出（検閲漏れ・失敗）
+    ///     coverage=0.58: 対象を綺麗に覆えている（正常）
+    ///     coverage=0.71: 対象を綺麗に覆えている（正常）
+    ///
+    /// 0.26（失敗）と0.58（正常）の間で、安全側に倍以上の余裕を見て0.40とする。
+    static let minimumUsableCoverage = 0.40
     /// 「SAMが対象を分離できている」とみなす被覆率の上限（診断・測定の目安）。
     /// これを超える＝枠を塗り潰しており対象の輪郭を取れていない。
     /// v0.0.00111 以降、マスクは常に選択範囲の形状で切るため切り方の分岐には使わない。
