@@ -332,7 +332,17 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     /// 空なら補正なし（生成したマスクをそのまま使う）。
     public var manualMaskStrokes: [ManualMaskStroke] = []
 
-    /// `rect` を「解析に使う枠」へ戻すための縮小倍率。nilは `rect` をそのまま使う。
+    /// マスクを切り取る形状だけを広げる倍率。nilは `rect` の形状をそのまま使う。
+    ///
+    /// 楕円・多角形は四隅を削るため、検出枠いっぱいに描かれた対象の角が形状から外れる。
+    /// 以前は `rect` 自体を広げていたが、**画面に見える選択範囲まで大きくなり
+    /// 「範囲が大きすぎる／位置がずれて見える」という報告が続いた**（2026-08-02, 08-03）。
+    ///
+    /// 実測（サンプル5枚・性器ROI11件、検出枠内の被覆率）では、形状を広げないと
+    /// マスクが1.2〜6.7%失われる（＝検閲漏れ）。そこで
+    /// **表示・選択に使う `rect` は検出枠のまま、マスクを切り取る形状だけを広げる**。
+    ///
+    /// 倍率は「その形状が元の枠を完全に含む」最小値（楕円√2・多角形1.58。§5.54.1）。
     ///
     /// 楕円・多角形は四隅を削るため、`DetectedROIRefiner.expandGenitalROIsToCoverShape` が
     /// ROIを広げて対象を包み込ませている。しかし `rect` はマスク生成エンジンが
@@ -346,7 +356,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
     ///
     /// そこで「表示・マスクの切り取りに使う枠（`rect`）」と「解析に使う枠（`analysisRect`）」を
     /// 分ける。倍率で持つのは、ユーザーがROIを移動・リサイズしても比率が保たれるようにするため。
-    public var analysisInsetScale: Double?
+    public var maskShapeScale: Double?
 
     /// マスク生成に影響する要素だけを取り出した識別子。
     ///
@@ -361,7 +371,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
             String(format: "%.3f", rotation),
             maskEngine ?? "-",
             maskThreshold.map { String(format: "%.3f", $0) } ?? "-",
-            analysisInsetScale.map { String(format: "%.4f", $0) } ?? "-"
+            maskShapeScale.map { String(format: "%.4f", $0) } ?? "-"
         ]
         if let polygonPoints {
             parts.append(polygonPoints.map { String(format: "%.4f:%.4f", $0.x, $0.y) }.joined(separator: ";"))
@@ -376,11 +386,13 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         return parts.joined(separator: "|")
     }
 
-    /// マスク生成エンジンが対象を切り出すのに使う枠。
-    /// `analysisInsetScale` があれば `rect` をその倍率で縮めたもの、無ければ `rect` そのもの。
-    public var analysisRect: NormalizedRect {
-        guard let scale = analysisInsetScale, scale > 0, scale != 1 else { return rect }
-        return rect.expanded(scale: scale).clamped()
+    /// マスク生成エンジンが対象を切り出すのに使う枠。表示の枠と同じ（＝検出枠）。
+    public var analysisRect: NormalizedRect { rect }
+
+    /// マスクを切り取る形状の枠。`maskShapeScale` があれば `rect` を広げたもの。
+    public var maskShapeRect: NormalizedRect {
+        guard let scale = maskShapeScale, scale > 1 else { return rect }
+        return rect.expanded(scale: scale)
     }
 
     /// 多角形の既定形状（矩形に内接する六角形。上頂点から時計回り）
@@ -402,7 +414,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         roiGroupName: String? = nil,
         maskEngine: String? = nil,
         maskThreshold: Double? = nil,
-        analysisInsetScale: Double? = nil,
+        maskShapeScale: Double? = nil,
         manualMaskStrokes: [ManualMaskStroke] = []
     ) {
         self.id = id
@@ -417,7 +429,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         self.roiGroupName = roiGroupName
         self.maskEngine = maskEngine
         self.maskThreshold = maskThreshold
-        self.analysisInsetScale = analysisInsetScale
+        self.maskShapeScale = maskShapeScale
         self.manualMaskStrokes = manualMaskStrokes
     }
 

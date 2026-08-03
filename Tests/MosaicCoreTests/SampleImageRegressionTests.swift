@@ -1,4 +1,5 @@
 import CoreGraphics
+import CoreImage
 import Foundation
 import ImageIO
 import Testing
@@ -448,6 +449,60 @@ import Testing
                     samCoverage.map { String(format: "%.2f", $0) } ?? "--",
                     person.bounds.area,
                     person.bounds.x, person.bounds.y, person.bounds.width, person.bounds.height
+                ))
+            }
+        }
+    }
+
+    /// 性器ROIの拡大（§5.54）が今も必要かを実測する。
+    ///
+    /// 現在のマスクは「SAMの輪郭 ∩ 選択形状」で、SAMへ渡すのは拡大前の検出枠（`analysisRect`）。
+    /// SAMの輪郭が検出枠の内側に収まるなら、形状で切っても欠けないので拡大は不要になる。
+    /// 拡大は表示上のROIを大きく見せる副作用があるため（GUI報告 2026-08-03）、
+    /// 「拡大あり／なしでマスクがどれだけ変わるか」を数値で出す。
+    @Test func reportWhetherGenitalExpansionStillChangesTheMask() throws {
+        let urls = Self.sampleImageURLs()
+        guard !urls.isEmpty else { return }
+        guard let detector = try? AnimeCensorDetector() else { return }
+        let engine = SAMSegmentEngine()
+        let context = CIContext(options: [.cacheIntermediates: false])
+
+        func coverage(of mask: CIImage, in rect: CGRect, extent: CGRect) -> Double {
+            guard rect.width > 0, rect.height > 0 else { return 0 }
+            let average = mask.applyingFilter("CIAreaAverage", parameters: [
+                kCIInputExtentKey: CIVector(cgRect: rect)
+            ])
+            var pixel = [UInt8](repeating: 0, count: 4)
+            let linear = CGColorSpace(name: CGColorSpace.linearSRGB) ?? CGColorSpaceCreateDeviceRGB()
+            context.render(average, toBitmap: &pixel, rowBytes: 4,
+                           bounds: CGRect(x: 0, y: 0, width: 1, height: 1),
+                           format: .RGBA8, colorSpace: linear)
+            return Double(pixel[0]) / 255.0
+        }
+
+        for url in urls {
+            guard let image = Self.loadImage(url) else { continue }
+            let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+            let detected = ((try? detector.detect(in: image)) ?? [])
+                .filter { $0.category == .maleGenital || $0.category == .femaleGenital }
+            guard !detected.isEmpty else { continue }
+            print("=== \(url.lastPathComponent) ===")
+
+            for base in detected {
+                var ellipse = base
+                ellipse.shape = .ellipse
+                let expanded = DetectedROIRefiner.expandGenitalROIsToCoverShape([ellipse])[0]
+                guard let withExpansion = try? engine.createMasks(
+                          for: [expanded], in: image, extent: extent)[0],
+                      let withoutExpansion = try? engine.createMasks(
+                          for: [ellipse], in: image, extent: extent)[0] else { continue }
+                // 比較は「拡大前の検出枠の中でどれだけ塗られているか」で行う
+                let box = base.rect.clamped().cgRect(imageSize: extent.size, origin: .bottomLeft)
+                let a = coverage(of: withExpansion, in: box, extent: extent)
+                let b = coverage(of: withoutExpansion, in: box, extent: extent)
+                print(String(
+                    format: "  %-13@ 拡大あり=%.3f 拡大なし=%.3f 差=%+.3f",
+                    base.category.rawValue, a, b, b - a
                 ))
             }
         }

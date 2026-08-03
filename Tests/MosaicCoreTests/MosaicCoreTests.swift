@@ -1898,42 +1898,40 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         roi(.ellipse, .maleGenital, source: "manual")
     ])
 
-    // 楕円は√2倍（楕円が元の枠の四隅を含む最小倍率）
+    // 楕円は√2倍（楕円が元の枠の四隅を含む最小倍率）。広がるのは切り取り形状だけ
     let ellipseScale = DetectedROIRefiner.genitalExpansionScale(for: .ellipse)
     #expect(abs(ellipseScale - 2.0.squareRoot()) < 0.0001)
-    #expect(abs(result[0].rect.width - base.width * ellipseScale) < 0.0001)
+    #expect(abs(result[0].maskShapeRect.width - base.width * ellipseScale) < 0.0001)
+    // 表示の枠は検出枠のまま
+    #expect(abs(result[0].rect.width - base.width) < 0.0001)
     // 中心は動かない
-    #expect(abs((result[0].rect.x + result[0].rect.width / 2) - (base.x + base.width / 2)) < 0.0001)
+    #expect(abs((result[0].maskShapeRect.x + result[0].maskShapeRect.width / 2)
+                - (base.x + base.width / 2)) < 0.0001)
 
     // 多角形は楕円より内側なので、より大きな倍率が要る
     #expect(DetectedROIRefiner.genitalExpansionScale(for: .polygon) > ellipseScale)
-    #expect(result[1].rect.width > result[0].rect.width)
+    #expect(result[1].maskShapeRect.width > result[0].maskShapeRect.width)
 
-    // 矩形・乳首・手描きは変えない
+    // 矩形・乳首・手描きは切り取り形状も変えない
     for index in 2...4 {
-        #expect(abs(result[index].rect.width - base.width) < 0.0001)
-        #expect(abs(result[index].rect.height - base.height) < 0.0001)
+        #expect(abs(result[index].maskShapeRect.width - base.width) < 0.0001)
+        #expect(abs(result[index].maskShapeRect.height - base.height) < 0.0001)
     }
 }
 
-/// 画像の端にある性器ROIは、広げた結果が画像の外へ出てもよい。
-///
-/// ここでクランプすると `analysisInsetScale` による逆算が元の検出枠へ戻らず、
-/// 形状ごとに解析枠がずれてマスクが変わる（実サンプルで確認。§5.57.5）。
-/// はみ出す分は描画・切り出しの各所で `clamped()` される。
-@Test func expandedGenitalROIMayExtendOutsideTheImage() {
+/// 画像の端にある性器ROIでも、表示の枠は検出枠のままで、切り取り形状だけが広がる。
+@Test func genitalROIAtImageEdgeKeepsItsDisplayRect() {
     let edge = MosaicROI(
         rect: NormalizedRect(x: 0.0, y: 0.92, width: 0.1, height: 0.08),
         confidence: 0.6, source: "anime-censor", shape: .ellipse, category: .femaleGenital
     )
     let expanded = DetectedROIRefiner.expandGenitalROIsToCoverShape([edge])[0]
-    // 広がっている
-    #expect(expanded.rect.width > edge.rect.width)
-    // 解析枠は元の検出枠へ正確に戻る（クランプすると戻らない）
-    #expect(abs(expanded.analysisRect.width - edge.rect.width) < 0.0005)
-    #expect(abs(expanded.analysisRect.x - edge.rect.x) < 0.0005)
-    #expect(abs(expanded.analysisRect.y - edge.rect.y) < 0.0005)
+    // 表示の枠は変わらない
+    #expect(expanded.rect == edge.rect)
+    // 切り取り形状は広がる（画像の外へ出てよい。描画・切り出しの各所でclampされる）
+    #expect(expanded.maskShapeRect.width > edge.rect.width)
 }
+
 
 
 /// 学習提案（`learned-prior`）は、検出器が見つけたカテゴリには足さない。
@@ -2067,9 +2065,13 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         [roi(.rectangle), roi(.ellipse), roi(.polygon)]
     )
 
-    // 表示・切り取り用の枠は形状ごとに変わる
-    #expect(expanded[1].rect.width > expanded[0].rect.width)
-    #expect(expanded[2].rect.width > expanded[1].rect.width)
+    // 表示の枠はどの形状でも検出枠のまま（画面に見える選択範囲を大きくしない）
+    for result in expanded {
+        #expect(abs(result.rect.width - detected.width) < 0.0005)
+    }
+    // マスクを切り取る形状だけが形状ごとに広がる
+    #expect(expanded[1].maskShapeRect.width > expanded[0].maskShapeRect.width)
+    #expect(expanded[2].maskShapeRect.width > expanded[1].maskShapeRect.width)
 
     // 解析用の枠はどの形状でも元の検出枠と一致する
     for (index, result) in expanded.enumerated() {
@@ -2085,8 +2087,9 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     let rect = NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
     let roi = MosaicROI(rect: rect, confidence: 1.0, source: "manual",
                         shape: .ellipse, category: .maleGenital)
-    #expect(roi.analysisInsetScale == nil)
+    #expect(roi.maskShapeScale == nil)
     #expect(roi.analysisRect == roi.rect)
+    #expect(roi.maskShapeRect == roi.rect)
 }
 
 /// 手描き補正: 塗ったところがマスクに追加され、消したところが削られること。

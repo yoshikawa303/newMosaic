@@ -156,8 +156,13 @@ public final class ShapeSegmentEngine: Segmenting {
     /// `shapeMask` の楕円は放射グラデーション（縁へ向かって黒くなる）のため、輪郭が取れている
     /// マスクへ乗算すると輪郭が縁で薄まってしまう（§5.41）。輪郭マスクを「表示されているROIの
     /// 形状」で切り取る用途にはこちらを使う。
+    /// マスクを切り取るための二値形状。
+    ///
+    /// 枠は `maskShapeRect`（＝表示の枠 `rect` を、四隅を削る形状の分だけ広げたもの）を使う。
+    /// 表示の枠で切ると、楕円・多角形が対象の角を削って検閲漏れになる
+    /// （実測でマスクの1.2〜6.7%が失われる。§5.64）。
     public static func hardShapeMask(for roi: MosaicROI, extent: CGRect) -> CIImage {
-        let rect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        let rect = roi.maskShapeRect.cgRect(imageSize: extent.size, origin: .bottomLeft)
         switch roi.shape {
         case .rectangle:
             return rectangleMask(rect: rect, extent: extent, rotation: roi.rotation)
