@@ -1061,7 +1061,7 @@ final class MosaicWindowController: NSObject {
     private let zoomLabel = NSTextField(labelWithString: "100%")
     /// ツールバーのモード切替（編集モード/範囲選択モード）。既定は編集モード（従来通りの挙動）。
     /// Option(⌥)キーを押しながらのドラッグで、そのドラッグ限定に一時的にモードを入れ替えられる。
-    /// ペン（マスク修正）の太さ設定。マスク修正モードのときだけ表示する。
+    /// マスク追加ペン／マスク消しゴムの太さ設定。いずれかのモードのときだけ表示する。
     private let maskBrushSlider = NSSlider(value: 0.15, minValue: 0.01, maxValue: 0.6, target: nil, action: nil)
     private let maskBrushValueLabel = NSTextField(labelWithString: "15 %")
     private var maskBrushRow: NSView?
@@ -1531,7 +1531,7 @@ final class MosaicWindowController: NSObject {
         canvasModeControl.selectedSegment = 0
         canvasModeControl.target = self
         canvasModeControl.action = #selector(canvasModeChanged)
-        canvasModeControl.toolTip = "画像上の操作モード（編集/範囲選択）"
+        canvasModeControl.toolTip = "画像上の操作モード（編集/範囲選択/マスク追加ペン/マスク消しゴム）"
 
         shapeControl.selectedSegment = 1
         shapeControl.toolTip = "新規または選択中のモザイク範囲の形状"
@@ -1743,6 +1743,7 @@ final class MosaicWindowController: NSObject {
                   self.canvas.rois[index].category != category else { return }
             self.pushUndoSnapshot(self.currentEditorState())
             self.canvas.rois[index].category = category
+            self.refreshMaskShapeScale(at: index)
             self.updateStatus("ROIのカテゴリを「\(category.displayName)」へ変更しました")
         }
         canvas.onManualEditWillBegin = { [weak self] in
@@ -1775,8 +1776,8 @@ final class MosaicWindowController: NSObject {
             self.loadDetectionSettingForSelection(roi)
             self.syncROIListSelectionFromCanvas()
         }
-        canvas.onMaskStrokeCompleted = { [weak self] roiID, stroke in
-            self?.applyMaskStroke(roiID: roiID, stroke: stroke)
+        canvas.onMaskStrokeCompleted = { [weak self] roiID, stroke, isNewLayer in
+            self?.applyMaskStroke(roiID: roiID, stroke: stroke, isNewLayer: isNewLayer)
         }
         canvas.onMaskStrokeNeedsNewLayer = { [weak self] rect in
             self?.addLayerForMaskPaint(rect: rect)
@@ -1813,6 +1814,17 @@ final class MosaicWindowController: NSObject {
         reloadLibrary()
     }
 
+    /// 形状・カテゴリの変更後、性器ROIの「マスクを切り取る形状」の拡大倍率を今の状態へ合わせ直す。
+    ///
+    /// `maskShapeScale` は検出時に一度だけ設定される想定だったが、ユーザーがインスペクタで
+    /// 形状（矩形/楕円/多角形）やカテゴリを手動変更しても再計算されず、古い倍率が残っていた
+    /// （コードレビューで検出）。実体は `DetectedROIRefiner.recalculateMaskShapeScale`
+    /// （コア側にあるのはテストしやすくするため。ロジックの詳細はそちらのコメントを参照）。
+    private func refreshMaskShapeScale(at index: Int) {
+        guard canvas.rois.indices.contains(index) else { return }
+        canvas.rois[index] = DetectedROIRefiner.recalculateMaskShapeScale(for: canvas.rois[index])
+    }
+
     @objc private func shapeControlChanged() {
         let shapes: [ROIShape] = [.rectangle, .ellipse, .polygon]
         let index = shapeControl.selectedSegment
@@ -1832,6 +1844,7 @@ final class MosaicWindowController: NSObject {
             } else {
                 canvas.rois[roiIndex].polygonPoints = nil
             }
+            refreshMaskShapeScale(at: roiIndex)
         } else if shape == .polygon {
             updateStatus("追加形状: 多角形（ドラッグで追加後、頂点ドラッグで変形、Option+クリックで頂点の追加/削除）")
         }
@@ -2617,7 +2630,7 @@ final class MosaicWindowController: NSObject {
             ? "自動" : "\(Int(maskThresholdSlider.doubleValue * 100)) %"
         let maskThresholdRow = inspectorRow("形状しきい値", control: maskThresholdSlider, trailing: maskThresholdValueLabel)
 
-        // ペン（マスク修正）の筆の太さ。マスク修正モードのときだけ表示する。
+        // マスク追加ペン／マスク消しゴムの筆の太さ。いずれかのモードのときだけ表示する。
         maskBrushSlider.minValue = ManualMaskPainter.minimumWidth
         maskBrushSlider.maxValue = 0.6
         maskBrushSlider.doubleValue = canvas.maskBrushWidth
@@ -3650,7 +3663,7 @@ final class MosaicWindowController: NSObject {
         AppLog.ui.info("デバッグログを削除しました")
     }
 
-    /// ペン（マスク修正）の太さ変更。
+    /// マスク追加ペン／マスク消しゴムの太さ変更。
     @objc private func maskBrushWidthChanged() {
         canvas.maskBrushWidth = maskBrushSlider.doubleValue
         maskBrushValueLabel.stringValue = "\(Int(maskBrushSlider.doubleValue * 100)) %"
@@ -3682,9 +3695,16 @@ final class MosaicWindowController: NSObject {
     /// ペンで塗った／消したストロークを選択中のROIへ反映する。
     ///
     /// 1ストロークを1回の「元に戻す」単位にする（塗るたびに全部消えるのを避ける）。
-    private func applyMaskStroke(roiID: UUID, stroke: ManualMaskStroke) {
+    /// `isNewLayer` が true の場合（`addLayerForMaskPaint` で新規レイヤを作った直後の最初の
+    /// ストローク）は、ここでは追加でスナップショットを積まない。既に `addLayerForMaskPaint`
+    /// 側でレイヤ追加前の状態を積んであるため、二重に積むと「レイヤ追加」と「最初のストローク」が
+    /// 別々のUndo単位になり、1回のUndoではストロークだけが消えて空のレイヤが残ってしまう
+    /// （コードレビューで検出）。
+    private func applyMaskStroke(roiID: UUID, stroke: ManualMaskStroke, isNewLayer: Bool) {
         guard let index = canvas.rois.firstIndex(where: { $0.id == roiID }) else { return }
-        pushUndoSnapshot(currentEditorState())
+        if !isNewLayer {
+            pushUndoSnapshot(currentEditorState())
+        }
         canvas.rois[index].manualMaskStrokes.append(stroke)
         hasUnsavedChanges = true
         resumeMosaicPreviewIfNeeded()
@@ -5184,20 +5204,13 @@ final class MosaicWindowController: NSObject {
         }
         if mosaicPreviewCheckbox.state == .on {
             do {
-                let output = try mosaicEngine.applyMosaic(
-                    to: loadedImage.cgImage,
-                    rois: canvas.rois,
-                    style: defaultMosaicStyleForRendering(),
-                    segmentEngine: currentSegmentEngine(),
-                    patternImageProvider: { [weak self] in self?.patternImage(for: $0) },
-                    // かぶせ画像パターンを選んだだけで画像未選択のROIが1件でもあると、従来は
-                    // applyMosaic全体が例外を投げ、それ以外の設定対象でないレイヤの
-                    // プレビューまで巻き添えで解除されてしまっていた。プレビューでは
-                    // 未設定のROIだけ元画像のままスキップし、他レイヤは正常表示する。
-                    skipIncompletePatterns: true
-                )
+                // `renderMosaicOutput` を経由させ、非表示レイヤ（`hiddenROIIDs`）を除外する。
+                // 以前はここで `canvas.rois` を直接渡していたため、レイヤの表示チェックを
+                // 外した状態でこのチェックボックスをOFF→ONと手動切替すると、非表示にした
+                // はずのレイヤが画面に復活していた（コードレビューで検出）。
+                let output = try renderMosaicOutput(for: canvas.rois)
                 renderedImage = output
-                canvas.setImage(output)
+                canvas.setImage(output ?? loadedImage.cgImage)
                 updateStatus("モザイク表示中（未保存プレビュー。編集を始めると解除されます）")
             } catch {
                 mosaicPreviewCheckbox.state = .off
@@ -8092,12 +8105,16 @@ final class ImageCanvasView: NSView {
     /// 検閲漏れになるのを避けるため）。
     var hiddenROIIDs: Set<UUID> = [] { didSet { needsDisplay = true } }
 
-    /// ペン（マスク修正）の筆の太さ。ROIの短辺に対する割合。
+    /// マスク追加ペン／マスク消しゴムの筆の太さ。ROIの短辺に対する割合。
     var maskBrushWidth: Double = 0.15
     /// 描画中のストローク（ROIローカル座標）。mouseUpで対象ROIへ確定する。
-    private var maskStrokeInProgress: (roiID: UUID, points: [NormalizedPoint], isAdditive: Bool)?
-    /// ペンでマスクを修正したときの通知（再描画・undo登録はコントローラ側で行う）。
-    var onMaskStrokeCompleted: ((UUID, ManualMaskStroke) -> Void)?
+    private var maskStrokeInProgress: (roiID: UUID, points: [NormalizedPoint], isAdditive: Bool, isNewLayer: Bool)?
+    /// マスク追加ペン／消しゴムで塗った・消したときの通知（再描画・undo登録はコントローラ側で行う）。
+    /// 第3引数は、このストロークのために `onMaskStrokeNeedsNewLayer` で新規レイヤを作ったか。
+    /// true の場合、レイヤ追加時点で既にundoスナップショットを積んであるので、
+    /// コントローラ側は最初のストロークぶんの追加スナップショットを積まない
+    /// （「レイヤ追加＋最初のストローク」を1回のUndoで両方戻すため。コードレビューで検出）。
+    var onMaskStrokeCompleted: ((UUID, ManualMaskStroke, Bool) -> Void)?
     /// マスク追加ペンで、対象レイヤが無いときに新しいレイヤを作る要求。
     /// 戻り値は作成したROIのID（作れなければnil）。
     var onMaskStrokeNeedsNewLayer: ((NormalizedRect) -> UUID?)?
@@ -9836,7 +9853,7 @@ extension AppDelegate {
     }
 }
 
-// MARK: - ペン（マスク修正）
+// MARK: - マスク追加ペン／マスク消しゴム
 
 extension ImageCanvasView {
     /// ビュー座標を、選択中ROIのローカル座標（0〜1・左上原点）へ変換する。
@@ -9863,6 +9880,7 @@ extension ImageCanvasView {
 
         // 対象が無い場合、追加ペンなら新しいレイヤを作ってそこへ塗る
         // （消しゴムでは何もしない。消す対象が無いため）。
+        var isNewLayer = false
         if target == nil, !erasing, imageRect.width > 0, imageRect.height > 0 {
             // クリック位置を中心に、筆の太さから決めた正方形の枠を作る
             let side = max(maskBrushWidth * 2, 0.06)
@@ -9873,11 +9891,12 @@ extension ImageCanvasView {
             ).clamped()
             if let newID = onMaskStrokeNeedsNewLayer?(rect) {
                 target = rois.first { $0.id == newID }
+                isNewLayer = true
             }
         }
         guard let roi = target, let local = maskStrokePoint(at: point, roi: roi) else { return }
         selectedROIID = roi.id
-        maskStrokeInProgress = (roi.id, [local], !erasing)
+        maskStrokeInProgress = (roi.id, [local], !erasing, isNewLayer)
         needsDisplay = true
     }
 
@@ -9896,7 +9915,7 @@ extension ImageCanvasView {
         guard !state.points.isEmpty else { return }
         onMaskStrokeCompleted?(state.roiID, ManualMaskStroke(
             points: state.points, width: maskBrushWidth, isAdditive: state.isAdditive
-        ))
+        ), state.isNewLayer)
         needsDisplay = true
     }
 }

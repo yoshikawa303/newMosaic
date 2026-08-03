@@ -2266,3 +2266,40 @@ private final class CountingSegmentEngine: Segmenting {
     _ = try engine.applyMosaic(to: image, rois: rois, style: style, segmentEngine: segment)
     #expect(segment.roiCount == 4, "手描き補正の変更が反映されていない（\(segment.roiCount)件）")
 }
+
+/// コードレビューで検出: 形状・カテゴリを手動変更しても `maskShapeScale` が古いままだと、
+/// 楕円→矩形にしたのに拡大されたまま（範囲外まで塗る）、矩形→楕円にしたのに拡大されない
+/// （対象の角が欠ける）といった不整合が起きる。`recalculateMaskShapeScale` が
+/// 常に今の形状・カテゴリへ合わせて上書きする（古い値を残さない）ことを確認する。
+@Test func recalculateMaskShapeScaleAlwaysReflectsCurrentShapeAndCategory() {
+    let rect = NormalizedRect(x: 0.4, y: 0.3, width: 0.2, height: 0.14)
+    var roi = MosaicROI(rect: rect, confidence: 0.7, source: "anime-censor",
+                        shape: .ellipse, category: .maleGenital)
+    roi.maskShapeScale = DetectedROIRefiner.genitalExpansionScale(for: .ellipse)
+
+    // 矩形へ変更: 拡大不要なので古い倍率が消え、maskShapeRectはrectと一致する
+    roi.shape = .rectangle
+    let afterRectangle = DetectedROIRefiner.recalculateMaskShapeScale(for: roi)
+    #expect(afterRectangle.maskShapeScale == nil)
+    #expect(afterRectangle.maskShapeRect == afterRectangle.rect)
+
+    // 楕円へ戻す: 正しい倍率が入り直す
+    var backToEllipse = afterRectangle
+    backToEllipse.shape = .ellipse
+    let afterEllipse = DetectedROIRefiner.recalculateMaskShapeScale(for: backToEllipse)
+    #expect(afterEllipse.maskShapeRect.width > afterEllipse.rect.width)
+
+    // 性器以外のカテゴリへ変更: 楕円のままでも倍率は消える
+    var nonGenital = afterEllipse
+    nonGenital.category = .other
+    let afterCategoryChange = DetectedROIRefiner.recalculateMaskShapeScale(for: nonGenital)
+    #expect(afterCategoryChange.maskShapeScale == nil)
+
+    // 手描き（manual）は対象外。ユーザーが選んだ範囲をそのまま使うため、倍率は常に外れる
+    // （通常のフローでは手描きROIに倍率が付くことは無いが、仕様として明示的に確認する）。
+    var manual = roi
+    manual.source = "manual"
+    let afterManual = DetectedROIRefiner.recalculateMaskShapeScale(for: manual)
+    #expect(afterManual.maskShapeScale == nil)
+    #expect(afterManual.maskShapeRect == afterManual.rect)
+}

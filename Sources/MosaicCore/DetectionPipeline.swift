@@ -955,18 +955,29 @@ public enum DetectedROIRefiner {
     /// 対象は検出器が出した性器ROIのみ。手描き（`source == "manual"`）はユーザーの意図した
     /// 範囲なので変更しない。画像外へはみ出す分は `clamped()` で切り詰める。
     public static func expandGenitalROIsToCoverShape(_ rois: [MosaicROI]) -> [MosaicROI] {
+        rois.map { recalculateMaskShapeScale(for: $0) }
+    }
+
+    /// 1件のROIについて `maskShapeScale` を今の形状・カテゴリへ合わせ直す。
+    ///
+    /// `expandGenitalROIsToCoverShape` は検出直後の一括処理用で、対象外のROIは
+    /// 素通りするだけ（古い `maskShapeScale` が残っていても消さない）。ユーザーが
+    /// インスペクタで形状やカテゴリを**あとから**手動変更した場合は、古い倍率が
+    /// 残ったままだと不整合になる（楕円→矩形にしたのに拡大されたまま、等。コードレビューで検出）。
+    /// アプリ側（形状変更・カテゴリ変更のハンドラ）はこちらを呼ぶこと。
+    public static func recalculateMaskShapeScale(for roi: MosaicROI) -> MosaicROI {
         let genitals: Set<MosaicTargetCategory> = [.maleGenital, .femaleGenital]
-        return rois.map { roi in
-            guard genitals.contains(roi.category), roi.source != "manual" else { return roi }
-            let scale = genitalExpansionScale(for: roi.shape)
-            guard scale > 1.0 else { return roi }
-            // **`rect` は広げない。** 画面に見える選択範囲まで大きくなり、
-            // 「範囲が大きすぎる／位置がずれて見える」という報告が続いたため
-            // （2026-08-02, 08-03）。広げるのはマスクを切り取る形状だけにする。
-            var expanded = roi
-            expanded.maskShapeScale = scale
-            return expanded
+        var updated = roi
+        guard genitals.contains(roi.category), roi.source != "manual" else {
+            updated.maskShapeScale = nil
+            return updated
         }
+        let scale = genitalExpansionScale(for: roi.shape)
+        // **`rect` は広げない。** 画面に見える選択範囲まで大きくなり、
+        // 「範囲が大きすぎる／位置がずれて見える」という報告が続いたため
+        // （2026-08-02, 08-03）。広げるのはマスクを切り取る形状だけにする。
+        updated.maskShapeScale = scale > 1.0 ? scale : nil
+        return updated
     }
 
     public static func splitNippleAndAreola(_ rois: [MosaicROI]) -> [MosaicROI] {
