@@ -137,6 +137,34 @@ import Testing
         return Double(white) / Double(pixels.count)
     }
 
+    /// マスクを指定サイズのグレースケールへ縮小して2値ピクセル列にする（IoU計算用）。
+    static func binaryPixels(of mask: CGImage, size: Int) -> [Bool]? {
+        var pixels = [UInt8](repeating: 0, count: size * size)
+        let drawn = pixels.withUnsafeMutableBytes { pointer -> Bool in
+            guard let context = CGContext(
+                data: pointer.baseAddress, width: size, height: size,
+                bitsPerComponent: 8, bytesPerRow: size,
+                space: CGColorSpaceCreateDeviceGray(),
+                bitmapInfo: CGImageAlphaInfo.none.rawValue
+            ) else { return false }
+            context.interpolationQuality = .low
+            context.draw(mask, in: CGRect(x: 0, y: 0, width: size, height: size))
+            return true
+        }
+        guard drawn else { return nil }
+        return pixels.map { $0 > 127 }
+    }
+
+    static func iou(_ a: [Bool], _ b: [Bool]) -> Double {
+        precondition(a.count == b.count)
+        var intersection = 0, union = 0
+        for i in a.indices {
+            if a[i] && b[i] { intersection += 1 }
+            if a[i] || b[i] { union += 1 }
+        }
+        return union > 0 ? Double(intersection) / Double(union) : 0
+    }
+
     // MARK: - テスト本体
 
     /// サンプル画像に対して検出パイプラインを実行し、期待値と突き合わせる。
@@ -533,5 +561,48 @@ import Testing
         let coverage = PersonSilhouetteProvider.coverage(of: cgMask, within: roi.rect)
         // フォールバック（矩形全体）なら被覆率はほぼ1.0。SAMの部分マスク（実測0.26）のままなら失敗。
         #expect(coverage > 0.95, "図形フォールバックが使われていない（被覆率\(coverage)）")
+    }
+
+    /// 実写（Vision）の人物マスクが上下反転していないことの回帰テスト。
+    ///
+    /// GUI報告 2026-08-06「人物生成マスクが上下反転で表示される」。原因は
+    /// `VisionPersonDetector.cgImage(from:)` の `verticallyFlippedForRaster()` で、
+    /// 表示側が respectFlipped 未指定だった時代（〜v0.0.00081）の補正が、表示側修正
+    /// （v0.0.00082）後に二重反転として残っていた。実画像レンダリングで
+    /// 「反転を戻すと人物の体に完全一致する」ことを確認して除去した（v0.0.00129）。
+    ///
+    /// 向きの正しさは、向きに依存しない別エンジン（SAM）のインスタンスマスクとのIoUで判定する:
+    /// 正立なら「そのままのIoU > 上下反転したIoU」になる（被写体が上下非対称なF5D9FF5Dを使用）。
+    @Test func visionPersonMaskIsNotVerticallyFlipped() throws {
+        let url = URL(fileURLWithPath: "/Volumes/DATA/XCode_Project/newMosaic/Tests/SampleImages/F5D9FF5D-6EB1-4421-8F4E-86927AF7722F_original.png")
+        guard let image = Self.loadImage(url) else { return }
+        let persons = (try? VisionPersonDetector().detectPersons(in: image)) ?? []
+        guard let person = persons.first, let mask = person.maskImage else {
+            print("[SampleImageRegressionTests] Vision人物マスクを取得できないため判定をスキップしました。")
+            return
+        }
+        guard let samMask = SAMSegmentEngine().instanceMask(in: image, box: person.bounds) else {
+            print("[SampleImageRegressionTests] SAMモデルを読み込めないため判定をスキップしました。")
+            return
+        }
+        let size = 256
+        guard let vision = Self.binaryPixels(of: mask, size: size),
+              let sam = Self.binaryPixels(of: samMask, size: size) else {
+            Issue.record("マスクのピクセル化に失敗")
+            return
+        }
+        var flipped = [Bool](repeating: false, count: size * size)
+        for y in 0..<size {
+            for x in 0..<size {
+                flipped[y * size + x] = vision[(size - 1 - y) * size + x]
+            }
+        }
+        let uprightIoU = Self.iou(vision, sam)
+        let flippedIoU = Self.iou(flipped, sam)
+        print(String(format: "[F5D9FF5D] Visionマスク IoU: 正立=%.3f 反転=%.3f", uprightIoU, flippedIoU))
+        #expect(
+            uprightIoU > flippedIoU,
+            "Vision人物マスクが上下反転している疑い（正立IoU \(uprightIoU) <= 反転IoU \(flippedIoU)）"
+        )
     }
 }

@@ -254,8 +254,13 @@ public final class VisionPersonDetector: PersonDetecting {
     }
 
     private func cgImage(from buffer: CVPixelBuffer) -> CGImage? {
-        // CVPixelBuffer→CIImage→CGImage の経路は最終表示で上下反転する（GUI確認で判明）ため垂直反転で補正する。
-        let ciImage = CIImage(cvPixelBuffer: buffer).verticallyFlippedForRaster()
+        // CIImage(cvPixelBuffer:)→createCGImage は正立（左上原点・行0=上端）のCGImageを返すので
+        // 反転補正は不要。かつての `verticallyFlippedForRaster()` は、表示側が respectFlipped 未指定で
+        // 上下反転していた時代（〜v0.0.00081）の補正であり、表示側修正（v0.0.00082）後は二重反転として
+        // 「人物マスクが上下反転して表示される」バグ（GUI報告 2026-08-06、実写・動画フレームのみ）を
+        // 引き起こしていた。マスクを消費する `PersonMaskSampler`（骨格対応付け）・`maskBounds` も
+        // 正立前提のため、ここは正立のまま返すのが正しい（実画像レンダリングで確認済み）。
+        let ciImage = CIImage(cvPixelBuffer: buffer)
         return context.createCGImage(ciImage, from: ciImage.extent)
     }
 }

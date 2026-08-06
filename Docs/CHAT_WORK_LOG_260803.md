@@ -80,3 +80,12 @@
   メニュー・ボタン・セグメント・ポップアップの操作をUI表示名で一元記録（category Action）。
 - スライダードラッグ・テキスト入力は対象外（ログ溢れ・プライバシー配慮）。
 - DEBUG_LOG_INVENTORY.mdへActionカテゴリの節を追加。
+
+### 2026-08-07 00:00 JST - Claude Sonnet 5 - 種別: 作業結果 - v0.0.00129 実写人物マスクの上下反転を修正
+
+- 作業AIモデル: Claude Sonnet 5（原因調査を含むが、実画像レンダリングによる実測手法が確立済みのため単一モデルで対応）
+- 実写・動画フレームの人物マスク上下反転を修正。原因はVisionPersonDetector.cgImage(from:)の
+  verticallyFlippedForRaster()が表示側修正（v82）後に二重反転として残っていたこと。
+- 実画像レンダリングで実測: 反転を戻すと体に完全一致（SAMマスクとのIoU: 正立0.94/反転0.44）。
+- 反転マスクはPersonMaskSampler（骨格対応付け）とmaskBounds（人物枠y座標）も誤らせていた。
+- 回帰テストvisionPersonMaskIsNotVerticallyFlippedを追加。テスト149件PASS。
