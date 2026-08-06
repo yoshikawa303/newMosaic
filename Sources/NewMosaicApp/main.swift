@@ -125,12 +125,72 @@ enum AppLog {
     /// 自動検出（解析）の診断。`Detection` カテゴリに揃えて既存のデバッグログ画面で拾えるようにする。
     /// ここだけはユーザー要望により**ソース画像のファイル名とMD5**を記録する（フルパス・画像内容は残さない）。
     static let analysis = Logger(subsystem: subsystem, category: "Detection")
+    /// ユーザー操作（メニュー・ボタン等）の実行記録。GUI不具合報告の再現手順を
+    /// ログから追えるようにする（ユーザー要望 2026-08-06）。UI上の表示名のみ記録し、
+    /// 画像内容・ファイルパス・入力テキスト等は記録しない。
+    static let action = Logger(subsystem: subsystem, category: "Action")
+}
+
+/// 全コントロール・メニューのaction送出を一元的にフックし、ユーザー操作を
+/// デバッグログへ記録する（GUI不具合報告の再現手順を追えるようにするため）。
+/// メニュー項目・ボタン・セグメント切替・ポップアップ選択のみ記録し、
+/// スライダーのドラッグ（連続送出でログが溢れる）やテキスト入力（内容が
+/// プライバシーに関わる）は記録しない。
+final class MosaicApplication: NSApplication {
+    override func sendAction(_ action: Selector, to target: Any?, from sender: Any?) -> Bool {
+        if let name = Self.userActionDisplayName(sender) {
+            AppLog.action.info("操作: \(name, privacy: .public)")
+        }
+        return super.sendAction(action, to: target, from: sender)
+    }
+
+    /// senderからUI上の表示名を組み立てる。記録対象外（スライダー・テキスト欄等）は nil。
+    private static func userActionDisplayName(_ sender: Any?) -> String? {
+        switch sender {
+        case let item as NSMenuItem:
+            // 「ファイル > 画像を開く…」のようにメニュー階層のパスで記録する。
+            var path = [item.title]
+            var menu = item.menu
+            while let current = menu, current !== NSApp.mainMenu, !current.title.isEmpty {
+                path.insert(current.title, at: 0)
+                menu = current.supermenu
+            }
+            return "メニュー \(path.joined(separator: " > "))"
+        case let popUp as NSPopUpButton:
+            let context = popUp.toolTip.map { " (\($0))" } ?? ""
+            return "選択 \(popUp.titleOfSelectedItem ?? "?")\(context)"
+        case let segmented as NSSegmentedControl:
+            let segment = segmented.selectedSegment
+            guard segment >= 0 else { return nil }
+            var name = segmented.label(forSegment: segment)
+            if name?.isEmpty != false {
+                name = segmented.image(forSegment: segment)?.accessibilityDescription
+            }
+            return "切替 \(name ?? "セグメント\(segment)")"
+        case let button as NSButton:
+            // アイコンボタンはtitleが空なので、accessibilityLabel（ホバーヘルプの短文）
+            // → 記号画像の説明 → title の順で表示名を拾う。
+            var name = button.accessibilityLabel()
+            if name?.isEmpty != false { name = button.image?.accessibilityDescription }
+            if name?.isEmpty != false { name = button.title }
+            guard let name, !name.isEmpty else { return nil }
+            // チェックボックス等の状態持ちボタン（showsStateByが空でない）はON/OFFも記録する。
+            // `buttonType`はAppKitに読み取りAPIが無いため、セルの状態表示設定で判定する。
+            let isToggle = (button.cell as? NSButtonCell).map { !$0.showsStateBy.isEmpty } ?? false
+            let state = isToggle ? (button.state == .on ? " → ON" : " → OFF") : ""
+            return "ボタン \(name)\(state)"
+        default:
+            return nil
+        }
+    }
 }
 
 @main
 final class NewMosaicApplication {
     static func main() {
-        let app = NSApplication.shared
+        // MosaicApplication.shared を最初に呼ぶことで、共有インスタンスが
+        // サブクラス（ユーザー操作ログのフック入り）として生成される。
+        let app = MosaicApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.regular)

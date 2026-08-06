@@ -72,3 +72,11 @@
 - 作業AIモデル: Claude Sonnet 5
 - 中間の「デバッグ」サブメニューを廃止し、「デバッグログ…」をヘルプメニュー直下へ移動（ユーザー要望）。
 - ARCHITECTURE.md / DEBUG_LOG_INVENTORY.md のメニュー経路表記を同期。
+
+### 2026-08-06 23:30 JST - Claude Sonnet 5 - 種別: 作業結果 - v0.0.00128 ユーザー操作記録をデバッグログへ追加
+
+- 作業AIモデル: Claude Sonnet 5
+- NSApplicationサブクラス（MosaicApplication）のsendActionオーバーライドで、
+  メニュー・ボタン・セグメント・ポップアップの操作をUI表示名で一元記録（category Action）。
+- スライダードラッグ・テキスト入力は対象外（ログ溢れ・プライバシー配慮）。
+- DEBUG_LOG_INVENTORY.mdへActionカテゴリの節を追加。

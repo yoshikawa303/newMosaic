@@ -68,6 +68,20 @@
 - 削除: アプリ独自ファイルは作成しない（書き出しを行った場合はそのテキストファイルをユーザーが管理）。
   OSのUnified Logging保持方針に従う。
 
+## ユーザー操作記録（v0.0.00128〜）
+
+- 経路: macOS Unified Logging（subsystem `com.yoshikawa.newMosaic`、category `Action`）。
+- 実装: `MosaicApplication.sendAction(_:to:from:)` のオーバーライドで全コントロール・
+  メニューのaction送出を一元フック（`AppLog.action`）。
+- 対象: メニュー項目（メニュー階層パス付き）・ボタン（チェックボックスはON/OFF付き）・
+  セグメント切替・ポップアップ選択。UI上の表示名のみ記録する。
+- 対象外: スライダーのドラッグ（連続送出でログが溢れる）・テキスト入力（内容がプライバシーに
+  関わる）・表示名を持たないコントロール。
+- 目的: GUI不具合報告時に「どの操作をどの順で行ったか」をログから追えるようにする。
+- 画像内容・ファイルパス・入力テキスト・個人情報は記録しない。
+- 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Action"' --last 10m`
+- 削除: アプリ独自ファイルは作成しない（ログ永続化の節を参照）。デバッグログ画面の「消去…」で他カテゴリと同様にクリアされる。
+
 ## 検出モデルキャッシュ（Build 34〜）
 
 - 保存先: `~/Library/Application Support/newMosaic/Models/`
