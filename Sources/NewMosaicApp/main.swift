@@ -3685,14 +3685,15 @@ final class MosaicWindowController: NSObject {
     /// 保存済みログを削除する（ローテーションの世代ファイルも含む）。
     ///
     /// 取り消せないので確認ダイアログを出す。今回の起動分（`OSLogStore`にあるもの）は
-    /// アプリ側から消せないため、その旨も伝える。
+    /// アプリ側から物理削除はできないが、消去時刻より前のエントリを表示・退避の対象外に
+    /// することで、画面上は完全にクリアされたように見せる
+    /// （GUI報告 2026-08-06「クリア操作を行っても過去ログがすべて削除されていない」）。
     @objc private func clearDebugLog() {
         let alert = NSAlert()
         alert.messageText = "保存済みのデバッグログを削除しますか？"
         alert.informativeText = """
             \(MosaicWindowController.debugLogFile.existingURLs().count)個のログファイル（世代分を含む）を削除します。
             この操作は取り消せません。
-            今回の起動分はシステム側のログに残るため、アプリを再起動するまで表示に残ります。
             """
         alert.addButton(withTitle: "削除")
         alert.addButton(withTitle: "キャンセル")
@@ -3700,10 +3701,10 @@ final class MosaicWindowController: NSObject {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
 
         MosaicWindowController.debugLogFile.removeAll()
-        // 退避位置を「今の最後の行」まで進める。
-        // ここを空に戻すと、30秒ごとの退避処理が今回起動分を丸ごと書き戻してしまい、
-        // 消したはずのログが復活する（GUI報告 2026-08-02「消去ボタンを押しても削除されない」）。
-        MosaicWindowController.markCurrentLogAsArchived()
+        // 消去時刻を記録し、これ以前の今回起動分エントリを表示・退避の両方から除外する。
+        // 従来の「退避位置を最後の行まで進める」方式は退避の復活だけを防ぎ、
+        // 表示側（OSLogStoreから毎回再取得する今回起動分）には過去ログが残っていた。
+        MosaicWindowController.debugLogClearedAt.value = Date()
         refreshDebugLog()
         updateStatus("保存済みのデバッグログを削除しました")
         AppLog.ui.info("デバッグログを削除しました")
@@ -7629,16 +7630,10 @@ extension MosaicWindowController {
     /// 退避済みの最後の行（時刻始まりなので文字列比較で新旧を判定できる）。
     nonisolated static let lastArchivedLogLine = LockedValue("")
 
-    /// 今ある分を「退避済み」として扱う（実際には書き出さない）。
-    /// ログ消去の直後に呼び、消した内容が退避処理で復活しないようにする。
-    nonisolated static func markCurrentLogAsArchived() {
-        let lines = fetchCurrentProcessLogText()
-            .split(separator: "\n", omittingEmptySubsequences: false)
-            .map(String.init)
-        if let last = lines.last, !last.isEmpty {
-            lastArchivedLogLine.value = last
-        }
-    }
+    /// 「消去…」を実行した時刻。これ以前の今回起動分エントリは
+    /// `fetchCurrentProcessLogText()` が読み飛ばすため、表示にも退避にも現れない
+    /// （OSLogStore自体からは削除できないため、読み出し側で除外する）。
+    nonisolated static let debugLogClearedAt = LockedValue(Date.distantPast)
 
     /// 直近10分・最大500件の自アプリログ（subsystem `com.yoshikawa.newMosaic`）を取得し、
     /// 「時刻 [category] レベル: メッセージ」形式のテキストへ整形する。
@@ -7653,10 +7648,13 @@ extension MosaicWindowController {
         }
         let formatter = DateFormatter()
         formatter.dateFormat = "HH:mm:ss.SSS"
+        let clearedAt = debugLogClearedAt.value
         var lines: [String] = []
         for entry in entries {
             guard let logEntry = entry as? OSLogEntryLog,
                   logEntry.subsystem == "com.yoshikawa.newMosaic" else { continue }
+            // 「消去…」実行より前のエントリは消去済みとして読み飛ばす。
+            guard entry.date > clearedAt else { continue }
             let time = formatter.string(from: entry.date)
             lines.append("\(time) [\(logEntry.category)] \(logEntry.level.description): \(entry.composedMessage)")
             if lines.count >= 500 { break }
