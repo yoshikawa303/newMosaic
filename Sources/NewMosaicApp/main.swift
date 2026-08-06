@@ -1513,10 +1513,7 @@ final class MosaicWindowController: NSObject {
 
         canvasModeControl.segmentStyle = .texturedRounded
         // 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル（選択するモード）。
-        canvasModeControl.setImage(NSImage(systemSymbolName: "rectangle.dashed", accessibilityDescription: "編集モード"), forSegment: 0)
-        canvasModeControl.setImage(NSImage(systemSymbolName: "cursorarrow", accessibilityDescription: "範囲選択モード"), forSegment: 1)
-        canvasModeControl.setImage(NSImage(systemSymbolName: "paintbrush.pointed", accessibilityDescription: "マスク追加ペン"), forSegment: 2)
-        canvasModeControl.setImage(NSImage(systemSymbolName: "eraser", accessibilityDescription: "マスク消しゴム"), forSegment: 3)
+        applyIconSizeToCanvasModeControl()
         canvasModeControl.setToolTip("編集モード（ドラッグでROIを新規作成。従来通り）", forSegment: 0)
         canvasModeControl.setToolTip("範囲選択モード（ドラッグで複数ROIを一括選択。Option(⌥)キーで一時的に編集モードへ切替）", forSegment: 1)
         canvasModeControl.setToolTip(
@@ -2249,10 +2246,13 @@ final class MosaicWindowController: NSObject {
     private func refreshLearningModeButton() {
         let enabled = isLearningModeEnabled
         let symbol = enabled ? "graduationcap.fill" : "graduationcap"
+        // アイコンサイズ設定を反映したSymbolConfigurationを必ず適用する。
+        // これがないと他のツールバーアイコンより小さい既定サイズで描画される
+        // （＝学習モードアイコンだけサイズが揃わないバグの原因）。
         learningModeButton.image = NSImage(
             systemSymbolName: symbol,
             accessibilityDescription: enabled ? "学習モードON" : "学習モードOFF"
-        )
+        )?.withSymbolConfiguration(Self.currentIconSymbolConfiguration())
         learningModeButton.contentTintColor = enabled ? .controlAccentColor : .secondaryLabelColor
         let help = enabled
             ? "学習モード: ON（修正結果を学習し、次回以降の候補生成へ反映します）"
@@ -2321,18 +2321,16 @@ final class MosaicWindowController: NSObject {
     /// （固定サイズ制約のままだとアイコンサイズ設定を変えても見た目が変化しないため）。
     private func applyIconSize(to button: NSButton, symbol: String) {
         let size = Self.currentIconSizeSetting()
-        let pointSize: CGFloat
         let frameSize: CGFloat
         // 従来の既定（大=18pt/40pt枠）が小さすぎるとの指摘を受け、全体的に一段階大きくシフトした
         // （旧「大」を新「小」の基準とし、中・大はそこから拡大。既定値は「中」）。
         switch size {
-        case 0: pointSize = 18; frameSize = 40
-        case 2: pointSize = 28; frameSize = 58
-        default: pointSize = 23; frameSize = 48
+        case 0: frameSize = 40
+        case 2: frameSize = 58
+        default: frameSize = 48
         }
-        let configuration = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.toolTip)?
-            .withSymbolConfiguration(configuration)
+            .withSymbolConfiguration(Self.currentIconSymbolConfiguration())
         button.controlSize = size == 2 ? .large : (size == 0 ? .small : .regular)
         for constraint in button.constraints where constraint.firstAttribute == .width || constraint.firstAttribute == .height {
             constraint.isActive = false
@@ -2345,6 +2343,49 @@ final class MosaicWindowController: NSObject {
         let value = AppSettings.shared.object(forKey: iconSizeDefaultsKey) as? Int
         guard let value, (0...2).contains(value) else { return 1 } // 既定値=中
         return value
+    }
+
+    /// アイコンサイズ設定（小/中/大）に対応するSF SymbolのpointSize設定。
+    /// ツールバーボタン・モード切替セグメント・学習モードボタンの全てで共用する。
+    private static func currentIconSymbolConfiguration() -> NSImage.SymbolConfiguration {
+        let pointSize: CGFloat
+        switch currentIconSizeSetting() {
+        case 0: pointSize = 18
+        case 2: pointSize = 28
+        default: pointSize = 23
+        }
+        return NSImage.SymbolConfiguration(pointSize: pointSize, weight: .regular)
+    }
+
+    /// モード切替セグメント（編集/範囲選択/マスク追加ペン/マスク消しゴム）へ
+    /// アイコンサイズ設定を反映する。NSSegmentedControlは`toolbarIconButtons`の
+    /// `NSButton`経路を通らないため、セグメント画像のSymbolConfigurationと
+    /// セグメント幅を個別に設定する（未設定だと他のツールバーアイコンとサイズが揃わない）。
+    private func applyIconSizeToCanvasModeControl() {
+        let size = Self.currentIconSizeSetting()
+        let segmentWidth: CGFloat
+        // applyIconSize(to:symbol:) と同じ段階（小=40/中=48/大=58）に合わせる。
+        switch size {
+        case 0: segmentWidth = 40
+        case 2: segmentWidth = 58
+        default: segmentWidth = 48
+        }
+        let configuration = Self.currentIconSymbolConfiguration()
+        let symbols: [(symbol: String, description: String)] = [
+            ("rectangle.dashed", "編集モード"),
+            ("cursorarrow", "範囲選択モード"),
+            ("paintbrush.pointed", "マスク追加ペン"),
+            ("eraser", "マスク消しゴム"),
+        ]
+        for (segment, entry) in symbols.enumerated() {
+            canvasModeControl.setImage(
+                NSImage(systemSymbolName: entry.symbol, accessibilityDescription: entry.description)?
+                    .withSymbolConfiguration(configuration),
+                forSegment: segment
+            )
+            canvasModeControl.setWidth(segmentWidth, forSegment: segment)
+        }
+        canvasModeControl.controlSize = size == 2 ? .large : (size == 0 ? .small : .regular)
     }
 
     // MARK: - 画面内テキストサイズ
@@ -2417,6 +2458,11 @@ final class MosaicWindowController: NSObject {
             guard let identifier = button.identifier?.rawValue else { continue }
             applyIconSize(to: button, symbol: identifier)
         }
+        // モード切替セグメントと学習モードボタンも追従させる。学習モードボタンは
+        // ON/OFF状態で記号（graduationcap/.fill）と色を出し分けるため、サイズ適用後に
+        // 状態表示を再構築する（applyIconSizeがidentifierの記号で上書きするため）。
+        applyIconSizeToCanvasModeControl()
+        refreshLearningModeButton()
     }
 
     private func makeToolbarSeparator() -> NSView {

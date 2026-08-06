@@ -1,5 +1,23 @@
 # Changelog
 
+## v0.0.00125 - 2026-08-06
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: ツールバーのモード切替（編集/範囲選択/マスク追加ペン/マスク消しゴム）と学習モードのアイコンが、他のツールバーアイコンよりも小さく表示され、詳細設定の「アイコンサイズ」変更にも追従しなかった問題を修正した。
+
+■更新履歴
+
+- `canvasModeControl`（`NSSegmentedControl`）は `toolbarIconButtons` の `NSButton` 経路を
+  通らないため、アイコンサイズ設定（SymbolConfigurationのpointSize）が一切適用されて
+  いなかった。新設の `applyIconSizeToCanvasModeControl()` でセグメント画像と
+  セグメント幅（小=40/中=48/大=58）を設定へ追従させた。
+- 学習モードボタンは登録済みだったが、`refreshLearningModeButton()` がON/OFF状態の
+  記号（graduationcap/.fill）を SymbolConfiguration **なし**で上書きしていたため、
+  常に既定サイズへ戻っていた（＝学習モードアイコンだけ小さいバグの直接原因）。
+  共通ヘルパ `currentIconSymbolConfiguration()` を新設して全経路で共用し、
+  `applyIconSizeToAllToolbarButtons()` からもセグメントと学習モードボタンへ再適用する。
+
 ## v0.0.00124 - 2026-08-04
 
 ■更新履歴（Readme / ChangeLog 用）
