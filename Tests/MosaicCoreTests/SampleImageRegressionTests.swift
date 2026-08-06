@@ -572,6 +572,34 @@ import Testing
         )
     }
 
+    /// samShapeマスクの安全側膨張（dilation）の回帰テスト。
+    ///
+    /// GUI報告 2026-08-07「ディルド範囲ずれ」: SAMのマスクが対象の輪郭ぎりぎりで止まり、
+    /// 明るく写る縁（ハイライト部）が数px露出していた。v0.0.00131でROIサイズの3%（2〜12px）の
+    /// 膨張を追加（検閲ツールでは覆い不足が最悪の失敗。はみ出しは形状クリップで抑制）。
+    /// 膨張前の実測coverage=0.596に対し、膨張後はそれを明確に上回ることを確認する。
+    @Test func samMaskEdgeDilationCoversObjectEdge() throws {
+        let url = URL(fileURLWithPath: "/Volumes/DATA/XCode_Project/newMosaic/Tests/SampleImages/7624B71B-2B11-4FE1-8366-4AF3E889D3D1_original.png")
+        guard let image = Self.loadImage(url) else { return }
+        var roi = MosaicROI(
+            rect: NormalizedRect(x: 0.5082, y: 0.6961, width: 0.1255, height: 0.2578),
+            confidence: 0.61, source: "photo-censor", shape: .ellipse, category: .maleGenital
+        )
+        roi = DetectedROIRefiner.expandGenitalROIsToCoverShape([roi])[0]
+        let extent = CGRect(x: 0, y: 0, width: image.width, height: image.height)
+        let ciMask = try SAMSegmentEngine().createMasks(for: [roi], in: image, extent: extent)[0]
+        let context = CIContext(options: [.cacheIntermediates: false])
+        guard let cgMask = context.createCGImage(ciMask, from: extent) else {
+            Issue.record("マスク画像の生成に失敗")
+            return
+        }
+        let coverage = PersonSilhouetteProvider.coverage(of: cgMask, within: roi.rect)
+        #expect(
+            coverage >= 0.61 && coverage < 0.95,
+            "膨張後の被覆率が想定範囲外（\(coverage)。0.61未満なら膨張のデグレ、~1.0なら図形フォールバック化の疑い）"
+        )
+    }
+
     /// 実写（Vision）の人物マスクが上下反転していないことの回帰テスト。
     ///
     /// GUI報告 2026-08-06「人物生成マスクが上下反転で表示される」。原因は

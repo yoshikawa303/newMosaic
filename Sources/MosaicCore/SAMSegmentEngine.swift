@@ -462,6 +462,15 @@ public final class SAMSegmentEngine: Segmenting {
                     y: extent.height / mask.extent.height
                 ))
             }
+            // 安全側の膨張（dilation）: SAMのマスクは対象の輪郭ぎりぎりで止まり、
+            // 明るく写る縁（ハイライト部）が数px露出することがある（GUI報告 2026-08-07
+            // 「ディルド範囲ずれ」= 右縁のスライバー露出）。検閲ツールでは覆い不足が
+            // 最悪の失敗のため、ROIサイズの3%（2〜12px）だけ外側へ広げる。
+            // はみ出しは直後の形状クリップで選択範囲内に抑えられる。
+            let dilationRadius = max(2.0, min(12.0, max(box.width, box.height) * 0.03))
+            mask = mask.applyingFilter("CIMorphologyMaximum", parameters: [
+                kCIInputRadiusKey: dilationRadius
+            ]).cropped(to: extent)
             let black = CIImage(color: .black).cropped(to: extent)
             let opaque = mask.composited(over: black)
             let shapeMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
