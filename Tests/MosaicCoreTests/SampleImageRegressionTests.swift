@@ -559,8 +559,17 @@ import Testing
             return
         }
         let coverage = PersonSilhouetteProvider.coverage(of: cgMask, within: roi.rect)
-        // フォールバック（矩形全体）なら被覆率はほぼ1.0。SAMの部分マスク（実測0.26）のままなら失敗。
-        #expect(coverage > 0.95, "図形フォールバックが使われていない（被覆率\(coverage)）")
+        // 経緯:
+        // - v0.0.00123: full経路の coverage=0.26 は亀頭が露出する検閲漏れだったため、
+        //   minimumUsableCoverage を0.40へ引き上げ、このROIは図形フォールバック（ほぼ1.0）とした。
+        // - v0.0.00130: 「形状に沿ったマスクが生成されない」GUI報告（2026-08-06）を受け、
+        //   第一経路が不合格なら反対経路を試すチェーンを追加。このROIはcrop経路で
+        //   coverage=0.41 の形状追従マスク（目視でペニス輪郭に一致）が得られるようになった。
+        // したがって現在の期待値は「しきい値以上・かつ全塗りではない（=SAMの形状マスク）」。
+        #expect(
+            coverage >= SAMSegmentEngine.minimumUsableCoverage && coverage < 0.95,
+            "crop経路の形状追従マスクが使われていない（被覆率\(coverage)。~1.0なら図形フォールバック、0.40未満なら検閲漏れの疑い）"
+        )
     }
 
     /// 実写（Vision）の人物マスクが上下反転していないことの回帰テスト。

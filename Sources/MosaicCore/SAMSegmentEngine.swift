@@ -428,28 +428,9 @@ public final class SAMSegmentEngine: Segmenting {
         // （判定も解析枠基準。表示用に広げた枠で測ると大きさの判断がずれる）
         let scale = Double(Self.inputLongSide) / Double(max(image.width, image.height))
         let boxSideInInput = max(box.width, box.height) * scale
-        let usesCrop = boxSideInInput < Self.minimumBoxSideInInput
-        let maskImage: CGImage?
-        if usesCrop, let encoder = Self.sharedSessions?.encoder {
-            maskImage = try Self.binaryMaskViaCrop(
-                box: box, encoder: encoder, decoder: decoder, image: image, cache: cache
-            ) ?? Self.binaryMask(box: box, embedding: embedding, decoder: decoder, image: image)
-        } else {
-            maskImage = try Self.binaryMask(
-                box: box, embedding: embedding, decoder: decoder, image: image
-            )
-        }
-        guard let maskImage else { return nil }
+        let primaryUsesCrop = boxSideInInput < Self.minimumBoxSideInInput
 
-
-        var mask = CIImage(cgImage: maskImage)
-        if mask.extent.width != extent.width || mask.extent.height != extent.height {
-            mask = mask.transformed(by: CGAffineTransform(
-                scaleX: extent.width / mask.extent.width,
-                y: extent.height / mask.extent.height
-            ))
-        }
-
+        // 指定経路（全体推論 or 切り出し推論）でマスクを生成し、形状で切ってcoverageを測る。
         // マスクは常に**選択範囲の形状**で切る。
         //
         // 以前は「SAMが対象を分離できていれば矩形だけで切る」としていた（§5.46）。
@@ -460,28 +441,64 @@ public final class SAMSegmentEngine: Segmenting {
         // 現在は `DetectedROIRefiner.expandGenitalROIsToCoverShape` が、選択した形状が
         // 元の検出枠を包み込む大きさまでROIを広げている。したがって形状で切っても
         // 対象は欠けない。表示している範囲とマスクが一致する方が動作として正しい。
-        let black = CIImage(color: .black).cropped(to: extent)
         let roiRect = roi.rect.cgRect(imageSize: extent.size, origin: .bottomLeft)
-        let opaque = mask.composited(over: black)
-        let shapeMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
-        let restricted = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
-            kCIInputBackgroundImageKey: shapeMask
-        ]).cropped(to: extent)
-        let rectCoverage = coverageRatio(of: restricted, in: roiRect)
+        func restrictedMask(usesCrop: Bool) throws -> (mask: CIImage, coverage: Double)? {
+            let maskImage: CGImage?
+            if usesCrop {
+                guard let encoder = Self.sharedSessions?.encoder else { return nil }
+                maskImage = try Self.binaryMaskViaCrop(
+                    box: box, encoder: encoder, decoder: decoder, image: image, cache: cache
+                )
+            } else {
+                maskImage = try Self.binaryMask(
+                    box: box, embedding: embedding, decoder: decoder, image: image
+                )
+            }
+            guard let maskImage else { return nil }
+            var mask = CIImage(cgImage: maskImage)
+            if mask.extent.width != extent.width || mask.extent.height != extent.height {
+                mask = mask.transformed(by: CGAffineTransform(
+                    scaleX: extent.width / mask.extent.width,
+                    y: extent.height / mask.extent.height
+                ))
+            }
+            let black = CIImage(color: .black).cropped(to: extent)
+            let opaque = mask.composited(over: black)
+            let shapeMask = ShapeSegmentEngine.hardShapeMask(for: roi, extent: extent)
+            let restricted = opaque.applyingFilter("CIMultiplyCompositing", parameters: [
+                kCIInputBackgroundImageKey: shapeMask
+            ]).cropped(to: extent)
+            return (restricted, coverageRatio(of: restricted, in: roiRect))
+        }
 
-        let coverage = coverageRatio(of: restricted, in: roiRect)
+        // 第一経路（ROIサイズで選択）→ 不合格なら反対経路 → それでもだめなら図形フォールバック。
+        // 実測例（GUI報告 2026-08-06、8C52ADAB右下の男性器）: full経路 coverage=0.26（検閲漏れ）
+        // → crop経路 coverage=0.41 で形状追従に成功。片方の経路だけで諦めると、
+        // SAMが取れるはずの輪郭を捨てて楕円全塗りへ倒れてしまう。
+        var attempt = try restrictedMask(usesCrop: primaryUsesCrop)
+        var usedPath = primaryUsesCrop ? "crop" : "full"
+        if (attempt?.coverage ?? 0) < Self.minimumUsableCoverage {
+            if let second = try restrictedMask(usesCrop: !primaryUsesCrop),
+               second.coverage >= Self.minimumUsableCoverage,
+               second.coverage > (attempt?.coverage ?? 0) {
+                attempt = second
+                usedPath = primaryUsesCrop ? "crop→full" : "full→crop"
+            }
+        }
+        guard let result = attempt else { return nil }
+
         segmentLogger.info("""
             samShape category=\(roi.category.rawValue, privacy: .public) \
             rotation=\(Int(roi.rotation)) \
-            path=\(usesCrop ? "crop" : "full", privacy: .public) \
+            path=\(usedPath, privacy: .public) \
             boxSideInInput=\(Int(boxSideInInput)) \
-            rectCoverage=\(String(format: "%.2f", rectCoverage), privacy: .public) \
+            rectCoverage=\(String(format: "%.2f", result.coverage), privacy: .public) \
             clip=shape \
-            coverage=\(String(format: "%.2f", coverage), privacy: .public)
+            coverage=\(String(format: "%.2f", result.coverage), privacy: .public)
             """)
         // ほぼ空のマスクは検閲漏れになるため採用せず、図形フォールバックへ倒す
-        guard coverage >= Self.minimumUsableCoverage else { return nil }
-        return restricted
+        guard result.coverage >= Self.minimumUsableCoverage else { return nil }
+        return result.mask
     }
 
     /// ROI矩形内での白領域の割合（リニア測定。§5.41のガンマ問題を避ける）。
@@ -501,6 +518,17 @@ public final class SAMSegmentEngine: Segmenting {
             colorSpace: linearSpace
         )
         return Double(pixel[0]) / 255.0
+    }
+
+    /// テスト専用: 切り出し推論のマスクをそのまま返す（形状の目視検証用）。
+    static func cropMaskForMeasurement(in image: CGImage, box: NormalizedRect) -> CGImage? {
+        guard let sessions = sharedSessions else { return nil }
+        let rect = box.clamped().cgRect(
+            imageSize: CGSize(width: image.width, height: image.height), origin: .topLeft
+        )
+        return try? binaryMaskViaCrop(
+            box: rect, encoder: sessions.encoder, decoder: sessions.decoder, image: image
+        )
     }
 
     /// 全体推論と切り出し推論を同じROIで比較測定するための入口（テスト専用）。

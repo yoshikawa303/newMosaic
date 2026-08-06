@@ -89,3 +89,13 @@
 - 実画像レンダリングで実測: 反転を戻すと体に完全一致（SAMマスクとのIoU: 正立0.94/反転0.44）。
 - 反転マスクはPersonMaskSampler（骨格対応付け）とmaskBounds（人物枠y座標）も誤らせていた。
 - 回帰テストvisionPersonMaskIsNotVerticallyFlippedを追加。テスト149件PASS。
+
+### 2026-08-07 00:40 JST - Claude Sonnet 5 - 種別: 作業結果 - v0.0.00130 SAM経路の二段フォールバック
+
+- 作業AIモデル: Claude Sonnet 5
+- 「漫画コマ右下の男性器が形状に沿ってマスク生成されない」報告（8C52ADAB）を修正。
+- 実測: full経路 coverage=0.26（v123から図形フォールバック中）→ crop経路 coverage=0.41で
+  ペニス輪郭に沿ったマスクを取得（PNGレンダリングで目視確認）。
+- samMaskを二段チェーン化（第一経路→不合格なら反対経路→図形フォールバック）。
+  しきい値0.40は不変のため検閲漏れ側の安全性は同一。
+- 回帰テストlowCoverageSAMMaskFallsBackToShapeを新挙動へ更新。テスト149件PASS。
