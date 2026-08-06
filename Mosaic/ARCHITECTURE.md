@@ -197,10 +197,10 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 
 - 従来の `v<MARKETING_VERSION> (beta Build <CURRENT_PROJECT_VERSION>)` という2つの版数を併記する方式を廃止し、`MARKETING_VERSION`（`0.0.00000`形式の末尾5桁）だけをコード修正ごとにインクリメントするrunning単一カウンタへ一本化した。`CFBundleVersion` は内部的に同じ数値へ同期するが、UI（ウィンドウタイトル等）には表示しない。表示は `v0.0.00075` のように `v<MARKETING_VERSION>` のみ。
 
-## 5.18 デバッグログ（ヘルプ＞デバッグ＞デバッグログ、2026-07-25〜）
+## 5.18 デバッグログ（ヘルプ＞デバッグログ、2026-07-25〜）
 
 - アプリ独自の永続ログファイルは持たず、macOS Unified Logging（`os.Logger`）へ出力する。`enum AppLog`（`Sources/NewMosaicApp/main.swift`）が subsystem `com.yoshikawa.newMosaic`（MosaicCore側のVision検出診断ログ§5.2と同一subsystem）で category `UI`/`Library`/`Export`/`Project` のロガーを提供する。記録対象はアプリ起動・エラーダイアログ表示・一括処理結果・画像出力成否・プロジェクト読込成否・設定初期化などのイベントのみで、画像内容やファイルパス（ファイル名を除く）、ROI座標は記録しない。
-- 「ヘルプ＞デバッグ＞デバッグログ」ウィンドウ（`showDebugLogWindow()`）は `OSLogStore(scope: .currentProcessIdentifier)` で自プロセスの直近1時間分を取得し、上記4カテゴリとVision検出診断（`Detection`）をまとめて時刻順に一覧表示する。「更新」で再取得、「書き出し…」でテキストファイルへ保存できる（不具合報告時にログを共有しやすくする目的）。
+- 「ヘルプ＞デバッグログ」ウィンドウ（`showDebugLogWindow()`）は `OSLogStore(scope: .currentProcessIdentifier)` で自プロセスの直近1時間分を取得し、上記4カテゴリとVision検出診断（`Detection`）をまとめて時刻順に一覧表示する。「更新」で再取得、「書き出し…」でテキストファイルへ保存できる（不具合報告時にログを共有しやすくする目的）。
 
 ## 5.19 ROI選択リストのグループ化（2026-07-25〜）
 
@@ -733,7 +733,7 @@ GUI報告 2026-07-31「下段の性器（女性）が2箇所、うち1つは範�
 
 ### 5.51.3 切り分けの手順（今後の同種報告向け）
 
-1. `AnalysisDiagnostics` の `analysis` 行（ヘルプ＞デバッグ＞デバッグログ）でファイル名・MD5・設定を確認する
+1. `AnalysisDiagnostics` の `analysis` 行（ヘルプ＞デバッグログ）でファイル名・MD5・設定を確認する
 2. 同じ画像を `Tests/SampleImages/` へ置き `reportFinalROIsAsAssembledByApp` を実行する
 3. 各ROIの `src=` で由来を特定する（`anime-censor` / `pose-chest` / `pose-groin` / `face-region` / `learned-prior` / `manual`）
 

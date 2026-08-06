@@ -3,7 +3,7 @@
 ## 現在のログ方針
 
 - アプリ独自の永続デバッグログファイルは無い。macOS Unified Logging（syslogの後継。`os.Logger`）へ出力し、
-  アプリ内の「ヘルプ＞デバッグ＞デバッグログ」ウィンドウから直近分をその場で参照・書き出しできる（2026-07-25〜）。
+  アプリ内の「ヘルプ＞デバッグログ」ウィンドウから直近分をその場で参照・書き出しできる（2026-07-25〜）。
 - ユーザー修正履歴は `HistoryEngine` が JSON として保存する。
 - 検証ライブラリは `~/Library/Application Support/newMosaic/Library/` に保存する。
   - `Originals/`: インポートした元画像PNG。
@@ -48,7 +48,7 @@
 - 目的: 性器の誤検出が残る／正しいROIが消える場合に、しきい値を推測で動かさず実測値で切り分ける。
 - 画像内容・ファイルパス・個人情報は記録しない（数値のみ）。
 - 確認例: `log show --predicate 'subsystem == "com.yoshikawa.newMosaic" AND category == "Detection"' --last 10m`
-- 画面からは ヘルプ＞デバッグ＞デバッグログ で確認できる。
+- 画面からは ヘルプ＞デバッグログ で確認できる。
 
 ## アプリ側イベントログ・デバッグログ画面（2026-07-25〜）
 
@@ -58,7 +58,7 @@
   画像出力の成否・形式、設定初期化の実行。
 - 内容: イベント種別・件数・エラーのローカライズ済み説明のみ。画像内容、ファイルパス（`.lastPathComponent`の
   ファイル名のみ許容）、ROI座標等の個人情報は記録しない。
-- 参照: ヘルプ＞デバッグ＞デバッグログ（`MosaicWindowController.showDebugLogWindow()`）。
+- 参照: ヘルプ＞デバッグログ（`MosaicWindowController.showDebugLogWindow()`）。
   `OSLogStore(scope: .currentProcessIdentifier)` で自プロセスの直近10分・最大500件を取得し、上記4カテゴリと
   Vision検出診断（`Detection`）をまとめて時刻順に一覧表示する。「書き出し…」でテキストファイルへ保存できる
   （ユーザーからの不具合報告時にログを渡しやすくする目的）。

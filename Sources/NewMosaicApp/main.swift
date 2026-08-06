@@ -331,11 +331,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let helpMenu = NSMenu(title: "ヘルプ")
         helpMenu.addItem(menuItem("ショートカット一覧…", action: "showShortcutsWindow", key: "", target: target))
         helpMenu.addItem(.separator())
-        let debugItem = NSMenuItem(title: "デバッグ", action: nil, keyEquivalent: "")
-        let debugMenu = NSMenu(title: "デバッグ")
-        debugMenu.addItem(menuItem("デバッグログ…", action: "showDebugLogWindow", key: "", target: target))
-        debugItem.submenu = debugMenu
-        helpMenu.addItem(debugItem)
+        // デバッグログはヘルプ直下に置く（旧: ヘルプ＞デバッグ＞デバッグログの3階層。
+        // ログウィンドウを開きやすくするためのユーザー要望 2026-08-06 で1階層に変更）。
+        helpMenu.addItem(menuItem("デバッグログ…", action: "showDebugLogWindow", key: "", target: target))
         helpItem.submenu = helpMenu
         NSApp.helpMenu = helpMenu
 

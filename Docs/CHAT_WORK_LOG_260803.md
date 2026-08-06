@@ -66,3 +66,9 @@
   旧修正（v0.0.00119の退避位置前進）は退避ファイルへの復活だけを防いでいた。
 - 消去時刻（debugLogClearedAt）を記録し、読み出し側でそれ以前のエントリを除外する方式へ変更。
   markCurrentLogAsArchived()は削除。DEBUG_LOG_INVENTORY.mdも更新。
+
+### 2026-08-06 23:15 JST - Claude Sonnet 5 - 種別: 作業結果 - v0.0.00127 デバッグログメニューをヘルプ直下へ移動
+
+- 作業AIモデル: Claude Sonnet 5
+- 中間の「デバッグ」サブメニューを廃止し、「デバッグログ…」をヘルプメニュー直下へ移動（ユーザー要望）。
+- ARCHITECTURE.md / DEBUG_LOG_INVENTORY.md のメニュー経路表記を同期。
