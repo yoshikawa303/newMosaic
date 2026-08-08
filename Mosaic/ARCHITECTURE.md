@@ -1314,6 +1314,17 @@ GUI報告「ディルド範囲ずれ」（7624B71B・実写）の実測調査:
 系統的に解消する。はみ出しは直後の形状クリップで選択範囲内に抑えられる。
 回帰テストは `samMaskEdgeDilationCoversObjectEdge`（膨張前0.596 → 0.61以上を確認）。
 
+## 5.69 マスク生成の3択化と起動時サイドパネル幅の安定化（2026-08-08 v0.0.00133〜）
+
+- インスペクタ「マスク生成」は `selectableEngineKinds`（図形/対象形状(SAM)/学習モデル形状）のみ表示する。
+  旧方式（人物の輪郭/物体の輪郭/対象形状(旧)）は `SegmentEngineKind` のcaseとして残り、
+  ROI個別設定・保存JSONの旧rawValueはPerROISegmentEngine経由で従来通り動作する。
+  インスペクタへ読み戻す際は `selectableEngineKind(for:)` で対象形状(SAM)へ丸める。
+- 起動時サイドパネル幅: 最小幅未満の過渡的な幅は保存しない（splitViewDidResizeSubviews /
+  saveSplitPositionsNow）。パネル移動時の左ペイン既定幅は `defaultLeftPaneWidth`（インスペクタ
+  最小340+20）へ統一。起動レイアウト確定後に `enforceSidePaneMinimumWidths()` を1ターン遅延で
+  実行し、遅延レイアウトによる squeeze を最終補正する。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

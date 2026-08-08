@@ -1592,8 +1592,8 @@ final class MosaicWindowController: NSObject {
         shapeControl.toolTip = "新規または選択中のモザイク範囲の形状"
         applyScaledFont(shapeControl, size: 12)
         segmentEngineControl.removeAllItems()
-        segmentEngineControl.addItems(withTitles: SegmentEngineKind.allCases.map(\.displayName))
-        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .samShape) ?? 0
+        segmentEngineControl.addItems(withTitles: Self.selectableEngineKinds.map(\.displayName))
+        let defaultEngineIndex = Self.selectableEngineKinds.firstIndex(of: .samShape) ?? 0
         segmentEngineControl.selectItem(at: defaultEngineIndex)
         segmentEngineControl.toolTip = "選択範囲から実際の処理マスクを生成する方式"
         segmentEngineControl.target = self
@@ -2155,10 +2155,11 @@ final class MosaicWindowController: NSObject {
         // 隠れていたペインが新たに表示された場合は明示的に既定幅を与える
         // （「サイドパネルを左へ移動すると表示されなくなる」バグの修正）。
         mainSplit.layoutSubtreeIfNeeded()
-        let defaultLeftPaneWidth: CGFloat = 280
+        // 左ペインの既定幅はインスペクタの最小幅（340）を下回らない共通ヘルパを使う
+        //（旧: ハードコード280で、インスペクタを左へ移すと省略表示になっていた）。
         let defaultRightPaneWidth = libraryTwoColumnPaneWidth()
         if wasLeftHidden && !leftEmpty {
-            mainSplit.setPosition(defaultLeftPaneWidth, ofDividerAt: 0)
+            mainSplit.setPosition(defaultLeftPaneWidth(leftPane), ofDividerAt: 0)
         }
         if wasRightHidden && !rightEmpty {
             setMainSplitRightPaneWidth(defaultRightPaneWidth, mainSplit: mainSplit, rightPane: rightPane)
@@ -2212,24 +2213,54 @@ final class MosaicWindowController: NSObject {
             setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
         }
 
-        if restored { return }
-        let total = rightPane.bounds.height
-        guard total > 520 else { return }
-        let divider = rightPane.dividerThickness
-        let libraryHeight = max(160, min(230, total * 0.32))
-        let layerHeight = max(170, min(230, total * 0.30))
-        rightPane.setPosition(libraryHeight, ofDividerAt: 0)
-        rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
+        if !restored {
+            let total = rightPane.bounds.height
+            if total > 520 {
+                let divider = rightPane.dividerThickness
+                let libraryHeight = max(160, min(230, total * 0.32))
+                let layerHeight = max(170, min(230, total * 0.30))
+                rightPane.setPosition(libraryHeight, ofDividerAt: 0)
+                rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
+            }
+        }
+
+        // 起動直後の最終保険: ここまでの復元・既定化の後に走るレイアウト解決
+        // （ウィンドウ枠復元やAuto Layoutの遅延パス）でサイドペインが最小幅未満へ
+        // 縮められることがある（GUI報告 2026-08-08: 起動直後のサイドツールパネル幅が微妙）。
+        // 1ターン遅らせて再確認し、狭ければ既定幅へ戻す。
+        DispatchQueue.main.async { [weak self] in
+            self?.enforceSidePaneMinimumWidths()
+        }
+    }
+
+    /// サイドペインが最小幅未満なら既定幅へ戻す（表示中のペインのみ）。
+    private func enforceSidePaneMinimumWidths() {
+        guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView,
+              let mainSplit = mainSplitView, mainSplit.bounds.width > 400 else { return }
+        let wasRestoring = isRestoringSplitPositions
+        isRestoringSplitPositions = true
+        defer { isRestoringSplitPositions = wasRestoring }
+        mainSplit.layoutSubtreeIfNeeded()
+        if !leftPane.isHidden, leftPane.frame.width < minimumWidth(forPane: leftPane) {
+            mainSplit.setPosition(defaultLeftPaneWidth(leftPane), ofDividerAt: 0)
+        }
+        if !rightPane.isHidden, rightPane.frame.width < minimumWidth(forPane: rightPane) {
+            setMainSplitRightPaneWidth(
+                max(libraryTwoColumnPaneWidth(), minimumWidth(forPane: rightPane)),
+                mainSplit: mainSplit, rightPane: rightPane
+            )
+        }
     }
 
     /// 終了時などに現在の分割位置を明示的に保存する（リサイズ通知経由の保存に依存しない確実な保存）。
     func saveSplitPositionsNow() {
         guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView else { return }
         let settings = AppSettings.shared
-        if !leftPane.isHidden, leftPane.frame.width > 50 {
+        // 最小幅未満の過渡的な幅は保存しない（splitViewDidResizeSubviewsと同じ判定）
+        if !leftPane.isHidden, leftPane.frame.width >= minimumWidth(forPane: leftPane) {
             settings.set(Double(leftPane.frame.width), forKey: "Layout.leftPaneWidth")
         }
-        if !rightPane.isHidden, rightPane.frame.width > 50 {
+        if !rightPane.isHidden, rightPane.frame.width >= minimumWidth(forPane: rightPane) {
             settings.set(Double(rightPane.frame.width), forKey: "Layout.rightPaneWidth")
         }
         for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
@@ -4368,7 +4399,7 @@ final class MosaicWindowController: NSObject {
             let loader = ImageLoader()
             let engine = MosaicEngine()
             func makeSegmentEngine() -> Segmenting {
-                let kinds = SegmentEngineKind.allCases
+                let kinds = MosaicWindowController.selectableEngineKinds
                 guard config.engineKindIndex >= 0, config.engineKindIndex < kinds.count else {
                     return ShapeSegmentEngine()
                 }
@@ -5388,11 +5419,22 @@ final class MosaicWindowController: NSObject {
         resumeMosaicPreviewIfNeeded()
     }
 
+    /// インスペクタ「マスク生成」に表示する方式（v0.0.00133〜 3択へ絞り込み。GUI要望 2026-08-08）。
+    /// 旧方式（人物の輪郭/物体の輪郭/対象形状(旧)）は内部エンジン・保存データ互換として残し、
+    /// 表示・選択のみ廃止。ROI個別設定に旧方式のrawValueが残っていてもPerROISegmentEngine経由で
+    /// 従来通り動作する。インスペクタへ読み戻す際は`selectableEngineKind(for:)`でSAMへ丸める。
+    nonisolated static let selectableEngineKinds: [SegmentEngineKind] = [.shape, .samShape, .learnedShape]
+
+    /// 保存値・ROI個別設定の方式を、表示可能な3択のいずれかへ丸める（旧方式→対象形状(SAM)）。
+    private static func selectableEngineKind(for kind: SegmentEngineKind) -> SegmentEngineKind {
+        selectableEngineKinds.contains(kind) ? kind : .samShape
+    }
+
     /// 「マスク生成」方式の変更。「個別」ONで選択中レイヤがあれば、そのレイヤにだけ方式を書き込む。
     @objc private func segmentEngineChanged() {
         // 生成方式が変わればマスクは別物になる
         mosaicEngine.invalidateMaskCache()
-        let kinds = SegmentEngineKind.allCases
+        let kinds = Self.selectableEngineKinds
         let index = segmentEngineControl.indexOfSelectedItem
         if index >= 0, index < kinds.count, kinds[index] == .learnedShape, !LearnedShapeSegmentEngine.isAvailable {
             // 未導入でもクラッシュせず図形へフォールバックするが、無言だと原因が分からないため案内する
@@ -5422,7 +5464,7 @@ final class MosaicWindowController: NSObject {
         guard !targetIDs.isEmpty else { return false }
 
         let index = segmentEngineControl.indexOfSelectedItem
-        let kinds = SegmentEngineKind.allCases
+        let kinds = Self.selectableEngineKinds
         guard index >= 0, index < kinds.count else { return false }
         let kind = kinds[index].rawValue
         let threshold = maskThresholdSlider.doubleValue
@@ -5451,7 +5493,7 @@ final class MosaicWindowController: NSObject {
         guard individualDetectionCheckbox.state == .on, let roi else { return }
         if let rawValue = roi.maskEngine,
            let kind = SegmentEngineKind(rawValue: rawValue),
-           let index = SegmentEngineKind.allCases.firstIndex(of: kind) {
+           let index = Self.selectableEngineKinds.firstIndex(of: Self.selectableEngineKind(for: kind)) {
             segmentEngineControl.selectItem(at: index)
         }
         if let threshold = roi.maskThreshold {
@@ -5512,14 +5554,14 @@ final class MosaicWindowController: NSObject {
     /// インスペクタで選択中のマスク生成方式。
     private func currentSegmentEngineKind() -> SegmentEngineKind {
         let index = segmentEngineControl.indexOfSelectedItem
-        let kinds = SegmentEngineKind.allCases
+        let kinds = Self.selectableEngineKinds
         guard index >= 0, index < kinds.count else { return .shape }
         return kinds[index]
     }
 
     private func currentSegmentEngine() -> Segmenting {
         let index = segmentEngineControl.indexOfSelectedItem
-        let kinds = SegmentEngineKind.allCases
+        let kinds = Self.selectableEngineKinds
         var base: Segmenting
         if index >= 0, index < kinds.count {
             base = makeSegmentEngine(kind: kinds[index], threshold: maskThresholdSlider.doubleValue)
@@ -7165,7 +7207,7 @@ extension MosaicWindowController {
     private func loadDetectionSettings() {
         individualDetectionCheckbox.state =
             (AppSettings.shared.object(forKey: Self.individualDetectionDefaultsKey) as? Bool ?? true) ? .on : .off
-        let defaultEngineIndex = SegmentEngineKind.allCases.firstIndex(of: .samShape) ?? 0
+        let defaultEngineIndex = Self.selectableEngineKinds.firstIndex(of: .samShape) ?? 0
         segmentEngineControl.selectItem(at: defaultEngineIndex)
         let threshold = AppSettings.shared.double(forKey: Self.maskThresholdDefaultsKey)
         maskThresholdSlider.doubleValue = threshold
@@ -7968,10 +8010,13 @@ extension MosaicWindowController: NSSplitViewDelegate {
               let mainSplit = mainSplitView,
               mainSplit.bounds.width > 0 else { return }
         let settings = AppSettings.shared
-        if !leftPane.isHidden, leftPane.frame.width > 50 {
+        // 最小幅未満の過渡的な幅（起動途中のレイアウト解決・ウィンドウ縮小の巻き添え等）は
+        // 保存しない。保存すると次回起動時に「幅が微妙に狭い」状態が復元されてしまう
+        //（GUI報告 2026-08-08: 起動直後のサイドツールパネル幅が微妙）。
+        if !leftPane.isHidden, leftPane.frame.width >= minimumWidth(forPane: leftPane) {
             settings.set(Double(leftPane.frame.width), forKey: "Layout.leftPaneWidth")
         }
-        if !rightPane.isHidden, rightPane.frame.width > 50 {
+        if !rightPane.isHidden, rightPane.frame.width >= minimumWidth(forPane: rightPane) {
             settings.set(Double(rightPane.frame.width), forKey: "Layout.rightPaneWidth")
         }
         for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
