@@ -354,8 +354,20 @@ public final class MosaicEngine {
             }
 
             var mask = baseMask
-            // ボーダー: 縞のアルファ（帯=不透過、間隔=透明）をROIマスクへ乗算
-            if let stripeAlpha = layers.stripeAlpha {
+            // ボーダー: 縞のアルファ（帯=不透過、間隔=透明）をROIマスクへ乗算。
+            // ROIが回転している場合は縞も選択範囲の角度基準で傾ける（GUI報告 2026-08-08:
+            // 回転済みマスクで縦横が画像軸のままになる）。縞はスタイル単位でキャッシュ共有
+            // しているため、回転はROI毎にここで適用する。回転規約は形状マスクと同じ
+            // `ShapeSegmentEngine.ciRotation`（ROI中心軸）を使う。
+            if var stripeAlpha = layers.stripeAlpha {
+                if abs(roi.rotation) > 0.01 {
+                    stripeAlpha = stripeAlpha
+                        .clampedToExtent()
+                        .transformed(by: ShapeSegmentEngine.ciRotation(
+                            around: CGPoint(x: rect.midX, y: rect.midY), degrees: roi.rotation
+                        ))
+                        .cropped(to: extent)
+                }
                 mask = mask.applyingFilter("CIMultiplyCompositing", parameters: [
                     kCIInputBackgroundImageKey: stripeAlpha
                 ])

@@ -2791,9 +2791,9 @@ final class MosaicWindowController: NSObject {
             [styleRowLabel("輪郭ぼかし"), sliderValueRow(styleFeatherSlider, styleFeatherValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("帯の太さ"), sliderValueRow(styleStripeWidthSlider, styleStripeWidthValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("帯の間隔"), sliderValueRow(styleStripeSpacingSlider, styleStripeSpacingValueLabel), NSGridCell.emptyContentView],
+            [styleRowLabel("並行揺れ"), sliderValueRow(styleStripeWobbleSlider, styleStripeWobbleValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("方向"), styleBorderDirectionControl, NSGridCell.emptyContentView],
             [styleRowLabel("ボーダー"), borderOptionsRow, NSGridCell.emptyContentView],
-            [styleRowLabel("並行揺れ"), sliderValueRow(styleStripeWobbleSlider, styleStripeWobbleValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("種別"), styleFlashKindControl, NSGridCell.emptyContentView],
             [styleRowLabel("密度"), sliderValueRow(styleCloudDensitySlider, styleCloudDensityValueLabel), NSGridCell.emptyContentView],
             [styleRowLabel("トーン"), styleCloudToneCheckbox, NSGridCell.emptyContentView],
@@ -3154,7 +3154,7 @@ final class MosaicWindowController: NSObject {
         let isClouds = pattern == .clouds
         let usesBlockScale = pattern != .border && pattern != .overlayImage
         // 行番号: 0=パターン 1=透明度 2=塗りつぶし色 3=細かさ 4=輪郭ぼかし 5=帯の太さ
-        // 6=帯の間隔 7=方向 8=ボーダー 9=並行揺れ 10=種別(フラッシュ) 11=密度 12=トーン(雲/フラッシュ)
+        // 6=帯の間隔 7=並行揺れ 8=方向 9=ボーダー 10=種別(フラッシュ) 11=密度 12=トーン(雲/フラッシュ)
         // 13=フラッシュ 14=画像選択 15=トーン(全パターン共通)
         let visibility: [Int: Bool] = [
             2: pattern != .overlayImage,

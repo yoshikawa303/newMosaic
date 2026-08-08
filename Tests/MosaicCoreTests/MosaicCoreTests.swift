@@ -957,6 +957,56 @@ private final class PatchyStubSegmentEngine: Segmenting {
     ) == nil)
 }
 
+/// ボーダーの縞がROIの回転角基準で傾くことの回帰テスト（GUI報告 2026-08-08:
+/// 回転済みマスクで縦横が画像軸のままになる）。90°回転した正方形ROIでは、
+/// 縦ボーダーの縞が横方向へ走るため、加工画素の変化が「行方向で少なく・列方向で多く」なる。
+@Test func borderStripesFollowROIRotation() throws {
+    func stripeTransitions(rotation: Double) throws -> (alongX: Int, alongY: Int) {
+        let size = 64
+        var pixels = [UInt8](repeating: 128, count: size * size * 4)
+        for index in stride(from: 3, to: pixels.count, by: 4) { pixels[index] = 255 }
+        guard let provider = CGDataProvider(data: Data(pixels) as CFData),
+              let image = CGImage(
+                width: size, height: size, bitsPerComponent: 8, bitsPerPixel: 32,
+                bytesPerRow: size * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.premultipliedLast.rawValue),
+                provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent
+              ) else { throw MosaicEngineError.customPatternImageMissing(nil) }
+        var roi = MosaicROI(
+            rect: NormalizedRect(x: 0.25, y: 0.25, width: 0.5, height: 0.5),
+            confidence: 1, source: "test", shape: .rectangle, category: .other
+        )
+        roi.rotation = rotation
+        var style = MosaicStyle()
+        style.pattern = .border
+        style.stripeVertical = true
+        style.stripeWidth = 6
+        style.stripeSpacing = 6
+        style.tintColor = (red: 0, green: 0, blue: 0)
+        style.stripeTone = false
+        let output = try MosaicEngine().applyMosaic(to: image, rois: [roi], style: style)
+        guard let data = output.dataProvider?.data as Data? else {
+            throw MosaicEngineError.customPatternImageMissing(nil)
+        }
+        let bytesPerRow = output.bytesPerRow
+        // ROI中心行・中心列に沿って「加工済み(元の128から変化)」フラグの遷移回数を数える
+        func changed(_ x: Int, _ y: Int) -> Bool {
+            let offset = y * bytesPerRow + x * 4
+            return abs(Int(data[offset]) - 128) > 24
+        }
+        let mid = size / 2
+        var alongX = 0, alongY = 0
+        for x in 17..<47 where changed(x, mid) != changed(x - 1, mid) { alongX += 1 }
+        for y in 17..<47 where changed(mid, y) != changed(mid, y - 1) { alongY += 1 }
+        return (alongX, alongY)
+    }
+    let upright = try stripeTransitions(rotation: 0)
+    let rotated = try stripeTransitions(rotation: 90)
+    #expect(upright.alongX >= 3, "回転0°: 縦縞なら行方向に複数の帯境界があるはず（実測\(upright.alongX)）")
+    #expect(rotated.alongY >= 3, "回転90°: 縞が横走りになり列方向に帯境界が移るはず（実測\(rotated.alongY)）")
+    #expect(rotated.alongX <= 1, "回転90°: 行方向の帯境界はほぼ消えるはず（実測\(rotated.alongX)）")
+}
+
 @Test func mosaicROIRoundTripsCategory() throws {
     let roi = MosaicROI(
         rect: NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),

@@ -36,7 +36,8 @@
 
 ## テスト状況
 
-- Swift Testing: 150件 PASS（v0.0.00131。samShapeマスクの安全側膨張と回帰テスト `samMaskEdgeDilationCoversObjectEdge` を追加）
+- Swift Testing: 151件 PASS（v0.0.00132。ボーダー縞のROI回転追従と回帰テスト `borderStripesFollowROIRotation` を追加）
+- 旧: 150件 PASS（v0.0.00131。samShapeマスクの安全側膨張と回帰テスト `samMaskEdgeDilationCoversObjectEdge` を追加）
 - 旧: 149件 PASS（v0.0.00129。実写Vision人物マスクの二重反転を修正し、向き非依存のSAMマスクとのIoU比較による回帰テスト `visionPersonMaskIsNotVerticallyFlipped` を追加）
 - 旧: 148件 PASS（v0.0.00123。`SAMSegmentEngine.minimumUsableCoverage` を0.02→0.40へ較正し、
   部分的な検閲漏れがフォールバックすることを確認する `lowCoverageSAMMaskFallsBackToShape` を1件追加）
