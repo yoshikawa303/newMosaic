@@ -243,3 +243,51 @@ macの容量が度々足らなくなる為、下記を増設したリSSDのム�
 - 前依頼で保留だった Parallels の元削除はユーザー側で実施済み。起動ディスクの空きは 41GB。
 - 対象外: `ComfyUI-Shared` は `/Volumes/DATA/ユーザー/yoshikawa_masataka/` 配下のまま（今回の指示範囲外）。
 - 作業時間: 約5分
+
+### 2026-08-09 23:06 JST - Claude Opus 5 - 種別: 依頼内容 - newMosaicの対応フォーマット確認
+
+```
+★聞きたいのはnewMosaicのアプリの対応フォーマットです。
+```
+
+### 2026-08-09 23:06 JST - Claude Opus 5 - 種別: 作業結果 - 対応フォーマットの一覧（コード確認・変更なし）
+
+- 作業AIモデル: Claude Opus 5（調査のみ。コード変更なし。AI自身によるモデル切替は不可）
+
+## 入力（開く）
+
+| 経路 | 形式 |
+|---|---|
+| ファイル＞画像を開く | **PNG / JPEG / TIFF / HEIC**（`NSOpenPanel.allowedContentTypes`） |
+| 貼り付け（クリップボード） | `NSPasteboard`から`NSImage`として読める形式。取り込み後はPNGで保存 |
+| 動画を開く | **MP4 / MOV**（`.mpeg4Movie` / `.quickTimeMovie`。本体はコピーせずリンク登録） |
+| パターン画像／かぶせ画像の選択 | **PNG / JPEG / TIFF / HEIC** |
+| プロジェクト | **`.nmcf`**（`projectFileExtension`） |
+
+デコード自体は`NSImage(contentsOf:)`のため実力上はより多くの形式を開けるが、
+オープンパネルの受け付けは上記4種に制限している。
+
+## 出力（画像の書き出し・`ImageExportFormat`）
+
+| 形式 | 実装 |
+|---|---|
+| **JPEG (.jpg)** / **PNG** / **BMP** / **GIF** / **TIFF (.tif)** / **HEIC** | ImageIO（macOS標準） |
+| **PDF (.pdf)** / **Illustrator互換 (.ai)** | CoreGraphicsのPDFコンテキスト（ラスター埋め込み） |
+| **EPS (.eps)** | 自前`EPSWriter`（JPEG埋め込み） |
+| **Photoshop (.psd)** | 自前`PSDWriter`（Adobe公開仕様準拠・無圧縮RAW）。**元画像を別レイヤとして同梱可**（`supportsLayers`） |
+
+- 圧縮品質の指定は **JPEG / HEIC のみ**（`supportsQuality`）。
+- 出力DPI（既定350）を印刷用メタデータとして埋め込む。
+- 透過維持のON/OFF（`preserveTransparency`）。
+- **非対応**: CLIP STUDIO PAINT（.clip）/ SAI / MediBang（.mdp）＝仕様非公開のため（ユーザー確認済み・コメントに明記）。
+
+## 出力（その他）
+
+| 用途 | 形式 |
+|---|---|
+| 動画の書き出し | **MP4**（`.mpeg4Movie`のみ。入力はMP4/MOV） |
+| 学習データ書き出し | `images/*.png` ＋ `labels/*.txt`（YOLO形式）＋ `classes.txt` ＋ `dataset.yaml` |
+| デバッグログ書き出し | **.txt**（プレーンテキスト） |
+| ライブラリ内部保存 | 原本・処理結果ともに **PNG**（`Originals/` `Processed/`） |
+
+- 作業時間: 約5分
