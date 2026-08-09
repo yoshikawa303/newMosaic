@@ -1,5 +1,22 @@
 # Changelog
 
+## v0.0.00134 - 2026-08-09
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: モザイクパターン「ボーダー」の「並行揺れ」が設定できなかった問題を修正した。「ランダム」チェックがOFFの間はスライダーが灰色（無効）のままだったが、これからは通常のボーダーでも並行揺れを設定でき、各線が中央を軸にランダムで傾く。
+
+■更新履歴
+
+- `styleStripeWobbleSlider.isEnabled` の条件から「ランダムON」を外し、パターンがボーダーなら
+  常に有効にした（ツールチップ／VoiceOverラベルも同期）。
+- `MosaicEngine.stripePatternMask` を「タイル繰り返し（揺れ無し・ランダム無し）」と
+  「CGContextへ1本ずつ描画」の2経路へ整理。後者は旧 `randomStripeMask` を
+  `drawnStripeMask(style:extent:jitter:wobble:)` へ一般化し、太さ・間隔のランダム化（jitter）と
+  並行揺れ（wobble）を独立に扱う。ランダムON時の見た目・乱数消費順は従来と同一。
+- 回帰テスト `borderWobbleTiltsStripesWithoutRandom` を追加（ランダムOFFで揺れ0/1の
+  縞マスク上下端を比較し、揺れ1でのみ縞位置がずれることを検証）。
+
 ## v0.0.00133 - 2026-08-08
 
 ■更新履歴（Readme / ChangeLog 用）

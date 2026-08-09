@@ -1007,6 +1007,47 @@ private final class PatchyStubSegmentEngine: Segmenting {
     #expect(rotated.alongX <= 1, "回転90°: 行方向の帯境界はほぼ消えるはず（実測\(rotated.alongX)）")
 }
 
+/// 「並行揺れ」が「ランダム」OFFでも効くことの回帰テスト（GUI報告 2026-08-09:
+/// ランダムON必須のためスライダーが無効で設定できない）。縦ボーダーの縞マスクを
+/// 上端行と下端行で比較し、揺れ0では一致・揺れ1では一致しない（＝線が傾く）ことを見る。
+@Test func borderWobbleTiltsStripesWithoutRandom() throws {
+    let extent = CGRect(x: 0, y: 0, width: 64, height: 64)
+    func rowMismatch(wobble: Double) throws -> Int {
+        var style = MosaicStyle()
+        style.pattern = .border
+        style.stripeRandom = false
+        style.stripeVertical = true
+        style.stripeWidth = 6
+        style.stripeSpacing = 6
+        style.stripeWobble = wobble
+        guard let mask = MosaicEngine.stripePatternMask(style: style, extent: extent) else {
+            throw MosaicEngineError.customPatternImageMissing(nil)
+        }
+        let bytesPerRow = 64 * 4
+        var pixels = [UInt8](repeating: 0, count: bytesPerRow * 64)
+        pixels.withUnsafeMutableBytes { buffer in
+            CIContext().render(
+                mask,
+                toBitmap: buffer.baseAddress!,
+                rowBytes: bytesPerRow,
+                bounds: extent,
+                format: .RGBA8,
+                colorSpace: CGColorSpace(name: CGColorSpace.sRGB)!
+            )
+        }
+        let top = 4, bottom = 59
+        var mismatch = 0
+        for x in 0..<64
+        where (pixels[top * bytesPerRow + x * 4] > 127) != (pixels[bottom * bytesPerRow + x * 4] > 127) {
+            mismatch += 1
+        }
+        return mismatch
+    }
+
+    #expect(try rowMismatch(wobble: 0) == 0, "揺れ0では上下端の縞位置が一致するはず")
+    #expect(try rowMismatch(wobble: 1) > 0, "揺れ1では線が傾き上下端の縞位置がずれるはず")
+}
+
 @Test func mosaicROIRoundTripsCategory() throws {
     let roi = MosaicROI(
         rect: NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4),

@@ -82,7 +82,8 @@ public struct MosaicStyle: @unchecked Sendable {
     /// すべてのパターン共通の網点（漫画トーン風）ON/OFF。
     public var patternTone: Bool = false
     public var stripeTone: Bool
-    /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い（ランダムON時）
+    /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い
+    /// （`stripeRandom`のON/OFFに関わらず有効）
     public var stripeWobble: Double
     /// 雲（トーン）: 密度（0〜1。大きいほど塗り部分が多い）。フラッシュでは放射線の密度を兼ねる
     public var cloudDensity: Double
@@ -643,9 +644,13 @@ public final class MosaicEngine {
     /// ボーダー用の縞アルファマスク（帯=白、間隔=黒=透明）。ボーダー以外はnil。
     static func stripePatternMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
         guard style.pattern == .border else { return nil }
-        return style.stripeRandom
-            ? randomStripeMask(style: style, extent: extent)
-            : regularStripeMask(style: style, extent: extent)
+        let wobble = min(max(style.stripeWobble, 0), 1)
+        // 太さ・間隔のランダム化も並行揺れも無い場合だけ、軽量なタイル繰り返しで縞を作る。
+        // どちらかが有効なら線ごとに形が変わるためCGContextへ1本ずつ描画する。
+        guard style.stripeRandom || wobble > 0 else {
+            return regularStripeMask(style: style, extent: extent)
+        }
+        return drawnStripeMask(style: style, extent: extent, jitter: style.stripeRandom, wobble: wobble)
     }
 
     private static func regularStripeMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
@@ -666,11 +671,20 @@ public final class MosaicEngine {
             .cropped(to: extent)
     }
 
-    /// ボーダーランダム: 「方向」設定（縦/横）に従った帯を、太さ・間隔を±40%揺らして描く。
-    /// 「並行揺れ」（`stripeWobble`）が0より大きい場合、各線を線の中央を軸にランダムで左右へ傾ける
-    /// （値が大きいほど傾きも大きい）。シード固定で再レンダリングしても同じ模様になる。
+    /// ボーダーの縞を1本ずつCGContextへ描く。「方向」設定（縦/横）に従った帯を並べ、
+    /// - `jitter`（＝「ランダム」ON）で各帯の太さ・間隔を±40%揺らす。
+    /// - `wobble`（＝「並行揺れ」0〜1）が0より大きい場合、各線を線の中央を軸にランダムで
+    ///   左右へ傾ける（値が大きいほど傾きも大きい。最大±25度）。
+    /// 「ランダム」OFFでも並行揺れだけを効かせられる（GUI報告 2026-08-09: ランダムONを
+    /// 前提にするとスライダーが無効のままで設定できない）。
+    /// シード固定で再レンダリングしても同じ模様になる。
     /// 旧実装の斜め固定回転+ノイズ変位は廃止した（ランダム時も方向設定を維持する仕様変更）。
-    private static func randomStripeMask(style: MosaicStyle, extent: CGRect) -> CIImage? {
+    private static func drawnStripeMask(
+        style: MosaicStyle,
+        extent: CGRect,
+        jitter: Bool,
+        wobble: Double
+    ) -> CIImage? {
         let band = max(1.0, style.stripeWidth)
         let gap = max(0.0, style.stripeSpacing)
         var rng = SeededRandomGenerator(seed: 0x6D6F_7A61)
@@ -693,11 +707,11 @@ public final class MosaicEngine {
         // 帯を並べる方向の長さ（縦帯なら横方向へ並ぶ）と、各線の長さ
         let acrossLength = vertical ? extent.width : extent.height
         let lineLength = vertical ? extent.height : extent.width
-        let maxTiltRadians = min(max(style.stripeWobble, 0), 1) * 25 * .pi / 180
+        let maxTiltRadians = min(max(wobble, 0), 1) * 25 * .pi / 180
         var pos: CGFloat = 0
         while pos < acrossLength {
-            let bandLen = max(1, band * CGFloat(Double.random(in: 0.6...1.4, using: &rng)))
-            let gapLen = max(0, gap * CGFloat(Double.random(in: 0.6...1.4, using: &rng)))
+            let bandLen = jitter ? max(1, band * CGFloat(Double.random(in: 0.6...1.4, using: &rng))) : band
+            let gapLen = jitter ? max(0, gap * CGFloat(Double.random(in: 0.6...1.4, using: &rng))) : gap
             let tilt = maxTiltRadians > 0 ? CGFloat(Double.random(in: -1...1, using: &rng)) * maxTiltRadians : 0
             let centerAcross = pos + bandLen / 2
             // 線の中央を軸に傾ける。傾けても端が欠けないよう線を上下（左右）に25%ずつ延長する

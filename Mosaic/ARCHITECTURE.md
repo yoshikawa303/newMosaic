@@ -273,6 +273,7 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **モード切替アイコンとカーソル**: 編集モード=矩形破線（ROIを描くモード）、範囲選択モード=カーソル、に入替。画像上のカーソルは編集=crosshair（＋）、範囲選択=arrow で、Option(⌥)一時反転にも追従する。`flagsChanged`はファーストレスポンダにしか届かないためローカルイベントモニタで受け、`applyHoverCursor`（ROI上はopenHand優先）で統一的に設定する。
 - **人物/骨格レイヤのダブルクリック削除**: `ImageCanvasView.detectionLayerHit`（骨格優先のヒットテスト）と`onDetectionLayerDeleteRequest`を追加し、ROIと同じダブルクリック操作でレイヤ一覧から該当レイヤを取り除く（表示配列はインデックス維持のため該当のみfalse化）。
 - **ボーダーランダムの仕様変更**: 旧実装（斜め固定回転+ノイズ変位）を廃止し、「方向」設定（縦/横）に従った帯の太さ・間隔のみをランダム化する方式へ。新設の「並行揺れ」（`stripeWobble` 0〜1、最大±25度）は各線を線の中央を軸にランダムで傾ける。CGContextへの直接描画（帯毎に回転）で実装し、シード固定で再現性を保つ。
+- **並行揺れの独立化（v0.0.00134〜）**: 「並行揺れ」は「ランダム」ONを前提にしていたためスライダーが無効のままで設定できなかった（GUI報告 2026-08-09）。`stripePatternMask`を「タイル繰り返し（揺れ無し・ランダム無し）」と「CGContextへ1本ずつ描画」の2経路へ整理し、後者（`drawnStripeMask(style:extent:jitter:wobble:)`）が太さ・間隔のランダム化（jitter）と並行揺れ（wobble）を独立に扱う。UI側も`pattern.isStripes`のみで有効化する。回帰テストは`borderWobbleTiltsStripesWithoutRandom`。
 - **ボーダーのROI回転追従（v0.0.00132〜）**: 縞アルファはROIの回転（`roi.rotation`）に合わせて`ShapeSegmentEngine.ciRotation`（ROI中心軸）で傾ける。縞はスタイル単位で`layerCache`共有のため、回転はキャッシュ取り出し後にROI毎へ適用する（`MosaicEngine.applyMosaic`内）。回帰テストは`borderStripesFollowROIRotation`。
 - **フラッシュの拡張**: `flashBeta`（集中線=白地に黒 / ベタフラッシュ=黒地に白）を追加。放射線は先細りの三角形で描き、本数は「密度」（`cloudDensity`をトーンと兼用）で調整、「トーン」（`cloudTone`兼用）ONで`CIDotScreen`の網点変換を適用。乱数シードをROIのIDから導出し、レイヤ毎に異なる形（同一ROIでは再現性あり）にした。
 - **パターン詳細設定の行表示制御**: `styleGridView`への参照を保持し、`updateStyleGridRowVisibility(pattern:)`がNSGridViewの行（`row(at:).isHidden`）をパターン毎に切替える。共通行（透明度・塗りつぶし色・細かさ・輪郭ぼかし）以外は該当パターンでのみ表示され、「トーン」等の同名行が複数並ぶ問題も解消。

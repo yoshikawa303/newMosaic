@@ -1208,7 +1208,7 @@ final class MosaicWindowController: NSObject {
     private let styleBorderToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
     /// すべてのパターンで使える網点（漫画トーン風）のON/OFF。
     private let stylePatternToneCheckbox = NSButton(checkboxWithTitle: "トーン", target: nil, action: nil)
-    /// ボーダー: 並行揺れ（各線を中央軸にランダムで傾ける度合い。ランダムON時のみ有効）
+    /// ボーダー: 並行揺れ（各線を中央軸にランダムで傾ける度合い。「ランダム」のON/OFFに関わらず有効）
     private let styleStripeWobbleSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let styleStripeWobbleValueLabel = NSTextField(labelWithString: "0 %")
     /// フラッシュ: 種別（集中線 / ベタフラッシュ / ウニフラッシュ）
@@ -2596,7 +2596,7 @@ final class MosaicWindowController: NSObject {
             (styleFeatherSlider, "輪郭ぼかし（選択範囲の境界をぼかす量）"),
             (styleStripeWidthSlider, "帯の太さ（ボーダーの各線の太さ）"),
             (styleStripeSpacingSlider, "帯の間隔（間隔部分は元画像が見える）"),
-            (styleStripeWobbleSlider, "並行揺れ（ランダムON時に各線を中央軸で傾ける度合い）"),
+            (styleStripeWobbleSlider, "並行揺れ（各線を中央軸にランダムで傾ける度合い）"),
             (styleCloudDensitySlider, "密度（トーンの塗り面積・フラッシュの放射線の本数）"),
             (groinPositionSlider, "鼠径部位置（腰から膝へ向かう線分上の比率）")
         ]
@@ -3158,8 +3158,9 @@ final class MosaicWindowController: NSObject {
         styleBorderToneCheckbox.isEnabled = pattern.isStripes
         // ランダム時も方向設定は有効（太さ・間隔のみランダム化される仕様へ変更）
         styleBorderDirectionControl.isEnabled = pattern.isStripes
-        // 並行揺れはランダムON時のみ意味を持つ
-        styleStripeWobbleSlider.isEnabled = pattern.isStripes && styleBorderRandomCheckbox.state == .on
+        // 並行揺れは「ランダム」OFFでも単独で使える（GUI報告 2026-08-09: ランダムON必須だと
+        // ボーダー選択直後はスライダーが無効のままで設定できない）
+        styleStripeWobbleSlider.isEnabled = pattern.isStripes
         styleCloudDensitySlider.isEnabled = pattern == .clouds || pattern == .flash
         styleCloudToneCheckbox.isEnabled = pattern == .clouds || pattern == .flash
         styleFlashKindControl.isEnabled = pattern == .flash

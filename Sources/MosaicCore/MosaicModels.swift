@@ -195,7 +195,8 @@ public struct MosaicROIStyle: Codable, Equatable, Hashable, Sendable {
 
     /// ボーダー: 帯を網点（漫画トーン風）で塗るか。
     public var stripeTone: Bool
-    /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い。
+    /// ボーダー: 並行揺れ（0〜1）。各線を線の中央を軸にランダムで左右へ傾ける度合い
+    /// （`stripeRandom`のON/OFFに関わらず有効）。
     public var stripeWobble: Double
     public var cloudDensity: Double
     public var cloudTone: Bool

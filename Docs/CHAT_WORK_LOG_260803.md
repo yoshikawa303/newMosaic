@@ -161,3 +161,85 @@
 - 起動時パネル幅の3点対策: ハードコード280の是正・最小幅未満の幅を保存しない・起動後1ターン遅延の最終補正。
 - テスト151件PASS、両CIゲート通過。起動直後の見た目はGUI確認をお願いします。
 - 作業時間: 約35分
+
+### 2026-08-09 13:00 JST - Claude Opus 5 - 種別: 依頼内容 - 並行揺れが設定できない
+
+```
+★バグ：newMosaicプロジェクトでモザイクパターン＞並行揺れ設定ができない。
+```
+
+- 症状の確認（選択式）: 「スライダーが灰色で動かせない」との回答。
+
+### 2026-08-09 13:00 JST - Claude Opus 5 - 種別: 作業結果 - v0.0.00134 並行揺れをランダムOFFでも設定可能に
+
+- 作業AIモデル: Claude Opus 5（原因調査＋描画経路の整理を伴うためこのモデルで実施。AI自身によるモデル切替は不可）
+- 原因: `updateMosaicStyleControlAvailability()` が `styleStripeWobbleSlider.isEnabled` を
+  「パターン=ボーダー かつ ランダムON」に限定していたため、ボーダー選択直後はスライダーが
+  無効（灰色）のままだった。描画側も揺れは `randomStripeMask` 経路にしか無かった。
+- 対策(UI): 有効条件を `pattern.isStripes` のみへ変更。ツールチップ／VoiceOverラベルも同期。
+- 対策(描画): `stripePatternMask` を「タイル繰り返し（揺れ0かつランダムOFF）」と
+  「CGContextへ1本ずつ描画」の2経路へ整理。後者は `randomStripeMask` を
+  `drawnStripeMask(style:extent:jitter:wobble:)` へ一般化し、太さ・間隔のランダム化（jitter）と
+  並行揺れ（wobble）を独立に扱う。ランダムON時の見た目・乱数消費順は従来と同一。
+- 回帰テスト `borderWobbleTiltsStripesWithoutRandom` を追加（ランダムOFFで揺れ0/1の縞マスクの
+  上下端を比較し、揺れ1でのみ縞位置がずれることを検証）。
+- テスト152件PASS、両CIゲート通過。実機の見え方はGUI確認をお願いします。
+- 経過: 作業終盤に起動ディスク（/）の空き容量が枯渇し、シェル実行が ENOSPC で不能になった。
+  コミット／プッシュは空き容量の確保後に実施する。
+- 作業時間: 約30分
+
+### 2026-08-09 13:20 JST - Claude Opus 5 - 種別: 依頼内容 - ホームディレクトリの外付けSSD移行
+
+```
+macの容量が度々足らなくなる為、下記を増設したリSSDのムーバブルストレージ上に移動し運用したい。
+元　　　/Users/yoshikawa_masataka
+移行先　/Volumes/DATA/ユーザー/yoshikawa_masataka
+```
+
+### 2026-08-09 13:30 JST - Claude Opus 5 - 種別: 作業結果 - 大物ディレクトリを外付けSSDへ移設し起動ディスクの空きを回復
+
+- 作業AIモデル: Claude Opus 5（不可逆なファイル移設と事故リスクの判断を伴うためこのモデルで実施。AI自身によるモデル切替は不可）
+- 起動ディスクの空きが 2.7GB（99%使用）まで逼迫。前回作業が ENOSPC で中断していた原因。
+- ホーム配下は約93GB。内訳は Library 80GB（Application Support 42GB / Developer 20GB /
+  Containers 5.2GB / Parallels 4.3GB）、ComfyUI-Shared 12GB。
+- ホーム全体の移行は見送り、大物ディレクトリのみ移設＋シンボリックリンク方式を採用（ユーザー選択）。
+  見送り理由: `/Volumes/DATA` は Owners 無効かつ USB 接続のため、起動時マウントの間に合わない事故、
+  iCloud Drive (`~/Library/Mobile Documents`) の非対応、Time Machine 対象外化のリスクがある。
+  またホームパス変更（`dscl`）はシステム設定変更のため AI 側では実行しない。
+- 移設方法: macOS 標準 rsync は openrsync で `-A`(ACL) 非対応のため失敗。Apple 純正 `ditto` へ切替。
+  ファイル数とサイズの一致を検証してから元を削除しシンボリックリンクを作成。
+- 実施結果:
+  - `ComfyUI-Shared` 12GB → 移設・リンク化 完了
+  - `Library/Application Support/Propellerhead Software` 20GB → 移設・リンク化 完了
+  - `Library/Parallels` 4.3GB → コピーと検証は完了。元の削除がツールの自動承認に弾かれ未実施。
+- 起動ディスクの空き: 2.7GB → 36GB。
+- 調査で判明した想定違い: 未使用シミュレータは0件のため `simctl delete unavailable` では回収不可。
+  iOS DeviceSupport 5.5GB も現行 iPhone14,2 (26.5.2) 1件のみで旧版の残骸ではない。
+- 未了: Parallels の元削除、Reason / ComfyUI のリンク経由動作確認（GUI確認はユーザー担当）。
+- 作業時間: 約20分
+
+### 2026-08-09 13:38 JST - Claude Opus 5 - 種別: 依頼内容 - 移設先の変更
+
+```
+下記に移動してもらったデータについて、再度補完先を移動したいです。
+
+元　　　/Volumes/DATA/ユーザー/yoshikawa_masataka/Library
+移動先　/Volumes/DATA/Library
+```
+
+### 2026-08-09 13:42 JST - Claude Opus 5 - 種別: 作業結果 - 移設先を /Volumes/DATA/Library へ変更
+
+- 作業AIモデル: Claude Opus 5（既存リンクの張り替えを伴うためこのモデルで継続。AI自身によるモデル切替は不可）
+- 移動先 `/Volumes/DATA/Library` は既存だったが中身は `Receipts` のみで、
+  `Application Support` / `Parallels` とは衝突しないことを確認してから実行。
+- 同一 APFS ボリューム内のため `mv` で移動（メタデータ操作のみ、再コピー不要）。
+  - `Application Support/Propellerhead Software` 20GB
+  - `Parallels` 4.4GB
+- ホーム側のシンボリックリンクを `ln -sfn` で新しい実体へ張り替え。
+  - `~/Library/Application Support/Propellerhead Software` → `/Volumes/DATA/Library/Application Support/Propellerhead Software`
+  - `~/Library/Parallels` → `/Volumes/DATA/Library/Parallels`
+- 検証: リンク経由で 20GB / 4.4GB を参照でき、RackExtensions 96件を確認。
+- 空になった `/Volumes/DATA/ユーザー/yoshikawa_masataka/Library` を削除。
+- 前依頼で保留だった Parallels の元削除はユーザー側で実施済み。起動ディスクの空きは 41GB。
+- 対象外: `ComfyUI-Shared` は `/Volumes/DATA/ユーザー/yoshikawa_masataka/` 配下のまま（今回の指示範囲外）。
+- 作業時間: 約5分
