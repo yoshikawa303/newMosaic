@@ -4537,14 +4537,41 @@ final class MosaicWindowController: NSObject {
         AppLog.library.info("一括処理終了: 処理済み=\(processed) 失敗=\(failed) キャンセル=\(cancelled)")
     }
 
+    /// 開く/貼り付けで受け付ける静止画の型
+    private static let openableImageTypes: [UTType] = [.png, .jpeg, .tiff, .heic]
+    /// 開く/貼り付けで受け付ける動画の型（書き出しはMP4のみだが読み込みはMOVも可）
+    private static let openableVideoTypes: [UTType] = [.mpeg4Movie, .quickTimeMovie]
+
+    /// URLの実体が動画かをUTTypeで判定する。拡張子だけの判定にしないのは、
+    /// 拡張子が無い/違うファイルでも実体で正しく振り分けるため。
+    private static func isVideoFile(_ url: URL) -> Bool {
+        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+            return type.conforms(to: .movie) || type.conforms(to: .audiovisualContent)
+        }
+        return UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) ?? false
+    }
+
     /// 動画をライブラリへリンク登録して開く（本体はコピーしない）。
     /// 解像度・尺の取得はデコードを伴うためバックグラウンドで行い、完了後にUIを更新する。
     @objc private func openVideo() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
+        // 静止画も選べるようにして「画像を開く」と入口を対称にする（GUI報告 2026-08-10:
+        // 動画認識をしたいのに『画像を開く』でMOVが選べない、という迷いを無くす）。
+        // 選択後は実体のUTTypeで静止画/動画へ自動的に振り分ける。
+        panel.allowedContentTypes = Self.openableVideoTypes + Self.openableImageTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard Self.isVideoFile(url) else {
+            openImageFile(at: url)
+            return
+        }
+        importVideoFile(at: url)
+    }
+
+    /// 動画ファイルをライブラリへリンク登録し、プレビュー再生まで開く。
+    /// 「動画を開く」「画像を開く（動画を選んだ場合）」「動画ファイルの貼り付け」で共用する。
+    private func importVideoFile(at url: URL) {
         guard confirmCurrentChangesBeforeLeaving() else { return }
 
         updateStatus("動画を読み込み中: \(url.lastPathComponent)")
@@ -5101,11 +5128,21 @@ final class MosaicWindowController: NSObject {
 
     @objc private func openImage() {
         let panel = NSOpenPanel()
-        panel.allowedContentTypes = [.png, .jpeg, .tiff, .heic]
+        // 動画も選べるようにする（GUI報告 2026-08-10: 動画認識をしたいのに「画像を開く」で
+        // MOVがグレーアウトして選べない）。選択後は実体のUTTypeで静止画/動画へ振り分ける。
+        panel.allowedContentTypes = Self.openableImageTypes + Self.openableVideoTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
+        guard !Self.isVideoFile(url) else {
+            importVideoFile(at: url)
+            return
+        }
+        openImageFile(at: url)
+    }
 
+    /// 静止画ファイルをライブラリへ取り込み、作業対象として開く。
+    private func openImageFile(at url: URL) {
         do {
             let loaded = try imageLoader.loadImage(from: url)
             guard confirmCurrentChangesBeforeLeaving() else { return }
@@ -5120,10 +5157,36 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    /// クリップボードの貼り付け。
+    ///
+    /// **ファイルURLを先に見る**（GUI報告 2026-08-10: Finderでコピーした動画を貼り付けても
+    /// 再生もプレビューもされない）。Finderでファイルをコピーすると、ペーストボードには
+    /// ファイルURLに加えて**そのファイルのアイコン画像**もNSImageとして載る。
+    /// 以前は`NSImage`だけを見ていたため、動画を貼り付けると1024×1024のMOVアイコンが
+    /// 静止画としてライブラリへ登録され、動画としては一切扱われていなかった。
+    /// URLがあればその実体で振り分け（動画=リンク登録+プレビュー / 静止画=原寸で取り込み）、
+    /// URLが無い場合だけ従来どおりNSImage（ブラウザ画像・スクリーンショット等）として扱う。
     @objc private func pasteImage() {
+        let fileURL = (NSPasteboard.general.readObjects(
+            forClasses: [NSURL.self],
+            options: [.urlReadingFileURLsOnly: true]
+        ) as? [URL])?.first
+        if let fileURL {
+            if Self.isVideoFile(fileURL) {
+                importVideoFile(at: fileURL)
+                return
+            }
+            // 画像ファイルのコピーはアイコンではなく原寸の実体を取り込む
+            if (try? fileURL.checkResourceIsReachable()) == true,
+               NSImage(contentsOf: fileURL) != nil {
+                openImageFile(at: fileURL)
+                return
+            }
+        }
+
         guard let image = NSPasteboard.general.readObjects(forClasses: [NSImage.self])?.first as? NSImage,
               let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else {
-            updateStatus("クリップボードに画像がありません。ブラウザ画像をコピーしてから貼り付けてください")
+            updateStatus("クリップボードに画像・動画がありません。画像をコピーするか、Finderで画像／動画ファイルをコピーしてから貼り付けてください")
             return
         }
 
