@@ -2394,3 +2394,48 @@ private final class CountingSegmentEngine: Segmenting {
     #expect(afterManual.maskShapeScale == nil)
     #expect(afterManual.maskShapeRect == afterManual.rect)
 }
+
+// MARK: - PastedIconImageDetector（v0.0.00136: 貼り付けミスで入ったファイルアイコンの整理）
+
+/// 中央だけ色が違う画像（＝外周が一様＝アイコン相当）を作る。
+private func makeCenteredIconLikeImage(side: Int) -> CGImage {
+    let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
+                            bytesPerRow: side * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    context.setFillColor(CGColor(red: 0, green: 0, blue: 0, alpha: 1))
+    context.fill(CGRect(x: 0, y: 0, width: side, height: side))
+    context.setFillColor(CGColor(red: 1, green: 1, blue: 1, alpha: 1))
+    context.fill(CGRect(x: side / 4, y: side / 4, width: side / 2, height: side / 2))
+    return context.makeImage()!
+}
+
+/// 全面にグラデーションを敷いた画像（＝外周が一様でない＝通常の写真相当）。
+private func makeGradientImage(side: Int) -> CGImage {
+    let context = CGContext(data: nil, width: side, height: side, bitsPerComponent: 8,
+                            bytesPerRow: side * 4, space: CGColorSpace(name: CGColorSpace.sRGB)!,
+                            bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue)!
+    for x in 0..<side {
+        context.setFillColor(CGColor(red: Double(x) / Double(side), green: 0.3, blue: 0.6, alpha: 1))
+        context.fill(CGRect(x: x, y: 0, width: 1, height: side))
+    }
+    return context.makeImage()!
+}
+
+@Test func pastedIconCandidateRequiresClipboardNameAndIconSize() {
+    #expect(PastedIconImageDetector.isCandidateBySize(
+        sourceName: "clipboard_20260810.png", pixelWidth: 1024, pixelHeight: 1024) == true)
+    // 貼り付け由来でない名前は対象外（フォルダ登録した正方形画像を巻き込まない）
+    #expect(PastedIconImageDetector.isCandidateBySize(
+        sourceName: "photo.png", pixelWidth: 1024, pixelHeight: 1024) == false)
+    // 正方形でなければ対象外
+    #expect(PastedIconImageDetector.isCandidateBySize(
+        sourceName: "clipboard_a.png", pixelWidth: 1024, pixelHeight: 768) == false)
+    // アイコンの代表サイズ以外は対象外
+    #expect(PastedIconImageDetector.isCandidateBySize(
+        sourceName: "clipboard_a.png", pixelWidth: 900, pixelHeight: 900) == false)
+}
+
+@Test func pastedIconBorderCheckSeparatesIconsFromPhotos() {
+    #expect(PastedIconImageDetector.hasUniformBorder(makeCenteredIconLikeImage(side: 128)) == true)
+    #expect(PastedIconImageDetector.hasUniformBorder(makeGradientImage(side: 128)) == false)
+}

@@ -69,7 +69,11 @@ private func makeSyntheticVideo(
     writer.startSession(atSourceTime: .zero)
 
     for index in 0..<frameCount {
-        let readyDeadline = Date().addingTimeInterval(10)
+        // 全スイート同時実行（ONNX推論を伴うSampleImageRegressionTests等）と重なると
+        // H.264エンコーダの受け入れ待ちが10秒を超えることがあり、
+        // `readerReportsCorrectFrameCountAndSize`がフレーキーに落ちていた。
+        // 本体（`VideoMosaicExporter`）と同じ30秒デッドラインへ揃える。
+        let readyDeadline = Date().addingTimeInterval(30)
         while !input.isReadyForMoreMediaData {
             guard Date() < readyDeadline, writer.status == .writing else {
                 throw SyntheticVideoError.pixelBufferPoolUnavailable
@@ -311,6 +315,125 @@ private func makeSyntheticVideoWithAudio(at url: URL) throws {
         includeAudio: false
     )
     #expect(FileManager.default.fileExists(atPath: outputURL.path))
+}
+
+
+// MARK: - VideoTrackingCoordinator（v0.0.00136: 自動再検出・シーンカット・見失い膨張）
+
+/// 単色フレームを作る（シーンカット検出テスト用）。
+private func makeSolidImage(gray: UInt8, side: Int = 64) -> CGImage {
+    var pixels = [UInt8](repeating: gray, count: side * side)
+    let context = pixels.withUnsafeMutableBytes { buffer -> CGContext? in
+        guard let base = buffer.baseAddress else { return nil }
+        return CGContext(data: base, width: side, height: side, bitsPerComponent: 8,
+                         bytesPerRow: side, space: CGColorSpaceCreateDeviceGray(),
+                         bitmapInfo: CGImageAlphaInfo.none.rawValue)
+    }
+    return context!.makeImage()!
+}
+
+private func makeROI(_ rect: NormalizedRect, source: String = "auto",
+                     category: MosaicTargetCategory = .other) -> MosaicROI {
+    MosaicROI(rect: rect, confidence: 1.0, source: source, shape: .rectangle, category: category)
+}
+
+@Test func sceneCutDetectorFlagsLargeLuminanceChange() {
+    var detector = SceneCutDetector(threshold: 0.18)
+    #expect(detector.isSceneCut(makeSolidImage(gray: 0)) == false)  // 最初のフレームは常にfalse
+    #expect(detector.isSceneCut(makeSolidImage(gray: 4)) == false)  // わずかな変化はカットではない
+    #expect(detector.isSceneCut(makeSolidImage(gray: 255)) == true) // 全面が入れ替わればカット
+}
+
+@Test func mergeAddsNewlyDetectedObjectsAndKeepsUndetectedOnes() {
+    let tracked = [makeROI(NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))]
+    let detected = [
+        // 追跡中と重なる（同一対象。少しズレた位置で検出）
+        makeROI(NormalizedRect(x: 0.12, y: 0.12, width: 0.2, height: 0.2)),
+        // 全く別の場所＝新規登場
+        makeROI(NormalizedRect(x: 0.7, y: 0.7, width: 0.2, height: 0.2))
+    ]
+    let merged = VideoTrackingCoordinator.merge(tracked: tracked, detected: detected)
+    #expect(merged.addedCount == 1)
+    #expect(merged.rois.count == 2)
+    // 同一対象は検出結果の位置へ張り直される（ドリフト補正）が、IDは維持される
+    #expect(merged.rois[0].id == tracked[0].id)
+    #expect(merged.rois[0].rect.x == 0.12)
+    #expect(merged.reanchoredIDs.contains(tracked[0].id))
+}
+
+@Test func mergeDoesNotReanchorManualROIs() {
+    let manual = makeROI(NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2), source: "manual")
+    let detected = [makeROI(NormalizedRect(x: 0.15, y: 0.15, width: 0.2, height: 0.2))]
+    let merged = VideoTrackingCoordinator.merge(tracked: [manual], detected: detected)
+    // 手描きROIはユーザーの意図なので検出結果で上書きしない。二重登録もしない。
+    #expect(merged.rois.count == 1)
+    #expect(merged.rois[0].rect.x == 0.1)
+    #expect(merged.addedCount == 0)
+    #expect(merged.reanchoredIDs.isEmpty)
+}
+
+@Test func mergeKeepsTrackedROIWhenDetectorFindsNothing() {
+    let tracked = [makeROI(NormalizedRect(x: 0.1, y: 0.1, width: 0.2, height: 0.2))]
+    let merged = VideoTrackingCoordinator.merge(tracked: tracked, detected: [])
+    // 検出されなくても消さない（消すと検閲漏れになる）
+    #expect(merged.rois.count == 1)
+    #expect(merged.addedCount == 0)
+}
+
+@Test func timeRangesGroupsNearbyFramesAndSplitsDistantOnes() {
+    let ranges = VideoTrackingCoordinator.timeRanges(
+        from: [10, 11, 12, 40, 41], frameRate: 10, gapTolerance: 5
+    )
+    #expect(ranges.count == 2)
+    #expect(abs(ranges[0].lowerBound - 1.0) < 0.001)
+    #expect(abs(ranges[0].upperBound - 1.2) < 0.001)
+    #expect(abs(ranges[1].lowerBound - 4.0) < 0.001)
+}
+
+@Test func lostROIExpandsWhileTrackingIsLost() throws {
+    // 追跡できない（対象が存在しない）状況を作り、見失い中にROIが広がることを確認する。
+    let inputURL = makeTemporaryVideoURL()
+    defer { try? FileManager.default.removeItem(at: inputURL) }
+    try makeSyntheticVideo(at: inputURL)
+
+    // 画面の隅（白い正方形と無関係な位置）を追跡対象にすると追跡は成立せず見失いになる
+    let roi = makeROI(NormalizedRect(x: 0.75, y: 0.05, width: 0.12, height: 0.12))
+    var editState = VideoEditState()
+    editState.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [roi]))
+
+    let options = VideoTrackingCoordinator.Options(
+        autoRedetectEnabled: false,
+        sceneCutRedetectEnabled: false,
+        lostExpansionEnabled: true,
+        lostExpansionPerFrame: 0.01,
+        lostExpansionMax: 0.05
+    )
+    let coordinator = VideoTrackingCoordinator(editState: editState, frameRate: Double(testFPS),
+                                               options: options)
+
+    var widths: [Double] = []
+    var sawLoss = false
+    try VideoFrameReader(url: inputURL).readFrames { index, image, _ in
+        let outcome = try coordinator.rois(forFrame: index, image: image)
+        if !outcome.lostIDs.isEmpty { sawLoss = true }
+        widths.append(outcome.rois.first?.rect.width ?? 0)
+    }
+    if sawLoss {
+        // 見失いが起きたなら、覆う範囲は一度は初期値より広がっている（安全側）。
+        // 最後のフレームで比較しないのは、途中で追跡を取り戻すと拡大量が0へ戻り、
+        // 末尾では初期値と同じ幅になり得るため（実際にフレーキーな失敗として現れた）。
+        #expect(widths.max()! > widths.first!)
+        // 上限を超えて膨らみ続けない
+        #expect(widths.max()! <= 0.12 + 0.05 * 2 + 0.0001)
+    }
+}
+
+@Test func exporterChoosesContainerFromFileExtension() {
+    #expect(VideoMosaicExporter.fileType(for: URL(fileURLWithPath: "/tmp/a.mov")) == .mov)
+    #expect(VideoMosaicExporter.fileType(for: URL(fileURLWithPath: "/tmp/a.MOV")) == .mov)
+    #expect(VideoMosaicExporter.fileType(for: URL(fileURLWithPath: "/tmp/a.mp4")) == .mp4)
+    // 未知の拡張子は従来どおりMP4
+    #expect(VideoMosaicExporter.fileType(for: URL(fileURLWithPath: "/tmp/a.xyz")) == .mp4)
 }
 
 }

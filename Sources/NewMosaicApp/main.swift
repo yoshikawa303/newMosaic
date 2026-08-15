@@ -319,6 +319,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(shortcutMenuItem("exportImage", titleSuffix: "…", target: target))
         fileMenu.addItem(shortcutMenuItem("revealLibrary", target: target))
         fileMenu.addItem(.separator())
+        fileMenu.addItem(shortcutMenuItem("cleanUpPastedIconImports", target: target))
+        fileMenu.addItem(.separator())
 
         let settingsItem = NSMenuItem(title: "設定", action: nil, keyEquivalent: "")
         let settingsMenu = NSMenu(title: "設定")
@@ -551,7 +553,13 @@ private enum CandidateGenerationTaskResult: @unchecked Sendable {
 }
 
 /// ONNX/Vision推論をメインスレッド外で直列実行する。各モデルはワーカー内で再利用する。
+///
+/// **直列化はこのクラスの責務**（v0.0.00136）。従来は呼び出し側が`isGeneratingCandidates`で
+/// 1本に絞っていたため実質直列だったが、動画の自動再検出が書き出しスレッドから同じワーカーを
+/// 使うようになり、静止画の候補生成と同時に走り得るようになった。`lazy var`のモデル生成と
+/// 推論セッションはスレッド安全ではないため、`run(_:)`全体をロックで囲って直列を保証する。
 private final class CandidateGenerationWorker: @unchecked Sendable {
+    private let runLock = NSLock()
     private lazy var animeCensorDetector: AnimeCensorDetector? = try? AnimeCensorDetector()
     private lazy var animePersonDetector: AnimePersonDetector? = try? AnimePersonDetector()
     private lazy var photoCensorDetector: PhotoCensorDetector? = try? PhotoCensorDetector()
@@ -561,6 +569,12 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
     private lazy var faceRegionDetector = FaceRegionDetector()
 
     func run(_ input: CandidateGenerationInput) throws -> CandidateGenerationOutput {
+        runLock.lock()
+        defer { runLock.unlock() }
+        return try runLocked(input)
+    }
+
+    private func runLocked(_ input: CandidateGenerationInput) throws -> CandidateGenerationOutput {
         var detectorFailures: [String] = []
         let domain: ImageDomain
         let domainSourceNote: String
@@ -1410,6 +1424,11 @@ final class MosaicWindowController: NSObject {
         target: nil,
         action: nil
     )
+    /// 詳細設定「動画の自動追随」のコントロール（v0.0.00136）
+    private let videoAutoRedetectCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let videoRedetectIntervalPopUp = NSPopUpButton(frame: .zero, pullsDown: false)
+    private let videoSceneCutCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
+    private let videoLostExpansionCheckbox = NSButton(checkboxWithTitle: "", target: nil, action: nil)
     /// `applyScaledFont(_:size:weight:)` で登録された静的コントロール。テキストサイズ変更時に
     /// このリストを走査してフォントを再適用する。
     private var scaledTextControls: [(control: NSControl, baseSize: CGFloat, weight: NSFont.Weight)] = []
@@ -1476,6 +1495,8 @@ final class MosaicWindowController: NSObject {
                     key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryProcessed)),
         AppShortcut(id: "deleteSelectedLibraryItems", category: "ライブラリ", title: "選択画像を削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(deleteSelectedLibraryItems)),
+        AppShortcut(id: "cleanUpPastedIconImports", category: "ライブラリ", title: "ファイルアイコン画像を整理…",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(cleanUpPastedIconImports)),
         AppShortcut(id: "reloadLibraryFromButton", category: "ライブラリ", title: "ライブラリを更新",
                     key: "", modifiers: [], isRecommended: false, action: #selector(reloadLibraryFromButton)),
         AppShortcut(id: "exportTrainingDataset", category: "ライブラリ", title: "学習用データセットを書き出す",
@@ -4607,6 +4628,99 @@ final class MosaicWindowController: NSObject {
 
     // MARK: - 動画書き出し（V4）
 
+    // MARK: - 動画の自動追随（v0.0.00136〜）
+
+    static let videoAutoRedetectDefaultsKey = "videoAutoRedetectEnabled"
+    static let videoRedetectIntervalDefaultsKey = "videoRedetectIntervalFrames"
+    static let videoSceneCutDefaultsKey = "videoSceneCutRedetectEnabled"
+    static let videoLostExpansionDefaultsKey = "videoLostExpansionEnabled"
+    /// 再検出間隔の選択肢（フレーム）。30fps動画では 10≒0.3秒 / 30≒1秒 / 90≒3秒。
+    static let videoRedetectIntervalChoices = [10, 15, 30, 60, 90]
+
+    /// 既定値ONの設定を読む。未設定（初回起動・旧バージョンからの移行）は`true`にする。
+    /// `AppSettings.bool(forKey:)`は未設定で`false`を返すため、そのままでは
+    /// 「既定ONのつもりの機能が既定OFFで動く」ことになる。
+    static func videoSettingIsEnabled(_ key: String) -> Bool {
+        let settings = AppSettings.shared
+        guard settings.object(forKey: key) != nil else { return true }
+        return settings.bool(forKey: key)
+    }
+
+    /// 現在の設定から動画追随のオプションを組み立てる。
+    /// 既定は全てON（検閲漏れよりも過剰なモザイクを選ぶ方針）。
+    private func currentVideoTrackingOptions() -> VideoTrackingCoordinator.Options {
+        let interval = AppSettings.shared.integer(forKey: Self.videoRedetectIntervalDefaultsKey)
+        return VideoTrackingCoordinator.Options(
+            autoRedetectEnabled: Self.videoSettingIsEnabled(Self.videoAutoRedetectDefaultsKey),
+            redetectIntervalFrames: interval > 0 ? interval : 30,
+            sceneCutRedetectEnabled: Self.videoSettingIsEnabled(Self.videoSceneCutDefaultsKey),
+            lostExpansionEnabled: Self.videoSettingIsEnabled(Self.videoLostExpansionDefaultsKey)
+        )
+    }
+
+    /// 動画フレーム1枚からROIを検出するクロージャを作る。
+    ///
+    /// 静止画の「候補生成」と同じ`CandidateGenerationWorker`・同じ候補カテゴリ絞り込み・
+    /// 同じ形状適用を通すため、動画の自動再検出は静止画の検出精度をそのまま引き継ぐ。
+    /// 学習モードによる候補の補正（`refineCandidates`）はフレーム毎に走らせると
+    /// 学習履歴の重み付けが動画1本で偏るため、動画側では適用しない。
+    private func makeVideoFrameDetector() -> (CGImage) throws -> [MosaicROI] {
+        let worker = candidateGenerationWorker
+        let domainMode = domainModeControl.indexOfSelectedItem
+        let groinRatio = groinPositionSlider.doubleValue
+        let categories = checkedGenerationCategories()
+        let shape = canvas.currentShape
+        return { frame in
+            let output = try worker.run(
+                CandidateGenerationInput(image: frame, domainMode: domainMode, groinPositionRatio: groinRatio)
+            )
+            var rois = output.rois.filter { categories.contains($0.category) }
+            rois = rois.map { roi in
+                var updated = roi
+                updated.shape = shape
+                if shape == .polygon && updated.polygonPoints == nil {
+                    updated.polygonPoints = MosaicROI.defaultPolygonPoints
+                }
+                if updated.roiGroupName == nil {
+                    updated.roiGroupName = updated.category.displayName
+                }
+                return updated
+            }
+            return DetectedROIRefiner.expandGenitalROIsToCoverShape(rois)
+        }
+    }
+
+    /// 書き出し後に「要確認の時間帯」を組み立てる（見失い区間・自動追加区間）。
+    /// 書き出しスレッド（非メイン）から呼ぶため`nonisolated`。時刻整形も
+    /// `VideoPreviewView.timeText`（MainActor隔離）ではなくここで完結させる。
+    nonisolated private static func trackingReviewSummary(
+        for coordinator: VideoTrackingCoordinator
+    ) -> String? {
+        func timeText(_ seconds: Double) -> String {
+            let total = Int(seconds.rounded())
+            return String(format: "%d:%02d", total / 60, total % 60)
+        }
+        func format(_ ranges: [ClosedRange<Double>]) -> String {
+            ranges.prefix(8)
+                .map { "\(timeText($0.lowerBound))〜\(timeText($0.upperBound))" }
+                .joined(separator: "、")
+                + (ranges.count > 8 ? " ほか\(ranges.count - 8)件" : "")
+        }
+        var lines: [String] = []
+        let lost = coordinator.lostTimeRanges()
+        if !lost.isEmpty {
+            lines.append("追跡を見失った時間帯（要確認）: \(format(lost))")
+        }
+        let added = coordinator.addedTimeRanges()
+        if !added.isEmpty {
+            lines.append("自動再検出で対象を追加した時間帯: \(format(added))")
+        }
+        if !coordinator.sceneCutFrameIndices.isEmpty {
+            lines.append("シーンカット検出: \(coordinator.sceneCutFrameIndices.count)箇所（その都度検出をやり直しました）")
+        }
+        return lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
     /// 動画へモザイクを適用して書き出す。キーフレームのROIを起点に、その間のフレームは
     /// 追跡で追随させる（ROI移動追随マスク）。進捗シートで経過表示・キャンセルができる。
     @objc private func exportVideoWithMosaic() {
@@ -4620,9 +4734,11 @@ final class MosaicWindowController: NSObject {
         }
 
         let panel = NSSavePanel()
-        panel.allowedContentTypes = [.mpeg4Movie]
+        // MP4に加えMOVでも書き出せるようにする（読み込みはMP4/MOV両対応なのに
+        // 書き出しがMP4のみで非対称だった。v0.0.00136）
+        panel.allowedContentTypes = [.mpeg4Movie, .quickTimeMovie]
         panel.nameFieldStringValue = (item.sourceName as NSString).deletingPathExtension + "_mosaic.mp4"
-        panel.message = "モザイクを適用した動画の保存先を選択してください"
+        panel.message = "モザイクを適用した動画の保存先を選択してください（MP4 / MOV）"
         guard panel.runModal() == .OK, let outputURL = panel.url else { return }
 
         let inputURL = libraryEngine.originalURL(for: item)
@@ -4631,17 +4747,27 @@ final class MosaicWindowController: NSObject {
         let editState = currentVideoEditState
         let frameRate = max(1, info.frameRate)
         let cancellation = VideoMosaicExporter.CancellationFlag()
+        let options = currentVideoTrackingOptions()
+        // 検出器は自動再検出（またはシーンカット再検出）が有効なときだけ用意する。
+        // 生成コスト自体は小さいが、無効時に誤って呼ばれないよう nil を渡す。
+        let detector: ((CGImage) throws -> [MosaicROI])? =
+            (options.autoRedetectEnabled || options.sceneCutRedetectEnabled)
+            ? makeVideoFrameDetector()
+            : nil
 
         let sheet = makeVideoExportProgressSheet(cancellation: cancellation)
         view.window?.beginSheet(sheet, completionHandler: nil)
         videoExportSheet = sheet
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            // フレーム番号→ROIの解決。キーフレームでは保存済みROIで追跡をやり直し、
-            // 間のフレームは追跡結果を使う（キーフレームが「追跡の起点」になる）。
-            let tracker = VideoROITracker()
-            var activeKeyframeTime: Double = .infinity
-            var currentROIs: [MosaicROI] = []
+            // フレーム番号→ROIの解決は`VideoTrackingCoordinator`へ集約する。
+            // キーフレーム起点の追跡に加え、定期的な自動再検出・シーンカット検出・
+            // 見失い時の安全側膨張までを一箇所で扱う（v0.0.00136）。
+            let coordinator = VideoTrackingCoordinator(
+                editState: editState,
+                frameRate: frameRate,
+                options: options
+            )
 
             let exporter = VideoMosaicExporter(
                 style: style,
@@ -4653,17 +4779,7 @@ final class MosaicWindowController: NSObject {
                     from: inputURL,
                     to: outputURL,
                     roiProvider: { index, frame in
-                        let timeSeconds = Double(index) / frameRate
-                        guard let keyframe = editState.keyframe(at: timeSeconds) else { return [] }
-                        if keyframe.timeSeconds != activeKeyframeTime {
-                            // 新しいキーフレーム区間に入った：そのROIで追跡を開始し直す
-                            activeKeyframeTime = keyframe.timeSeconds
-                            currentROIs = keyframe.rois
-                            try tracker.start(with: keyframe.rois, on: frame)
-                            return currentROIs
-                        }
-                        currentROIs = tracker.track(next: frame)
-                        return currentROIs
+                        try coordinator.rois(forFrame: index, image: frame, detector: detector).rois
                     },
                     includeAudio: true,
                     cancellation: cancellation,
@@ -4674,12 +4790,15 @@ final class MosaicWindowController: NSObject {
                         }
                     }
                 )
+                let summary = Self.trackingReviewSummary(for: coordinator)
                 DispatchQueue.main.async { [weak self] in
-                    self?.finishVideoExport(outputURL: outputURL, item: item, error: nil)
+                    self?.finishVideoExport(outputURL: outputURL, item: item, error: nil,
+                                            trackingSummary: summary)
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in
-                    self?.finishVideoExport(outputURL: outputURL, item: item, error: error)
+                    self?.finishVideoExport(outputURL: outputURL, item: item, error: error,
+                                            trackingSummary: nil)
                 }
             }
         }
@@ -4727,7 +4846,15 @@ final class MosaicWindowController: NSObject {
     }
 
     /// 書き出し完了/失敗/キャンセルの後始末。成功時はライブラリへ加工後動画として登録する。
-    private func finishVideoExport(outputURL: URL, item: MosaicLibraryItem, error: Error?) {
+    /// - Parameter trackingSummary: 追跡の見失い区間・自動追加区間のまとめ（v0.0.00136）。
+    ///   書き出しは成功していても、追跡を見失った区間はモザイクがズレている可能性があるため、
+    ///   「どの時間帯を目視確認すべきか」をここで必ず提示する（黙って完了にしない）。
+    private func finishVideoExport(
+        outputURL: URL,
+        item: MosaicLibraryItem,
+        error: Error?,
+        trackingSummary: String? = nil
+    ) {
         if let sheet = videoExportSheet {
             view.window?.endSheet(sheet)
             sheet.orderOut(nil)
@@ -4747,6 +4874,17 @@ final class MosaicWindowController: NSObject {
         AppLog.export.info("Video export finished")
         updateStatus("動画を書き出しました: \(outputURL.lastPathComponent)")
         reloadLibrary()
+
+        guard let trackingSummary else { return }
+        AppLog.export.info("Video export tracking summary: \(trackingSummary, privacy: .public)")
+        let alert = NSAlert()
+        alert.messageText = "書き出しは完了しました（要確認の時間帯があります）"
+        alert.informativeText = trackingSummary
+            + "\n\n見失った区間はモザイクがズレている可能性があります。"
+            + "該当時刻にキーフレームを追加して修正すると精度が上がります。"
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "OK")
+        alert.runModal()
     }
 
     // MARK: - 動画編集タイムライン（V3）
@@ -4977,26 +5115,34 @@ final class MosaicWindowController: NSObject {
         }
         let url = libraryEngine.originalURL(for: item)
         let frameRate = max(1, info.frameRate)
+        let editState = currentVideoEditState
+        let options = currentVideoTrackingOptions()
+        let detector: ((CGImage) throws -> [MosaicROI])? =
+            (options.autoRedetectEnabled || options.sceneCutRedetectEnabled)
+            ? makeVideoFrameDetector()
+            : nil
         let startIndex = Int((keyframe.timeSeconds * frameRate).rounded())
         let endIndex = Int((targetTime * frameRate).rounded())
         updateStatus("追跡中… \(VideoPreviewView.timeText(keyframe.timeSeconds)) → \(VideoPreviewView.timeText(targetTime))")
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            let tracker = VideoROITracker()
+            // 書き出しと同じ`VideoTrackingCoordinator`を使う。プレビューと書き出しで
+            // 挙動が食い違うと「プレビューでは追随したのに書き出すとズレる」ことになるため、
+            // 自動再検出・シーンカット検出・見失い時の膨張まで同じ設定で通す（v0.0.00136）。
+            let coordinator = VideoTrackingCoordinator(
+                editState: editState,
+                frameRate: frameRate,
+                options: options
+            )
             var trackedROIs = keyframe.rois
             var lostIDs: Set<UUID> = []
-            var started = false
             do {
                 try VideoFrameReader(url: url).readFrames(shouldContinue: { true }) { index, image, _ in
                     guard index >= startIndex else { return }
                     guard index <= endIndex else { throw TrackingPreviewStop.reachedTarget }
-                    if !started {
-                        try tracker.start(with: keyframe.rois, on: image)
-                        started = true
-                        return
-                    }
-                    trackedROIs = tracker.track(next: image)
-                    lostIDs = tracker.lostIDs
+                    let outcome = try coordinator.rois(forFrame: index, image: image, detector: detector)
+                    trackedROIs = outcome.rois
+                    lostIDs = outcome.lostIDs
                 }
             } catch is TrackingPreviewStop {
                 // 目標フレームへ到達したので正常終了
@@ -6267,6 +6413,81 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    /// v0.0.00135以前の貼り付け不具合で「ファイルのアイコン画像」として取り込まれてしまった
+    /// 項目を探し、確認のうえまとめて削除する（残務対応 v0.0.00136）。
+    ///
+    /// 削除は取り消せないため、**候補の提示と確認を必ず挟む**。判定（`PastedIconImageDetector`）は
+    /// 名前・寸法での事前絞り込み → 外周の一様性チェックの2段で、全件デコードは避ける。
+    @objc private func cleanUpPastedIconImports() {
+        let allItems: [MosaicLibraryItem]
+        do {
+            allItems = try libraryEngine.loadItems()
+        } catch {
+            showError(error)
+            return
+        }
+        let items = allItems.filter { item in
+            !item.isVideo && PastedIconImageDetector.isCandidateBySize(
+                sourceName: item.sourceName,
+                pixelWidth: item.imagePixelWidth,
+                pixelHeight: item.imagePixelHeight
+            )
+        }
+        let suspects = items.filter { item in
+            guard let loaded = try? imageLoader.loadImage(from: libraryEngine.originalURL(for: item)) else {
+                return false
+            }
+            return PastedIconImageDetector.hasUniformBorder(loaded.cgImage)
+        }
+        guard !suspects.isEmpty else {
+            updateStatus("ファイルアイコンとして取り込まれた画像は見つかりませんでした")
+            return
+        }
+
+        let names = suspects.prefix(10).map(\.sourceName).joined(separator: "\n")
+        let more = suspects.count > 10 ? "\n…ほか\(suspects.count - 10)件" : ""
+        let alert = NSAlert()
+        alert.alertStyle = .warning
+        alert.messageText = "ファイルアイコンとして取り込まれた疑いのある画像が\(suspects.count)件あります"
+        alert.informativeText = """
+        v0.0.00135以前は、Finderでコピーしたファイルを貼り付けると実体ではなく\
+        ファイルのアイコン画像が取り込まれていました。その残りと思われる項目です。
+
+        \(names)\(more)
+
+        削除するとライブラリから完全に消えます。この操作は取り消せません。\
+        判定は推定のため、必要な画像が含まれていないかご確認ください。
+        """
+        alert.addButton(withTitle: "削除")
+        alert.addButton(withTitle: "キャンセル")
+        guard alert.runModal() == .alertFirstButtonReturn else {
+            updateStatus("整理をキャンセルしました")
+            return
+        }
+
+        do {
+            try libraryEngine.deleteItems(ids: suspects.map(\.id))
+            let deletedIDs = Set(suspects.map(\.id))
+            for id in deletedIDs {
+                imageEditStates[id] = nil
+                imageEditStateOrder.removeAll { $0 == id }
+                thumbnailCache[id] = nil
+            }
+            if let current = currentLibraryItem, deletedIDs.contains(current.id) {
+                discardedEditStateID = nil
+                currentLibraryItem = nil
+                loadedImage = nil
+                renderedImage = nil
+                canvas.clearImage()
+                canvas.rois = []
+            }
+            reloadLibrary()
+            updateStatus("ファイルアイコンとして取り込まれた画像を\(suspects.count)件削除しました")
+        } catch {
+            showError(error)
+        }
+    }
+
     @objc private func deleteSelectedLibraryItems() {
         let items = selectedLibraryItems()
         guard !items.isEmpty else {
@@ -7368,7 +7589,9 @@ extension MosaicWindowController {
         applyScaledFont(numpadButton, size: 12)
         let numpadRow = inspectorRow("機能割当", control: numpadButton)
 
-        let content = NSStackView(views: [iconSizeRow, textSizeRow, numpadRow, settingsPathRow])
+        let videoRows = makeVideoTrackingSettingRows()
+
+        let content = NSStackView(views: [iconSizeRow, textSizeRow, numpadRow] + videoRows + [settingsPathRow])
         content.orientation = .vertical
         content.alignment = .leading
         content.spacing = 14
@@ -7406,6 +7629,76 @@ extension MosaicWindowController {
     @objc private func iconSizeChanged() {
         AppSettings.shared.set(iconSizeControl.selectedSegment, forKey: Self.iconSizeDefaultsKey)
         applyIconSizeToAllToolbarButtons()
+    }
+
+    // MARK: - 詳細設定: 動画の自動追随（v0.0.00136）
+
+    /// 動画の自動追随に関する設定行。既定は全てONで、検閲漏れよりも
+    /// 過剰なモザイク・書き出し時間の増加を選ぶ側に倒してある。
+    private func makeVideoTrackingSettingRows() -> [NSView] {
+        let header = NSTextField(labelWithString: "動画の自動追随")
+        applyScaledFont(header, size: 12)
+        header.textColor = .secondaryLabelColor
+
+        videoAutoRedetectCheckbox.title = "一定間隔で検出をやり直す（新規登場の対象を拾い、追跡ズレを補正）"
+        videoAutoRedetectCheckbox.target = self
+        videoAutoRedetectCheckbox.action = #selector(videoTrackingSettingChanged)
+        videoAutoRedetectCheckbox.state =
+            Self.videoSettingIsEnabled(Self.videoAutoRedetectDefaultsKey) ? .on : .off
+        videoAutoRedetectCheckbox.toolTip =
+            "OFFにするとキーフレーム起点の追跡のみになります（速いが、途中から映り込んだ対象は検出されません）"
+        applyScaledFont(videoAutoRedetectCheckbox, size: 12)
+
+        videoRedetectIntervalPopUp.removeAllItems()
+        for interval in Self.videoRedetectIntervalChoices {
+            videoRedetectIntervalPopUp.addItem(withTitle: "\(interval) フレームごと")
+        }
+        let savedInterval = AppSettings.shared.integer(forKey: Self.videoRedetectIntervalDefaultsKey)
+        let intervalIndex = Self.videoRedetectIntervalChoices.firstIndex(of: savedInterval) ?? 2
+        videoRedetectIntervalPopUp.selectItem(at: intervalIndex)
+        videoRedetectIntervalPopUp.target = self
+        videoRedetectIntervalPopUp.action = #selector(videoTrackingSettingChanged)
+        videoRedetectIntervalPopUp.toolTip = "短いほど精度が上がり、書き出し時間は延びます（30fps動画で30＝約1秒ごと）"
+        applyScaledFont(videoRedetectIntervalPopUp, size: 12)
+
+        videoSceneCutCheckbox.title = "シーンカットを検出して、その場で検出をやり直す"
+        videoSceneCutCheckbox.target = self
+        videoSceneCutCheckbox.action = #selector(videoTrackingSettingChanged)
+        videoSceneCutCheckbox.state =
+            Self.videoSettingIsEnabled(Self.videoSceneCutDefaultsKey) ? .on : .off
+        videoSceneCutCheckbox.toolTip = "カットを跨ぐと追跡は必ず外れるため、切り替わりを検出して追跡を張り直します"
+        applyScaledFont(videoSceneCutCheckbox, size: 12)
+
+        videoLostExpansionCheckbox.title = "追跡を見失ったら、覆う範囲を少しずつ広げる（安全側）"
+        videoLostExpansionCheckbox.target = self
+        videoLostExpansionCheckbox.action = #selector(videoTrackingSettingChanged)
+        videoLostExpansionCheckbox.state =
+            Self.videoSettingIsEnabled(Self.videoLostExpansionDefaultsKey) ? .on : .off
+        videoLostExpansionCheckbox.toolTip =
+            "見失うと対象がどこへ動いたか分からないため、時間の経過に応じて覆う範囲を広げます（上限あり）"
+        applyScaledFont(videoLostExpansionCheckbox, size: 12)
+
+        return [
+            header,
+            videoAutoRedetectCheckbox,
+            inspectorRow("再検出の間隔", control: videoRedetectIntervalPopUp),
+            videoSceneCutCheckbox,
+            videoLostExpansionCheckbox
+        ]
+    }
+
+    @objc private func videoTrackingSettingChanged() {
+        let settings = AppSettings.shared
+        settings.set(videoAutoRedetectCheckbox.state == .on, forKey: Self.videoAutoRedetectDefaultsKey)
+        settings.set(videoSceneCutCheckbox.state == .on, forKey: Self.videoSceneCutDefaultsKey)
+        settings.set(videoLostExpansionCheckbox.state == .on, forKey: Self.videoLostExpansionDefaultsKey)
+        let index = videoRedetectIntervalPopUp.indexOfSelectedItem
+        if Self.videoRedetectIntervalChoices.indices.contains(index) {
+            settings.set(Self.videoRedetectIntervalChoices[index],
+                         forKey: Self.videoRedetectIntervalDefaultsKey)
+        }
+        videoRedetectIntervalPopUp.isEnabled = videoAutoRedetectCheckbox.state == .on
+        updateStatus("動画の自動追随設定を更新しました（次回の追跡プレビュー・書き出しから適用）")
     }
 }
 

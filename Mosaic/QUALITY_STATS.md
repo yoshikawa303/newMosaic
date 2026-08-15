@@ -36,7 +36,8 @@
 
 ## テスト状況
 
-- Swift Testing: 152件 PASS（v0.0.00134。ボーダーの「並行揺れ」をランダムOFFでも有効化し、回帰テスト `borderWobbleTiltsStripesWithoutRandom` を追加）
+- Swift Testing: 161件 PASS（v0.0.00136。動画の自動追随 V5。`VideoTrackingCoordinator`（自動再検出の統合規則3件・見失い時の安全側膨張・見失い区間の時間範囲まとめ）、`SceneCutDetector`、書き出しコンテナの拡張子判定、`PastedIconImageDetector` 2件の計9件を追加。あわせて`readerReportsCorrectFrameCountAndSize`のフレーキー失敗（全スイート同時実行時にH.264エンコーダの受け入れ待ちが10秒を超える）を、合成動画ヘルパーのデッドラインを本体と同じ30秒へ揃えて解消）
+- 旧: 152件 PASS（v0.0.00134。ボーダーの「並行揺れ」をランダムOFFでも有効化し、回帰テスト `borderWobbleTiltsStripesWithoutRandom` を追加）
 - 旧: 151件 PASS（v0.0.00132。ボーダー縞のROI回転追従と回帰テスト `borderStripesFollowROIRotation` を追加）
 - 旧: 150件 PASS（v0.0.00131。samShapeマスクの安全側膨張と回帰テスト `samMaskEdgeDilationCoversObjectEdge` を追加）
 - 旧: 149件 PASS（v0.0.00129。実写Vision人物マスクの二重反転を修正し、向き非依存のSAMマスクとのIoU比較による回帰テスト `visionPersonMaskIsNotVerticallyFlipped` を追加）

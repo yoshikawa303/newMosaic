@@ -107,6 +107,17 @@ private final class AudioPassthrough {
 }
 
 public final class VideoMosaicExporter {
+    /// 出力ファイルの拡張子から書き出しコンテナを決める。
+    /// 読み込みはMP4/MOV両対応なのに書き出しがMP4固定という非対称を解消するために追加した
+    /// （v0.0.00136）。未知の拡張子はMP4として扱う（従来の挙動を既定に保つ）。
+    static func fileType(for url: URL) -> AVFileType {
+        switch url.pathExtension.lowercased() {
+        case "mov", "qt": return .mov
+        case "m4v": return .m4v
+        default: return .mp4
+        }
+    }
+
     /// 別スレッドから書き出しを中断させるためのフラグ。`export`実行中に`isCancelled`を
     /// `true`にすると、次のフレーム処理タイミングで中断し、出力ファイルは削除される。
     public final class CancellationFlag: @unchecked Sendable {
@@ -176,7 +187,7 @@ public final class VideoMosaicExporter {
 
         let writer: AVAssetWriter
         do {
-            writer = try AVAssetWriter(outputURL: outputURL, fileType: .mp4)
+            writer = try AVAssetWriter(outputURL: outputURL, fileType: Self.fileType(for: outputURL))
         } catch {
             throw VideoMosaicExporterError.writerCreationFailed(error.localizedDescription)
         }
