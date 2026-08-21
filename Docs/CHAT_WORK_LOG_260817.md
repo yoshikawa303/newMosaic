@@ -91,3 +91,18 @@
 - 「動画自動モザイク処理」を追加。現在の候補カテゴリ/検出設定で動画全体を一定間隔で解析し、ROIが検出された時刻だけキーフレームを作成。
 - 回帰テスト `videoEditStateSelectsStrictPreviousKeyframeForTracking` を追加。
 - 検証: `swift build` PASS、`swift test --filter videoEditStateSelectsStrictPreviousKeyframeForTracking` PASS、`swift test` 163件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00141` / `141` を確認、`open -n dist/newMosaic.app` で起動確認。
+
+### 2026-08-22 00:28 JST - Codex GPT-5 - 種別: 依頼内容 - ライブラリサイドパネル非表示
+
+```text
+☆バグ：ライブラリサイドツールパネルがなくなった。設定を初期化しても表示されず。※現在の表示は添付画像参照
+```
+
+### 2026-08-22 00:28 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00142 サイドパネル高さ復元修正
+
+- 作業AIモデル: Codex GPT-5（AppKitサイドパネル復元ロジックの原因調査、修正、文書同期を同モデルで実施。実行中モデル自体は切替不可）
+- ライブラリサイドパネルが消えたように見える原因を、動画編集パネル追加後にサイド内高さ配分が現在のパネル数へ更新されず、先頭のライブラリが0px近くまで潰れるレイアウト復元回帰と判断。
+- `restoreSplitPositions()` の結果を、幅復元と左右ペイン内高さ復元に分離。幅だけ復元できた場合でも、高さが復元できなかった側は現在のパネル構成に合わせて再配分するよう修正。
+- パネルを左右へ移動した直後も、移動元/移動先のサイド内高さを再配分し、ライブラリ/レイヤ/動画編集/インスペクタが見える状態を維持するよう修正。
+- 追加確認で、実設定に `Layout.rightPaneHeights = [0, 0, 819]` が残っていることを確認。潰れた高さを保存しない保険と、起動後1ターン遅延での高さ再確認を追加。
+- 検証: `swift build` PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00142` / `142` を確認、`Layout.rightPaneHeights = [0, 0, 819]` を持つ設定から再起動して `[280, 119, 420]` へ復旧することを確認、スクリーンショット `/tmp/newmosaic-v00142-layout-single.png` でライブラリパネル表示を目視確認。

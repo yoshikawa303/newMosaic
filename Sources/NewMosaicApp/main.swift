@@ -1600,6 +1600,11 @@ final class MosaicWindowController: NSObject {
     private enum SidePanelKind: String, CaseIterable {
         case library, layers, video, inspector
     }
+    private struct SplitRestoreResult {
+        var any = false
+        var leftPaneHeights = false
+        var rightPaneHeights = false
+    }
     private var sidePanels: [SidePanelKind: NSView] = [:]
     private var isLoadingMosaicStyleControls = false
     private var defaultMosaicStyle = MosaicStyle()
@@ -2128,6 +2133,8 @@ final class MosaicWindowController: NSObject {
         }()
         AppSettings.shared.set(side, forKey: "Layout.panelSide.\(kind.rawValue)")
         applyPanelAssignments()
+        rebalancePanelHeights(in: currentSide == "left" ? leftPaneSplitView : rightPaneSplitView)
+        rebalancePanelHeights(in: side == "left" ? leftPaneSplitView : rightPaneSplitView)
         if let inheritedWidth {
             applyPaneWidth(inheritedWidth, side: side)
         }
@@ -2224,6 +2231,54 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    private func kind(forPanel panel: NSView) -> SidePanelKind? {
+        sidePanels.first { $0.value === panel }?.key
+    }
+
+    private func defaultHeightWeight(for panel: NSView) -> CGFloat {
+        switch kind(forPanel: panel) {
+        case .library: return 1.15
+        case .layers: return 0.95
+        case .video: return 1.10
+        case .inspector: return 1.25
+        case .none: return 1.0
+        }
+    }
+
+    /// サイド内のパネル数が増減した後に、現在の構成へ合わせて高さを再配分する。
+    ///
+    /// 幅だけ復元できた場合や、動画編集パネル追加前の2枚構成高さが残っている場合、
+    /// NSSplitViewが先頭パネル（ライブラリ）を0px近くまで潰すことがある。保存高さが
+    /// 現在のパネル数と合わないときは、ライブラリを含む全パネルが見える既定配分へ戻す。
+    private func rebalancePanelHeights(in pane: NSSplitView?) {
+        guard let pane, !pane.isHidden, pane.arrangedSubviews.count > 1 else { return }
+        pane.layoutSubtreeIfNeeded()
+        let dividerTotal = pane.dividerThickness * CGFloat(pane.arrangedSubviews.count - 1)
+        let available = pane.bounds.height - dividerTotal
+        guard available > CGFloat(pane.arrangedSubviews.count) * 40 else { return }
+
+        let weights = pane.arrangedSubviews.map(defaultHeightWeight(for:))
+        let totalWeight = max(0.01, weights.reduce(0, +))
+        var heights = zip(pane.arrangedSubviews, weights).map { panel, weight -> CGFloat in
+            let weighted = available * weight / totalWeight
+            return max(80, min(weighted, minimumHeight(forPanel: panel)))
+        }
+        let currentTotal = heights.reduce(0, +)
+        if currentTotal > available {
+            let scale = available / currentTotal
+            heights = heights.map { max(60, $0 * scale) }
+        } else if let last = heights.indices.last {
+            heights[last] += available - currentTotal
+        }
+
+        var position: CGFloat = 0
+        for (index, height) in heights.dropLast().enumerated() {
+            position += height
+            pane.setPosition(position, ofDividerAt: index)
+            position += pane.dividerThickness
+        }
+    }
+
     /// 保存された配置（Layout.panelSide.*）に従って各ウィンドウを左右のサイドパネルへ配置する。
     /// 空になったサイドパネルは非表示にする（最小幅制約も無効化して幅0で畳む）。
     private func applyPanelAssignments() {
@@ -2311,19 +2366,15 @@ final class MosaicWindowController: NSObject {
         // 右ペイン幅の既定化（工場既定レイアウト）は、右ペイン「内部」のライブラリ/レイヤ/
         // インスペクタの高さ配分（下記、ウィンドウの縦幅に依存）とは独立した話のため、
         // 縦幅が足りない場合に早期returnするガードの影響を受けないようここで確定させる。
-        if !restored && !rightPane.isHidden {
+        if !restored.any && !rightPane.isHidden {
             setMainSplitRightPaneWidth(libraryTwoColumnPaneWidth(), mainSplit: mainSplit, rightPane: rightPane)
         }
 
-        if !restored {
-            let total = rightPane.bounds.height
-            if total > 520 {
-                let divider = rightPane.dividerThickness
-                let libraryHeight = max(160, min(230, total * 0.32))
-                let layerHeight = max(170, min(230, total * 0.30))
-                rightPane.setPosition(libraryHeight, ofDividerAt: 0)
-                rightPane.setPosition(libraryHeight + divider + layerHeight, ofDividerAt: 1)
-            }
+        if !restored.leftPaneHeights {
+            rebalancePanelHeights(in: leftPane)
+        }
+        if !restored.rightPaneHeights {
+            rebalancePanelHeights(in: rightPane)
         }
 
         // 起動直後の最終保険: ここまでの復元・既定化の後に走るレイアウト解決
@@ -2332,6 +2383,7 @@ final class MosaicWindowController: NSObject {
         // 1ターン遅らせて再確認し、狭ければ既定幅へ戻す。
         DispatchQueue.main.async { [weak self] in
             self?.enforceSidePaneMinimumWidths()
+            self?.enforceSidePanelMinimumHeights()
         }
     }
 
@@ -2354,6 +2406,26 @@ final class MosaicWindowController: NSObject {
         }
     }
 
+    /// サイド内でいずれかのパネルが見えない高さまで潰れていたら再配分する。
+    ///
+    /// 起動直後のNSSplitView通知で `[0, 0, 残り]` のような過渡的高さが保存済みに
+    /// なっている環境を復旧する保険。ライブラリパネル消失報告の実設定でこの形を確認した。
+    private func enforceSidePanelMinimumHeights() {
+        guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView else { return }
+        let wasRestoring = isRestoringSplitPositions
+        isRestoringSplitPositions = true
+        defer { isRestoringSplitPositions = wasRestoring }
+        for pane in [leftPane, rightPane] where !pane.isHidden && pane.arrangedSubviews.count > 1 {
+            pane.layoutSubtreeIfNeeded()
+            let hasCollapsedPanel = pane.arrangedSubviews.contains { panel in
+                panel.frame.height < min(80, minimumHeight(forPanel: panel))
+            }
+            if hasCollapsedPanel {
+                rebalancePanelHeights(in: pane)
+            }
+        }
+    }
+
     /// 終了時などに現在の分割位置を明示的に保存する（リサイズ通知経由の保存に依存しない確実な保存）。
     func saveSplitPositionsNow() {
         guard let leftPane = leftPaneSplitView, let rightPane = rightPaneSplitView else { return }
@@ -2367,17 +2439,21 @@ final class MosaicWindowController: NSObject {
         }
         for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
             guard !pane.isHidden, pane.bounds.height > 0, !pane.arrangedSubviews.isEmpty else { continue }
-            settings.set(pane.arrangedSubviews.map { Double($0.frame.height) }, forKey: key)
+            let heights = pane.arrangedSubviews.map(\.frame.height)
+            guard zip(pane.arrangedSubviews, heights).allSatisfy({ panel, height in
+                height >= min(80, minimumHeight(forPanel: panel))
+            }) else { continue }
+            settings.set(heights.map(Double.init), forKey: key)
         }
     }
 
     /// 保存済みの分割位置（左右サイドパネル幅・各ウィンドウの高さ）を復元する。保存があればtrue。
-    private func restoreSplitPositions() -> Bool {
+    private func restoreSplitPositions() -> SplitRestoreResult {
         let settings = AppSettings.shared
         guard let rightPane = rightPaneSplitView,
               let leftPane = leftPaneSplitView,
-              let mainSplit = mainSplitView else { return false }
-        var restored = false
+              let mainSplit = mainSplitView else { return SplitRestoreResult() }
+        var restored = SplitRestoreResult()
         let wasRestoring = isRestoringSplitPositions
         isRestoringSplitPositions = true
         defer { isRestoringSplitPositions = wasRestoring }
@@ -2386,12 +2462,12 @@ final class MosaicWindowController: NSObject {
         if !leftPane.isHidden,
            let leftWidth = settings.object(forKey: "Layout.leftPaneWidth") as? Double, leftWidth > 50 {
             mainSplit.setPosition(leftWidth, ofDividerAt: 0)
-            restored = true
+            restored.any = true
         }
         if !rightPane.isHidden,
            let rightWidth = settings.object(forKey: "Layout.rightPaneWidth") as? Double, rightWidth > 50 {
             setMainSplitRightPaneWidth(rightWidth, mainSplit: mainSplit, rightPane: rightPane)
-            restored = true
+            restored.any = true
         }
 
         // 各サイドパネル内: 保存された高さ配列から分割位置を復元する
@@ -2407,7 +2483,12 @@ final class MosaicWindowController: NSObject {
                 pane.setPosition(position, ofDividerAt: index)
                 position += pane.dividerThickness
             }
-            restored = true
+            restored.any = true
+            if pane === leftPane {
+                restored.leftPaneHeights = true
+            } else {
+                restored.rightPaneHeights = true
+            }
         }
         return restored
     }
@@ -8850,7 +8931,11 @@ extension MosaicWindowController: NSSplitViewDelegate {
         }
         for (pane, key) in [(leftPane, "Layout.leftPaneHeights"), (rightPane, "Layout.rightPaneHeights")] {
             guard !pane.isHidden, pane.bounds.height > 0, !pane.arrangedSubviews.isEmpty else { continue }
-            settings.set(pane.arrangedSubviews.map { Double($0.frame.height) }, forKey: key)
+            let heights = pane.arrangedSubviews.map(\.frame.height)
+            guard zip(pane.arrangedSubviews, heights).allSatisfy({ panel, height in
+                height >= min(80, minimumHeight(forPanel: panel))
+            }) else { continue }
+            settings.set(heights.map(Double.init), forKey: key)
         }
     }
 }
