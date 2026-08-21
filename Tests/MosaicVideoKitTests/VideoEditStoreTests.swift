@@ -62,7 +62,7 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(store.load(for: itemID) == nil)
 
     var state = VideoEditState(keyframeInterval: 15, maskEngineRawValue: "regionForeground")
-    state.upsertKeyframe(VideoKeyframe(timeSeconds: 2.5, rois: [makeROI(x: 0.3)]))
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 2.5, rois: [makeROI(x: 0.3)], trackingStatus: .tracked))
     try store.save(state, for: itemID)
 
     let loaded = try #require(store.load(for: itemID))
@@ -70,6 +70,7 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(loaded.maskEngineRawValue == "regionForeground")
     #expect(loaded.keyframes.count == 1)
     #expect(loaded.keyframes[0].rois[0].category == .nipple)
+    #expect(loaded.keyframes[0].trackingStatus == .tracked)
 
     store.delete(for: itemID)
     #expect(store.load(for: itemID) == nil)
@@ -82,6 +83,15 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(state.keyframes.isEmpty)
     #expect(state.keyframeInterval == 30)
     #expect(state.maskEngineRawValue == nil)
+}
+
+@Test func videoKeyframeDecodesMissingTrackingStatusAsManual() throws {
+    let roi = makeROI(x: 0.4)
+    let data = try JSONEncoder().encode(VideoKeyframe(timeSeconds: 1, rois: [roi]))
+    let raw = String(decoding: data, as: UTF8.self)
+        .replacingOccurrences(of: #","trackingStatus":"manual""#, with: "")
+    let decoded = try JSONDecoder().decode(VideoKeyframe.self, from: Data(raw.utf8))
+    #expect(decoded.trackingStatus == .manual)
 }
 
 @Test func videoThumbnailProviderIdentifiesVideoExtensions() {

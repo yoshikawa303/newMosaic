@@ -445,6 +445,125 @@ private final class SquareIconButton: NSButton {
     }
 }
 
+@MainActor
+private final class WrappingToolbarView: NSView {
+    private let groups: [[NSView]]
+    private let separators: [NSBox]
+    private let horizontalSpacing: CGFloat = 4
+    private let verticalSpacing: CGFloat = 4
+    private let separatorWidth: CGFloat = 1
+    private let separatorHeight: CGFloat = 22
+
+    init(groups: [[NSView]]) {
+        self.groups = groups
+        self.separators = (0..<max(0, groups.count - 1)).map { _ in
+            let separator = NSBox()
+            separator.boxType = .separator
+            separator.translatesAutoresizingMaskIntoConstraints = false
+            return separator
+        }
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        for (index, group) in groups.enumerated() {
+            if index > 0 { addSubview(separators[index - 1]) }
+            for view in group {
+                view.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(view)
+            }
+        }
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        NSSize(width: NSView.noIntrinsicMetric, height: measuredHeight(for: max(1, bounds.width)))
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        invalidateIntrinsicContentSize()
+    }
+
+    override func layout() {
+        super.layout()
+        layoutGroups(applyFrames: true)
+    }
+
+    private func measuredHeight(for width: CGFloat) -> CGFloat {
+        let result = layoutGroups(maxWidth: width, applyFrames: false)
+        return result.height
+    }
+
+    @discardableResult
+    private func layoutGroups(maxWidth: CGFloat? = nil, applyFrames: Bool) -> NSSize {
+        let availableWidth = max(1, maxWidth ?? bounds.width)
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for (index, group) in groups.enumerated() {
+            let groupSize = size(for: group)
+            let separatorNeeded = index > 0 && x > 0
+            let separatorSpace = separatorNeeded ? separatorWidth + horizontalSpacing * 2 : 0
+            let neededWidth = groupSize.width + separatorSpace
+            if x > 0 && x + neededWidth > availableWidth {
+                x = 0
+                y += rowHeight + verticalSpacing
+                rowHeight = 0
+            }
+
+            let needsSeparator = index > 0 && x > 0
+            if index > 0 {
+                let separator = separators[index - 1]
+                separator.isHidden = !needsSeparator
+                if needsSeparator {
+                    let separatorY = y + max(0, (max(rowHeight, groupSize.height) - separatorHeight) / 2)
+                    if applyFrames {
+                        separator.frame = NSRect(x: x + horizontalSpacing, y: separatorY, width: separatorWidth, height: separatorHeight)
+                    }
+                    x += separatorWidth + horizontalSpacing * 2
+                }
+            }
+
+            var groupX = x
+            for view in group {
+                let viewSize = size(for: view)
+                if applyFrames {
+                    view.frame = NSRect(x: groupX, y: y + max(0, (groupSize.height - viewSize.height) / 2), width: viewSize.width, height: viewSize.height)
+                }
+                groupX += viewSize.width + horizontalSpacing
+            }
+            x += groupSize.width
+            rowHeight = max(rowHeight, groupSize.height)
+            usedWidth = max(usedWidth, x)
+        }
+
+        return NSSize(width: usedWidth, height: y + rowHeight)
+    }
+
+    private func size(for group: [NSView]) -> NSSize {
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+        for (index, view) in group.enumerated() {
+            let viewSize = size(for: view)
+            if index > 0 { width += horizontalSpacing }
+            width += viewSize.width
+            height = max(height, viewSize.height)
+        }
+        return NSSize(width: width, height: height)
+    }
+
+    private func size(for view: NSView) -> NSSize {
+        let fitting = view.fittingSize
+        return NSSize(width: max(36, fitting.width), height: max(34, fitting.height))
+    }
+}
+
 /// ツールバーボタンのホバー時にヘルプ文をステータスバーへ表示するための追跡中継。
 @MainActor
 private final class HoverHelpRelay: NSResponder {
@@ -741,7 +860,7 @@ private final class CandidateGenerationWorker: @unchecked Sendable {
     }
 }
 
-private enum LayerKind: Equatable {
+private enum LayerKind: Equatable, Hashable {
     case image
     case roi
     case person(Int)
@@ -1147,7 +1266,17 @@ final class MosaicWindowController: NSObject {
     private let videoTimeLabel = NSTextField(labelWithString: "0:00 / 0:00")
     private let videoKeyframeCountLabel = NSTextField(labelWithString: "キーフレーム 0件")
     private let videoKeyframeTableView = NSTableView()
+    private let videoPlayButton = SquareIconButton()
+    private let videoPauseButton = SquareIconButton()
+    private let videoStopButton = SquareIconButton()
+    private let analysisStopButton = NSButton(title: "停止", target: nil, action: nil)
     private var isAutoProcessingVideo = false
+    private var videoAutoProcessCancellation: VideoMosaicExporter.CancellationFlag?
+    private var candidateGenerationID: UUID?
+    private var cancelledCandidateGenerationIDs: Set<UUID> = []
+    private var videoPlaybackTimer: Timer?
+    private var isVideoPlaying = false
+    private var lastTrackedVideoTimeSeconds: Double?
     /// 編集中の動画（nil=静止画編集中）。
     private var currentVideoItem: MosaicLibraryItem?
     private var currentVideoInfo: VideoInfo?
@@ -1828,8 +1957,15 @@ final class MosaicWindowController: NSObject {
         statsLabel.lineBreakMode = .byTruncatingHead
         statsLabel.translatesAutoresizingMaskIntoConstraints = false
         statsLabel.setContentCompressionResistancePriority(.required, for: .horizontal)
+        analysisStopButton.target = self
+        analysisStopButton.action = #selector(stopCurrentAnalysis)
+        analysisStopButton.bezelStyle = .rounded
+        analysisStopButton.isHidden = true
+        analysisStopButton.translatesAutoresizingMaskIntoConstraints = false
+        applyScaledFont(analysisStopButton, size: 11, weight: .semibold)
         statusBar.addSubview(statusSeparator)
         statusBar.addSubview(statusLabel)
+        statusBar.addSubview(analysisStopButton)
         statusBar.addSubview(statsLabel)
         NSLayoutConstraint.activate([
             statusSeparator.topAnchor.constraint(equalTo: statusBar.topAnchor),
@@ -1837,9 +1973,11 @@ final class MosaicWindowController: NSObject {
             statusSeparator.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor),
             statusLabel.leadingAnchor.constraint(equalTo: statusBar.leadingAnchor, constant: 10),
             statusLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            analysisStopButton.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
+            analysisStopButton.trailingAnchor.constraint(equalTo: statsLabel.leadingAnchor, constant: -10),
             statsLabel.trailingAnchor.constraint(equalTo: statusBar.trailingAnchor, constant: -10),
             statsLabel.centerYAnchor.constraint(equalTo: statusBar.centerYAnchor),
-            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: statsLabel.leadingAnchor, constant: -16)
+            statusLabel.trailingAnchor.constraint(lessThanOrEqualTo: analysisStopButton.leadingAnchor, constant: -10)
         ])
 
         root.addSubview(toolbar)
@@ -3089,33 +3227,20 @@ final class MosaicWindowController: NSObject {
         videoKeyframeCountLabel.translatesAutoresizingMaskIntoConstraints = false
         applyScaledFont(videoKeyframeCountLabel, size: 12)
 
-        func iconRow(_ views: [NSView]) -> NSStackView {
-            let row = NSStackView(views: views)
-            row.orientation = .horizontal
-            row.spacing = 5
-            row.alignment = .centerY
-            row.translatesAutoresizingMaskIntoConstraints = false
-            return row
-        }
-
         let prevButton = shortcutToolbarButton("jumpToPreviousKeyframe", symbol: "backward.end")
         let nextButton = shortcutToolbarButton("jumpToNextKeyframe", symbol: "forward.end")
         let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle")
         let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle")
-        let selectedDeleteButton = shortcutToolbarButton("deleteSelectedVideoKeyframes", symbol: "rectangle.badge.minus")
-        let allDeleteButton = shortcutToolbarButton("deleteAllVideoKeyframes", symbol: "trash.slash")
+        let selectedDeleteButton = shortcutToolbarButton("deleteSelectedVideoKeyframes", symbol: "trash")
+        let allDeleteButton = shortcutToolbarButton("deleteAllVideoKeyframes", symbol: "rectangle.badge.minus")
         let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope")
         let exportVideoButton = shortcutToolbarButton("exportVideoWithMosaic", symbol: "square.and.arrow.up.on.square")
         let autoButton = shortcutToolbarButton("autoProcessCurrentVideo", symbol: "wand.and.stars")
-        let controls = NSStackView(views: [
-            iconRow([prevButton, nextButton, addButton, removeButton]),
-            iconRow([trackButton, exportVideoButton, autoButton]),
-            iconRow([selectedDeleteButton, allDeleteButton])
+        let controls = WrappingToolbarView(groups: [
+            [prevButton, nextButton],
+            [addButton, removeButton, selectedDeleteButton, allDeleteButton],
+            [trackButton, autoButton, exportVideoButton]
         ])
-        controls.orientation = .vertical
-        controls.alignment = .leading
-        controls.spacing = 4
-        controls.translatesAutoresizingMaskIntoConstraints = false
 
         videoKeyframeTableView.headerView = NSTableHeaderView()
         videoKeyframeTableView.delegate = self
@@ -3136,9 +3261,13 @@ final class MosaicWindowController: NSObject {
         let roiColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("videoKeyframeROI"))
         roiColumn.title = "ROI"
         roiColumn.width = 52
+        let trackingColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("videoKeyframeTracking"))
+        trackingColumn.title = "追跡"
+        trackingColumn.width = 48
         videoKeyframeTableView.addTableColumn(noColumn)
         videoKeyframeTableView.addTableColumn(timeColumn)
         videoKeyframeTableView.addTableColumn(roiColumn)
+        videoKeyframeTableView.addTableColumn(trackingColumn)
 
         let tableScroll = NSScrollView()
         tableScroll.hasVerticalScroller = true
@@ -3147,24 +3276,24 @@ final class MosaicWindowController: NSObject {
         tableScroll.translatesAutoresizingMaskIntoConstraints = false
 
         panel.addSubview(title)
-        panel.addSubview(videoKeyframeCountLabel)
         panel.addSubview(controls)
         panel.addSubview(tableScroll)
+        panel.addSubview(videoKeyframeCountLabel)
         NSLayoutConstraint.activate([
             title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
             title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
-            videoKeyframeCountLabel.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
-            videoKeyframeCountLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
-            videoKeyframeCountLabel.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
-            controls.topAnchor.constraint(equalTo: videoKeyframeCountLabel.bottomAnchor, constant: 8),
+            controls.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 8),
             controls.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
-            controls.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            controls.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 70),
             tableScroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 8),
             tableScroll.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             tableScroll.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
-            tableScroll.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
+            videoKeyframeCountLabel.topAnchor.constraint(equalTo: tableScroll.bottomAnchor, constant: 6),
+            videoKeyframeCountLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            videoKeyframeCountLabel.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            videoKeyframeCountLabel.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
         ])
         updateVideoTimelineLabels()
         return panel
@@ -3900,9 +4029,11 @@ final class MosaicWindowController: NSObject {
         groupButton.action = #selector(groupSelectedLayers)
         ungroupButton.target = self
         ungroupButton.action = #selector(ungroupSelectedGroup)
+        let deleteLayerButton = SquareIconButton()
+        configureToolbarButton(deleteLayerButton, symbol: "trash", help: "選択レイヤを削除", action: #selector(deleteSelectedLayers))
         applyScaledFont(groupButton, size: 12)
         applyScaledFont(ungroupButton, size: 12)
-        let buttons = NSStackView(views: [groupButton, ungroupButton])
+        let buttons = NSStackView(views: [groupButton, ungroupButton, deleteLayerButton])
         buttons.orientation = .horizontal
         buttons.spacing = 8
         buttons.translatesAutoresizingMaskIntoConstraints = false
@@ -4314,6 +4445,60 @@ final class MosaicWindowController: NSObject {
         } else {
             updateStatus("解除するグループを選択してください")
         }
+    }
+
+    @objc private func deleteSelectedLayers() {
+        let selectedItems = layerOutlineView.selectedRowIndexes.map { layerOutlineView.item(atRow: $0) }
+        var roiIDs = Set<UUID>()
+        var layerKinds: [LayerKind] = []
+
+        for item in selectedItems {
+            if let entry = item as? ROIListEntry {
+                roiIDs.insert(entry.roiID)
+            } else if let roiGroup = item as? ROIListGroup {
+                roiIDs.formUnion(roiGroup.children.map(\.roiID))
+            } else if let leaf = item as? LayerLeaf, leaf.kind.isPerson || leaf.kind.isPose {
+                if !layerKinds.contains(leaf.kind) { layerKinds.append(leaf.kind) }
+            } else if let group = item as? LayerGroup {
+                for leaf in group.children where leaf.kind.isPerson || leaf.kind.isPose {
+                    if !layerKinds.contains(leaf.kind) { layerKinds.append(leaf.kind) }
+                }
+            }
+        }
+
+        guard !roiIDs.isEmpty || !layerKinds.isEmpty else {
+            updateStatus("削除するROIまたは人物/骨格レイヤを選択してください")
+            return
+        }
+
+        pushUndoSnapshot(currentEditorState())
+        if !roiIDs.isEmpty {
+            canvas.rois.removeAll { roiIDs.contains($0.id) }
+            canvas.hiddenROIIDs.subtract(roiIDs)
+            canvas.selectedROIGroupIDs.subtract(roiIDs)
+            if let selected = canvas.selectedROIID, roiIDs.contains(selected) {
+                canvas.selectedROIID = nil
+            }
+            hasUnsavedChanges = true
+        }
+        if !layerKinds.isEmpty {
+            ungroupedLayers.removeAll { layerKinds.contains($0.kind) }
+            for group in layerGroups {
+                group.children.removeAll { layerKinds.contains($0.kind) }
+            }
+            layerGroups.removeAll { $0.children.isEmpty }
+            if let selected = canvas.selectedDetectionLayer, layerKinds.contains(selected) {
+                canvas.selectedDetectionLayer = nil
+            }
+        }
+
+        editorRevision += 1
+        resumeMosaicPreviewIfNeeded()
+        applyLayerVisibility()
+        syncLegacyLayerCheckboxes()
+        reloadLayerList()
+        updateStatsBar()
+        updateStatus("選択レイヤを削除しました（ROI \(roiIDs.count)件、検出レイヤ \(layerKinds.count)件）")
     }
 
     private func toggleLeafVisibility(_ leaf: LayerLeaf) {
@@ -5065,7 +5250,7 @@ final class MosaicWindowController: NSObject {
         let inputURL = libraryEngine.originalURL(for: item)
         let style = defaultMosaicStyleForRendering()
         let segmentEngine = currentSegmentEngine()
-        let editState = currentVideoEditState
+        let editState = videoEditStateWithResolvedInheritedStyles(currentVideoEditState)
         let frameRate = max(1, info.frameRate)
         let cancellation = VideoMosaicExporter.CancellationFlag()
         let options = currentVideoTrackingOptions()
@@ -5230,9 +5415,13 @@ final class MosaicWindowController: NSObject {
         videoTimeLabel.textColor = .secondaryLabelColor
         videoTimeLabel.translatesAutoresizingMaskIntoConstraints = false
         videoTimeLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
+        configureToolbarButton(videoPlayButton, symbol: "play.fill", help: "動画タイムラインを再生", action: #selector(playVideoTimeline))
+        configureToolbarButton(videoPauseButton, symbol: "pause.fill", help: "動画タイムラインを一時停止", action: #selector(pauseVideoTimeline))
+        configureToolbarButton(videoStopButton, symbol: "stop.fill", help: "動画タイムラインを停止して先頭へ戻す", action: #selector(stopVideoTimeline))
 
         let row = NSStackView(views: [
-            videoTimeSlider, videoTimeLabel
+            videoPlayButton, videoPauseButton, videoStopButton,
+            makeToolbarSeparator(), videoTimeSlider, videoTimeLabel
         ])
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -5303,6 +5492,7 @@ final class MosaicWindowController: NSObject {
 
     /// 動画編集モードを終了する（静止画を開いた場合など）。
     private func exitVideoEditingMode() {
+        pauseVideoTimeline()
         currentVideoItem = nil
         currentVideoInfo = nil
         currentVideoEditState = VideoEditState()
@@ -5366,10 +5556,96 @@ final class MosaicWindowController: NSObject {
         videoTimeSlider.keyframeTimes = currentVideoEditState.keyframes.map(\.timeSeconds)
         videoTimeSlider.durationSeconds = info.durationSeconds
         videoKeyframeTableView.reloadData()
+        selectVideoKeyframeRow(at: currentVideoTimeSeconds)
+    }
+
+    private func selectVideoKeyframeRow(at timeSeconds: Double) {
+        let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        guard let row = sorted.firstIndex(where: { abs($0.timeSeconds - timeSeconds) < 0.01 }) else {
+            videoKeyframeTableView.deselectAll(nil)
+            return
+        }
+        videoKeyframeTableView.selectRowIndexes(IndexSet(integer: row), byExtendingSelection: false)
+        videoKeyframeTableView.scrollRowToVisible(row)
+    }
+
+    private func videoROIsForKeyframePersistence() -> [MosaicROI] {
+        let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
+        return canvas.rois.map { roi in
+            var persisted = roi
+            if persisted.style == nil {
+                persisted.style = inheritedStyle
+            }
+            return persisted
+        }
+    }
+
+    private func videoEditStateWithResolvedInheritedStyles(_ state: VideoEditState) -> VideoEditState {
+        let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
+        let keyframes = state.keyframes.map { keyframe in
+            VideoKeyframe(
+                timeSeconds: keyframe.timeSeconds,
+                rois: keyframe.rois.map { roi in
+                    var persisted = roi
+                    if persisted.style == nil {
+                        persisted.style = inheritedStyle
+                    }
+                    return persisted
+                },
+                trackingStatus: keyframe.trackingStatus
+            )
+        }
+        return VideoEditState(
+            keyframes: keyframes,
+            keyframeInterval: state.keyframeInterval,
+            maskEngineRawValue: state.maskEngineRawValue
+        )
+    }
+
+    private func currentVideoKeyframeTrackingStatus() -> VideoKeyframeTrackingStatus {
+        if let lastTrackedVideoTimeSeconds,
+           abs(lastTrackedVideoTimeSeconds - currentVideoTimeSeconds) < 0.01 {
+            return .tracked
+        }
+        return .manual
     }
 
     @objc private func videoTimeSliderChanged() {
+        pauseVideoTimeline()
         seekVideo(to: videoTimeSlider.doubleValue)
+    }
+
+    @objc private func playVideoTimeline() {
+        guard let info = currentVideoInfo else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        pauseVideoTimeline()
+        isVideoPlaying = true
+        let tick = max(1.0 / 30.0, 1.0 / max(1, info.frameRate))
+        videoPlaybackTimer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
+            Task { @MainActor in
+                guard let self, let info = self.currentVideoInfo else { return }
+                let next = self.currentVideoTimeSeconds + tick
+                if next >= info.durationSeconds {
+                    self.stopVideoTimeline()
+                } else {
+                    self.seekVideo(to: next)
+                }
+            }
+        }
+        updateStatus("動画タイムラインを再生中")
+    }
+
+    @objc private func pauseVideoTimeline() {
+        videoPlaybackTimer?.invalidate()
+        videoPlaybackTimer = nil
+        isVideoPlaying = false
+    }
+
+    @objc private func stopVideoTimeline() {
+        pauseVideoTimeline()
+        seekVideo(to: 0, reason: "動画タイムラインを停止")
     }
 
     /// 現在のフレームのROIをキーフレームとして保存する。
@@ -5379,8 +5655,13 @@ final class MosaicWindowController: NSObject {
             return
         }
         currentVideoEditState.upsertKeyframe(
-            VideoKeyframe(timeSeconds: currentVideoTimeSeconds, rois: canvas.rois)
+            VideoKeyframe(
+                timeSeconds: currentVideoTimeSeconds,
+                rois: videoROIsForKeyframePersistence(),
+                trackingStatus: currentVideoKeyframeTrackingStatus()
+            )
         )
+        lastTrackedVideoTimeSeconds = nil
         saveCurrentVideoEditState(item: item)
         updateVideoTimelineLabels()
         updateStatus(
@@ -5466,7 +5747,11 @@ final class MosaicWindowController: NSObject {
         }
         let url = libraryEngine.originalURL(for: item)
         let baseState = currentVideoEditState
+        let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
+        let cancellation = VideoMosaicExporter.CancellationFlag()
+        videoAutoProcessCancellation = cancellation
         isAutoProcessingVideo = true
+        updateAnalysisStopButtonVisibility()
         updateStatus("動画自動モザイク処理中… 0/\(times.count)")
         AppLog.video.info("動画自動モザイク処理開始: samples=\(times.count, privacy: .public)")
 
@@ -5475,11 +5760,21 @@ final class MosaicWindowController: NSObject {
             var detectedKeyframes = 0
             do {
                 for (index, time) in times.enumerated() {
+                    if cancellation.isCancelled {
+                        break
+                    }
                     let frame = try VideoFrameReader(url: url)
                         .frame(at: CMTime(seconds: time, preferredTimescale: 600))
                     let rois = try detector(frame)
                     if !rois.isEmpty {
-                        state.upsertKeyframe(VideoKeyframe(timeSeconds: time, rois: rois))
+                        let persistedROIs = rois.map { roi in
+                            var persisted = roi
+                            if persisted.style == nil {
+                                persisted.style = inheritedStyle
+                            }
+                            return persisted
+                        }
+                        state.upsertKeyframe(VideoKeyframe(timeSeconds: time, rois: persistedROIs, trackingStatus: .autoDetected))
                         detectedKeyframes += 1
                     }
                     DispatchQueue.main.async { [weak self] in
@@ -5489,12 +5784,18 @@ final class MosaicWindowController: NSObject {
                 DispatchQueue.main.async {
                     guard let self else { return }
                     self.isAutoProcessingVideo = false
+                    let wasCancelled = cancellation.isCancelled
+                    self.videoAutoProcessCancellation = nil
+                    self.updateAnalysisStopButtonVisibility()
                     guard self.currentVideoItem?.id == item.id else { return }
                     self.currentVideoEditState = state
                     self.saveCurrentVideoEditState(item: item)
                     self.updateVideoTimelineLabels()
-                    self.seekVideo(to: self.currentVideoTimeSeconds, reason: "動画自動モザイク処理完了")
-                    self.updateStatus("動画自動モザイク処理完了: キーフレーム\(state.keyframes.count)件（ROIあり \(detectedKeyframes)件）。必要なら確認後に動画を書き出してください")
+                    self.seekVideo(to: self.currentVideoTimeSeconds, reason: wasCancelled ? "動画自動モザイク処理を停止" : "動画自動モザイク処理完了")
+                    self.updateStatus(
+                        (wasCancelled ? "動画自動モザイク処理を停止しました" : "動画自動モザイク処理完了")
+                        + ": キーフレーム\(state.keyframes.count)件（ROIあり \(detectedKeyframes)件）。必要なら確認後に動画を書き出してください"
+                    )
                     AppLog.video.info(
                         "動画自動モザイク処理完了: keyframes=\(state.keyframes.count, privacy: .public) detected=\(detectedKeyframes, privacy: .public)"
                     )
@@ -5502,6 +5803,8 @@ final class MosaicWindowController: NSObject {
             } catch {
                 DispatchQueue.main.async { [weak self] in
                     self?.isAutoProcessingVideo = false
+                    self?.videoAutoProcessCancellation = nil
+                    self?.updateAnalysisStopButtonVisibility()
                     self?.showError(error)
                     AppLog.video.error("動画自動モザイク処理失敗: \(error.localizedDescription, privacy: .public)")
                 }
@@ -5548,14 +5851,14 @@ final class MosaicWindowController: NSObject {
             return
         }
         let targetTime = currentVideoTimeSeconds
-        guard let keyframe = trackingStartKeyframe(before: targetTime) else {
+        let editState = videoEditStateWithResolvedInheritedStyles(currentVideoEditState)
+        guard let keyframe = editState.keyframe(before: targetTime, requiringROIs: true) else {
             updateStatus("追跡の起点となる直前のROI付きキーフレームがありません。先にROIを作り「キーフレーム追加」後、後の時刻へ移動してください")
             AppLog.video.info("追跡確認を中止: 起点なし target=\(targetTime, privacy: .public)")
             return
         }
         let url = libraryEngine.originalURL(for: item)
         let frameRate = max(1, info.frameRate)
-        let editState = currentVideoEditState
         let options = currentVideoTrackingOptions()
         let detector: VideoFrameDetector? =
             (options.autoRedetectEnabled || options.sceneCutRedetectEnabled)
@@ -5598,9 +5901,17 @@ final class MosaicWindowController: NSObject {
             DispatchQueue.main.async {
                 guard let self, self.currentVideoItem?.id == item.id,
                       abs(self.currentVideoTimeSeconds - targetTime) < 0.01 else { return }
-                self.canvas.rois = resultROIs
+                self.canvas.rois = resultROIs.map { roi in
+                    var persisted = roi
+                    if persisted.style == nil {
+                        persisted.style = self.defaultMosaicStyleForRendering().persistentStyle()
+                    }
+                    return persisted
+                }
                 self.videoTrackingLostIDs = resultLost
                 self.canvas.trackingLostROIIDs = resultLost
+                self.lastTrackedVideoTimeSeconds = targetTime
+                self.hasUnsavedChanges = true
                 self.editorRevision += 1
                 self.reloadLayerList()
                 self.updateStatsBar()
@@ -5823,8 +6134,12 @@ final class MosaicWindowController: NSObject {
             groinPositionRatio: groinPositionSlider.doubleValue
         )
         let worker = candidateGenerationWorker
+        let generationID = UUID()
 
         isGeneratingCandidates = true
+        candidateGenerationID = generationID
+        cancelledCandidateGenerationIDs.remove(generationID)
+        updateAnalysisStopButtonVisibility()
         updateStatus("人物・骨格・対象部位を解析中…")
         Task { [weak self] in
             let taskResult = await Task.detached(priority: .userInitiated) {
@@ -5837,11 +6152,20 @@ final class MosaicWindowController: NSObject {
 
             guard let self else { return }
             self.isGeneratingCandidates = false
+            let wasCancelled = self.cancelledCandidateGenerationIDs.remove(generationID) != nil
+            if self.candidateGenerationID == generationID {
+                self.candidateGenerationID = nil
+            }
+            self.updateAnalysisStopButtonVisibility()
             guard self.currentLibraryItem?.id == requestedItemID else {
                 if self.hasPendingCandidateGeneration {
                     self.hasPendingCandidateGeneration = false
                     self.generateCandidates()
                 }
+                return
+            }
+            guard !wasCancelled else {
+                self.updateStatus("解析を停止しました。停止前までの既存データを表示しています")
                 return
             }
 
@@ -6543,23 +6867,11 @@ final class MosaicWindowController: NSObject {
         let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
         let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
         let previewVideoButton = shortcutToolbarButton("previewSelectedVideo", symbol: "play.rectangle")
-        // 8個を1行に並べるとライブラリパネルの幅に収まらず、右端のアイコンが切れていた
-        // （GUI報告）。4個ずつ2行へ折り返して、工場既定幅でも必ず全て見えるようにする。
-        func iconRow(_ views: [NSView]) -> NSStackView {
-            let row = NSStackView(views: views)
-            row.orientation = .horizontal
-            row.spacing = 4
-            row.alignment = .centerY
-            return row
-        }
-        let buttons = NSStackView(views: [
-            iconRow([openOriginalButton, openProcessedButton, previewVideoButton, repairLinksButton]),
-            iconRow([saveButton, revealButton, exportButton, deleteButton])
+        let buttons = WrappingToolbarView(groups: [
+            [openOriginalButton, openProcessedButton, previewVideoButton],
+            [repairLinksButton, saveButton, revealButton],
+            [exportButton, deleteButton]
         ])
-        buttons.orientation = .vertical
-        buttons.alignment = .leading
-        buttons.spacing = 4
-        buttons.translatesAutoresizingMaskIntoConstraints = false
 
         panel.addSubview(title)
         panel.addSubview(modeRow)
@@ -7126,8 +7438,13 @@ final class MosaicWindowController: NSObject {
         guard hasUnsavedChanges, let loadedImage, let item = currentLibraryItem else { return }
         if item.isVideo {
             currentVideoEditState.upsertKeyframe(
-                VideoKeyframe(timeSeconds: currentVideoTimeSeconds, rois: canvas.rois)
+                VideoKeyframe(
+                    timeSeconds: currentVideoTimeSeconds,
+                    rois: videoROIsForKeyframePersistence(),
+                    trackingStatus: currentVideoKeyframeTrackingStatus()
+                )
             )
+            lastTrackedVideoTimeSeconds = nil
             do {
                 try videoEditStore.save(currentVideoEditState, for: item.id)
                 hasUnsavedChanges = false
@@ -7370,6 +7687,25 @@ final class MosaicWindowController: NSObject {
         lastStatusText = message
         statusLabel.stringValue = message
         updateStatsBar()
+    }
+
+    private func updateAnalysisStopButtonVisibility() {
+        analysisStopButton.isHidden = !(isGeneratingCandidates || isAutoProcessingVideo)
+        analysisStopButton.isEnabled = isGeneratingCandidates || isAutoProcessingVideo
+    }
+
+    @objc private func stopCurrentAnalysis() {
+        var didRequestStop = false
+        if isAutoProcessingVideo {
+            videoAutoProcessCancellation?.isCancelled = true
+            didRequestStop = true
+        }
+        if isGeneratingCandidates, let candidateGenerationID {
+            cancelledCandidateGenerationIDs.insert(candidateGenerationID)
+            didRequestStop = true
+        }
+        updateStatus(didRequestStop ? "解析停止を要求しました。現在のステップ完了後に停止します" : "実行中の解析はありません")
+        updateAnalysisStopButtonVisibility()
     }
 
     /// ツールバーホバー時のヘルプ表示（離れたら直前のステータスへ戻す）。
@@ -8806,6 +9142,8 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
             cell.textField?.stringValue = VideoPreviewView.timeText(keyframes[row].timeSeconds)
         case "videoKeyframeROI":
             cell.textField?.stringValue = "\(keyframes[row].rois.count)"
+        case "videoKeyframeTracking":
+            cell.textField?.stringValue = keyframes[row].trackingStatus.displayText
         default:
             cell.textField?.stringValue = ""
         }

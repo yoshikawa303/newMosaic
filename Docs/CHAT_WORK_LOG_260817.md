@@ -121,3 +121,83 @@
 - 同じ検出器を使う動画書き出し時の自動再検出、追跡確認時の自動再検出も `@Sendable` 境界に合わせて修正。
 - リリースアップ: `scripts/package_macos_app.sh` を `0.0.00143` / `143` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
 - 検証: `swift build` PASS、`swift test` 163件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00143` / `143` を確認、`open -n dist/newMosaic.app` で起動確認。
+
+### 2026-08-22 01:50 JST - Codex Codex CLI - 種別: 依頼内容 - 動画編集UI/追跡ROI/自動解析停止改善
+
+- 内容:
+
+  ```text
+  ☆バグ：動画のシーク左に再生、一時停止、停止などのコントロールがない。
+  ☆バグ：動画追跡した後、ROIのモザイク設定が解除される。
+  ☆デグレ：サイドツールパネル内のアイコンが重なって表示される。
+  ☆改善：静止画・動画＞自動解析中に画面下のステータス表示の欄に、停止ボタンを表示し、途中で停止可能にする。停止した場合は、停止したところまでのデータを表示。
+  ☆改善：動画＞動画編集パネルのキーフレームリストに、「追跡」処理状態を表示「済」など。
+  ☆改善：ライブラリ・動画編集サイドツールパネル＞ツールバーのアイコンを改行せず、なるべく１行で表示する。幅が足りない場合に改行し、種別毎にセパレータで分ける
+  ☆改善：
+  ・動画編集パネル＞キーフレーム数表示は、キーフレーム下に表示。
+  ・キーフレーム移動ボタン時、キーフレームリスト上で移動先をアクティブにする。
+  ・キーフレームリスト内でキーフレームダブルクリックした際も、キーフレーム移動後、表示キーフレームをリスト上でアクティブにする。
+  ・レイヤ：グループ解除の右に、ゴミ箱アイコンを追加し、選択レイヤの削除可能にする。
+  ・動画編集＞キーフレーム削除アイコンをゴミ箱にする。（他の同様の操作アイコンと同じイメージ）
+  ・全キーフレーム削除アイコンは、修正前のキーフレーム削除アイコンと同じものにする。
+  画像添付あり。
+  ```
+
+### 2026-08-22 01:50 JST - Codex Codex CLI - 種別: 経過 - モデル/Effort計画
+
+- 内容:
+
+  | 実装内容 | 使用AIモデル | バージョン | Effort | 切替・コスパ判断 |
+  |---|---|---|---|---|
+  | 動画シーク再生/一時停止/停止UI追加 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | Medium | 既存動画状態との整合が必要なため現モデルで実施 |
+  | 追跡後ROIモザイク保持修正 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | High | ROI/追跡/保存データのデグレ領域のため現モデルで実施 |
+| 自動解析停止と途中結果表示 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | High | 非同期解析キャンセルと部分結果保持が絡むため現モデルで実施 |
+| サイドツール/キーフレームUI整理 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | Medium | 複数UI部品の一貫性修正のため現モデルで実施 |
+| Build/文書/ログ同期 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | Low | 定型作業だが差分整合のため現セッション内で実施 |
+
+### 2026-08-22 02:11 JST - Codex Codex CLI - 種別: 作業結果 - 動画編集UI/追跡ROI/自動解析停止改善
+
+- 内容:
+
+  **対応完了**
+  - `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:449` に折返し対応ツールバーを追加し、サイドパネルのアイコン重なりを修正。
+  - `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:3216` で動画編集パネルを整理し、追跡列、削除アイコン変更、キーフレーム件数の下配置を実装。
+  - `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:5418` と `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:5618` で動画の再生/一時停止/停止コントロールを追加。
+  - `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:5572` と `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:5847` で追跡後もROIモザイク設定を保持。
+  - `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:5731` と `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift:6113` で動画/静止画解析の停止ボタンを追加。
+  - `/Volumes/DATA/XCode_Project/newMosaic/Sources/MosaicVideoKit/VideoEditStore.swift:12` と `/Volumes/DATA/XCode_Project/newMosaic/Tests/MosaicVideoKitTests/VideoEditStoreTests.swift:88` でキーフレーム追跡状態の保存と旧データ互換テストを追加。
+
+  **モデル/Effort実績**
+  | 実装内容 | 実際に使用したAIモデル | バージョン | 実績Effort | 切替履歴 | 結果 |
+  |---|---|---|---|---|---|
+  | 動画シーク再生/一時停止/停止UI追加 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | Medium | 委譲なし | 完了 |
+  | 追跡後ROIモザイク保持修正 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | High | 委譲なし | 完了 |
+  | 自動解析停止と途中結果表示 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | High | 委譲なし | 完了 |
+  | サイドツール/キーフレームUI整理 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | Medium | 委譲なし | 完了 |
+  | Build/文書/ログ同期 | OpenAI Codex CLI 現セッションモデル | モデルID非公開 | Low | 委譲なし | 完了 |
+
+  **検証**
+  - `swift build` PASS
+  - `swift test` PASS（164 tests）
+  - `scripts/ci/agent_governance_guard.sh` PASS
+  - `scripts/ci/local_quality_gate.sh` PASS
+  - `bash scripts/package_macos_app.sh` PASS、codesign PASS、Info `0.0.00144` / `144`
+
+  **注意**
+  - 上位指示によりコミット/プッシュは未実行。未コミット差分があります。
+  - AppKit UIの実画面目視は未実施。
+
+- 作業時間: 約25分
+
+### 2026-08-22 02:25 JST - Codex GPT-5 - 種別: 依頼内容 - v0.0.00144 リリース確定
+
+```text
+☆下記の他チャットでの実装ありがとう。コミット、リリースアップして。
+```
+
+### 2026-08-22 02:25 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00144 リリース確定
+
+- 作業AIモデル: Codex GPT-5（他チャット未コミット差分の確認、リリース検証、コミット、タグ、pushを同モデルで実施。実行中モデル自体は切替不可）
+- 他チャット実装済みの動画編集UI/追跡ROI/自動解析停止改善差分を確認し、`v0.0.00144` / `144` のリリースとして確定する方針にした。
+- 検証: `swift build` PASS、`swift test` 164件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00144` / `144` を確認、`open -n dist/newMosaic.app` で起動確認。
+- このエントリを含めてリリースコミットを作成し、`v0.0.00144`タグを付与して `git push origin main --tags` で反映する。

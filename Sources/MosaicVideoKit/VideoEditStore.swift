@@ -8,16 +8,53 @@ import MosaicCore
 // これにより、既存の静止画ライブラリのスキーマ・読み書き経路へ一切影響を与えずに
 // 動画編集状態を追加できる（既存JSONは無変更で読める）。
 
+/// キーフレームの生成経路。手動追加・追跡結果・自動解析結果を一覧で区別する。
+public enum VideoKeyframeTrackingStatus: String, Codable, Equatable, Sendable {
+    case manual
+    case tracked
+    case autoDetected
+
+    public var displayText: String {
+        switch self {
+        case .manual: return "手動"
+        case .tracked: return "済"
+        case .autoDetected: return "自動"
+        }
+    }
+}
+
 /// 1つのキーフレーム（ある時刻に人が確認・確定したROI群）。
 public struct VideoKeyframe: Codable, Equatable, Sendable {
     /// 動画先頭からの時刻（秒）。
     public var timeSeconds: Double
     /// その時刻に適用するROI群（静止画と同じ `MosaicROI` をそのまま使う）。
     public var rois: [MosaicROI]
+    /// このキーフレームが追跡・自動解析由来かをUIへ表示するための状態。
+    public var trackingStatus: VideoKeyframeTrackingStatus
 
-    public init(timeSeconds: Double, rois: [MosaicROI]) {
+    public init(
+        timeSeconds: Double,
+        rois: [MosaicROI],
+        trackingStatus: VideoKeyframeTrackingStatus = .manual
+    ) {
         self.timeSeconds = timeSeconds
         self.rois = rois
+        self.trackingStatus = trackingStatus
+    }
+
+    private enum CodingKeys: String, CodingKey {
+        case timeSeconds, rois, trackingStatus
+    }
+
+    /// 既存のサイドカーJSONには`trackingStatus`が無いため、欠落時は手動扱いで読む。
+    public init(from decoder: Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        timeSeconds = try container.decode(Double.self, forKey: .timeSeconds)
+        rois = try container.decodeIfPresent([MosaicROI].self, forKey: .rois) ?? []
+        trackingStatus = try container.decodeIfPresent(
+            VideoKeyframeTrackingStatus.self,
+            forKey: .trackingStatus
+        ) ?? .manual
     }
 }
 
