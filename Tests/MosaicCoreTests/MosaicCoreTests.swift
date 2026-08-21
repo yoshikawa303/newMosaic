@@ -1522,6 +1522,30 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     #expect(decoded.isLinked)
 }
 
+@Test func libraryEngineImportsLinkedVideoWithKindAndDuration() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicLinkedVideoTest_\(UUID().uuidString)")
+    let engine = LibraryEngine(rootURL: root)
+    let videoURL = URL(fileURLWithPath: "/tmp/sample.mov")
+
+    let item = try engine.importLinkedVideo(
+        url: videoURL,
+        pixelWidth: 1280,
+        pixelHeight: 720,
+        durationSeconds: 4.25
+    )
+    let loaded = try #require(try engine.loadItems().first)
+
+    #expect(item.id == loaded.id)
+    #expect(loaded.sourceName == "sample.mov")
+    #expect(loaded.linkedOriginalPath == videoURL.path)
+    #expect(loaded.kind == .video)
+    #expect(loaded.isVideo)
+    #expect(loaded.imagePixelWidth == 1280)
+    #expect(loaded.imagePixelHeight == 720)
+    #expect(loaded.videoDurationSeconds == 4.25)
+}
+
 /// 楕円ROIでの「形状マスク乗算（現行）」と「矩形クロップ（初期実装）」の差を実測する。
 /// 現行は楕円マスクが放射グラデーションのため、ROI矩形の隅へ向かってマスクが薄くなる
 /// （＝対象物の輪郭が縁で欠ける）。初期実装は矩形で切るため輪郭がそのまま残る。

@@ -516,8 +516,22 @@ private enum LibraryProcessedFilter: Int, CaseIterable {
     case processed = 2
 }
 
+private enum LibraryKindFilter: Int, CaseIterable {
+    case all = 0
+    case image = 1
+    case video = 2
+
+    var title: String {
+        switch self {
+        case .all: return "すべて"
+        case .image: return "静止画"
+        case .video: return "動画"
+        }
+    }
+}
+
 private enum LibrarySortKey: String {
-    case name, status, resolution, roiCount, updatedAt
+    case name, status, kind, resolution, roiCount, updatedAt
 }
 
 /// 「元に戻す」「やり直し」1ステップ分の状態。
@@ -1274,6 +1288,8 @@ final class MosaicWindowController: NSObject {
     private var selectedLibraryItemID: UUID?
     // 処理済みフラグ・テキスト検索フィルタ、列ソート状態
     private var libraryProcessedFilter: LibraryProcessedFilter = .all
+    private var libraryKindFilter: LibraryKindFilter = .all
+    private var libraryFormatFilter: String?
     private var librarySearchText: String = ""
     private var librarySortKey: LibrarySortKey = .updatedAt
     private var librarySortAscending: Bool = false
@@ -1283,10 +1299,12 @@ final class MosaicWindowController: NSObject {
         target: nil,
         action: nil
     )
+    private let libraryMediaFilterButton = SquareIconButton()
     private let librarySearchField = NSSearchField()
     private var libraryThumbnailColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("thumbnail"))
     private var libraryNameColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("name"))
     private var libraryStatusColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("status"))
+    private var libraryKindColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("kind"))
     private var libraryResolutionColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("resolution"))
     private var libraryROIColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("roi"))
     private var libraryUpdatedColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("updated"))
@@ -1300,6 +1318,14 @@ final class MosaicWindowController: NSObject {
         case .all: break
         case .unprocessed: items = items.filter { $0.processedRelativePath == nil }
         case .processed: items = items.filter { $0.processedRelativePath != nil }
+        }
+        switch libraryKindFilter {
+        case .all: break
+        case .image: items = items.filter { !$0.isVideo }
+        case .video: items = items.filter(\.isVideo)
+        }
+        if let libraryFormatFilter {
+            items = items.filter { Self.libraryFileFormat(for: $0) == libraryFormatFilter }
         }
         if !librarySearchText.isEmpty {
             let needle = librarySearchText
@@ -1317,6 +1343,15 @@ final class MosaicWindowController: NSObject {
                 let lhs = $0.processedRelativePath != nil
                 let rhs = $1.processedRelativePath != nil
                 return ascending ? (!lhs && rhs) : (lhs && !rhs)
+            }
+        case .kind:
+            items.sort {
+                let lhs = $0.isVideo ? 1 : 0
+                let rhs = $1.isVideo ? 1 : 0
+                if lhs == rhs {
+                    return $0.sourceName.localizedStandardCompare($1.sourceName) == .orderedAscending
+                }
+                return ascending ? lhs < rhs : lhs > rhs
             }
         case .resolution:
             items.sort {
@@ -1556,7 +1591,7 @@ final class MosaicWindowController: NSObject {
         let batchButton = shortcutToolbarButton(
             "batchProcessAll",
             symbol: "bolt.circle",
-            helpOverride: "一括処理（未加工の画像を候補生成→適用→保存）"
+            helpOverride: "一括処理（未加工の静止画を候補生成→適用→保存）"
         )
         let zoomOutButton = shortcutToolbarButton("zoomOut", symbol: "minus.magnifyingglass")
         let zoomFitButton = shortcutToolbarButton("zoomToFit", symbol: "arrow.up.left.and.arrow.down.right")
@@ -4285,7 +4320,7 @@ final class MosaicWindowController: NSObject {
 
     // MARK: - フォルダ一括登録（リンク）とリンク切れ修正
 
-    /// フォルダ内の画像をライブラリへ**リンク**として一括登録する（コピーしない。
+    /// フォルダ内の画像/動画をライブラリへ**リンク**として一括登録する（コピーしない。
     /// ROI・レイヤ情報は従来どおりアプリ側で管理する）。
     @objc private func registerFolderAsLinks() {
         let panel = NSOpenPanel()
@@ -4293,35 +4328,54 @@ final class MosaicWindowController: NSObject {
         panel.canChooseDirectories = true
         panel.allowsMultipleSelection = false
         panel.prompt = "一括登録"
-        panel.message = "画像フォルダを選択してください（画像はコピーせずリンクとして登録されます）"
+        panel.message = "画像/動画フォルダを選択してください（ファイルはコピーせずリンクとして登録されます）"
         guard panel.runModal() == .OK, let folder = panel.url else { return }
 
-        let imageExtensions = Set(["png", "jpg", "jpeg", "tiff", "tif", "heic"])
         let manager = FileManager.default
         let files = ((try? manager.contentsOfDirectory(
             at: folder,
-            includingPropertiesForKeys: nil,
+            includingPropertiesForKeys: [.contentTypeKey],
             options: [.skipsHiddenFiles]
         )) ?? [])
-            .filter { imageExtensions.contains($0.pathExtension.lowercased()) }
+            .filter { Self.isImageFile($0) || Self.isVideoFile($0) }
             .sorted { $0.lastPathComponent.localizedStandardCompare($1.lastPathComponent) == .orderedAscending }
         guard !files.isEmpty else {
-            updateStatus("選択フォルダに登録できる画像がありません")
+            updateStatus("選択フォルダに登録できる画像/動画がありません")
             return
         }
-        var registered = 0
-        var failed = 0
-        for file in files {
-            do {
-                _ = try libraryEngine.importLinked(url: file)
-                registered += 1
-            } catch {
-                failed += 1
+        updateStatus("フォルダ一括登録中: \(files.count)件")
+        let libraryRoot = libraryEngine.rootURL
+        DispatchQueue.global(qos: .userInitiated).async {
+            let engine = LibraryEngine(rootURL: libraryRoot)
+            var imageCount = 0
+            var videoCount = 0
+            var failed = 0
+            for file in files {
+                do {
+                    if Self.isVideoFile(file) {
+                        let info = try VideoFrameReader(url: file).loadInfo()
+                        _ = try engine.importLinkedVideo(
+                            url: file,
+                            pixelWidth: Int(info.naturalSize.width),
+                            pixelHeight: Int(info.naturalSize.height),
+                            durationSeconds: info.durationSeconds
+                        )
+                        videoCount += 1
+                    } else {
+                        _ = try engine.importLinked(url: file)
+                        imageCount += 1
+                    }
+                } catch {
+                    failed += 1
+                }
+            }
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                self.reloadLibrary(preserveOrder: false)
+                let failNote = failed > 0 ? "（読み込み不可 \(failed)件）" : ""
+                self.updateStatus("フォルダ一括登録: 静止画\(imageCount)件 / 動画\(videoCount)件をリンク登録しました\(failNote)")
             }
         }
-        reloadLibrary(preserveOrder: false)
-        let failNote = failed > 0 ? "（読み込み不可 \(failed)件）" : ""
-        updateStatus("フォルダ一括登録: \(registered)件をリンク登録しました\(failNote)")
     }
 
     /// リンク切れの修正。ライブラリでリンク切れアイテムを選択中ならそのアイテムをファイル指定で修正（画像単位）、
@@ -4390,7 +4444,7 @@ final class MosaicWindowController: NSObject {
     /// 処理中は進捗パネル（件数・進捗バー・キャンセル）をリアルタイム更新する。
     @objc private func batchProcessAll() {
         guard !isBatchProcessing else { return }
-        let targets = libraryItems.filter { $0.processedRelativePath == nil && !libraryEngine.isLinkBroken($0) }
+        let targets = libraryItems.filter { !$0.isVideo && $0.processedRelativePath == nil && !libraryEngine.isLinkBroken($0) }
         guard !targets.isEmpty else {
             updateStatus("一括処理の対象がありません（未加工かつリンク有効な画像が対象です）")
             return
@@ -4560,16 +4614,32 @@ final class MosaicWindowController: NSObject {
 
     /// 開く/貼り付けで受け付ける静止画の型
     private static let openableImageTypes: [UTType] = [.png, .jpeg, .tiff, .heic]
-    /// 開く/貼り付けで受け付ける動画の型（書き出しはMP4のみだが読み込みはMOVも可）
-    private static let openableVideoTypes: [UTType] = [.mpeg4Movie, .quickTimeMovie]
+    /// 開く/貼り付けで受け付ける動画の型。抽象型（movie/video）と主要拡張子由来型を併用し、
+    /// FinderのOpen PanelでMOV等がグレーアウトする環境差を避ける。
+    private static let openableVideoTypes: [UTType] =
+        [.movie, .video, .mpeg4Movie, .quickTimeMovie]
+        + ["mov", "mp4", "m4v", "qt"].compactMap { UTType(filenameExtension: $0) }
+    private static let openableMediaTypes: [UTType] = openableImageTypes + openableVideoTypes
 
     /// URLの実体が動画かをUTTypeで判定する。拡張子だけの判定にしないのは、
     /// 拡張子が無い/違うファイルでも実体で正しく振り分けるため。
-    private static func isVideoFile(_ url: URL) -> Bool {
+    nonisolated private static func isVideoFile(_ url: URL) -> Bool {
         if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
-            return type.conforms(to: .movie) || type.conforms(to: .audiovisualContent)
+            return type.conforms(to: .movie)
+                || type.conforms(to: .video)
+                || type.conforms(to: .audiovisualContent)
         }
-        return UTType(filenameExtension: url.pathExtension)?.conforms(to: .movie) ?? false
+        guard let type = UTType(filenameExtension: url.pathExtension) else { return false }
+        return type.conforms(to: .movie)
+            || type.conforms(to: .video)
+            || type.conforms(to: .audiovisualContent)
+    }
+
+    nonisolated private static func isImageFile(_ url: URL) -> Bool {
+        if let type = try? url.resourceValues(forKeys: [.contentTypeKey]).contentType {
+            return type.conforms(to: .image)
+        }
+        return UTType(filenameExtension: url.pathExtension)?.conforms(to: .image) ?? false
     }
 
     /// 動画をライブラリへリンク登録して開く（本体はコピーしない）。
@@ -4579,7 +4649,7 @@ final class MosaicWindowController: NSObject {
         // 静止画も選べるようにして「画像を開く」と入口を対称にする（GUI報告 2026-08-10:
         // 動画認識をしたいのに『画像を開く』でMOVが選べない、という迷いを無くす）。
         // 選択後は実体のUTTypeで静止画/動画へ自動的に振り分ける。
-        panel.allowedContentTypes = Self.openableVideoTypes + Self.openableImageTypes
+        panel.allowedContentTypes = Self.openableMediaTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -5276,7 +5346,7 @@ final class MosaicWindowController: NSObject {
         let panel = NSOpenPanel()
         // 動画も選べるようにする（GUI報告 2026-08-10: 動画認識をしたいのに「画像を開く」で
         // MOVがグレーアウトして選べない）。選択後は実体のUTTypeで静止画/動画へ振り分ける。
-        panel.allowedContentTypes = Self.openableImageTypes + Self.openableVideoTypes
+        panel.allowedContentTypes = Self.openableMediaTypes
         panel.allowsMultipleSelection = false
         panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -6032,6 +6102,12 @@ final class MosaicWindowController: NSObject {
         libraryProcessedFilterControl.action = #selector(libraryFilterChanged)
         libraryProcessedFilterControl.toolTip = "処理済みフラグで絞り込む"
         applyScaledFont(libraryProcessedFilterControl, size: 11)
+        configureToolbarButton(
+            libraryMediaFilterButton,
+            symbol: "line.3.horizontal.decrease.circle",
+            help: "種別・ファイル形式で絞り込む",
+            action: #selector(showLibraryMediaFilterMenu(_:))
+        )
         librarySearchField.placeholderString = "ファイル名で検索"
         librarySearchField.target = self
         librarySearchField.action = #selector(librarySearchChanged)
@@ -6042,7 +6118,7 @@ final class MosaicWindowController: NSObject {
         librarySearchField.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
         libraryProcessedFilterControl.setContentHuggingPriority(.defaultHigh, for: .horizontal)
         applyScaledFont(librarySearchField, size: 12)
-        let filterRow = NSStackView(views: [libraryProcessedFilterControl, librarySearchField])
+        let filterRow = NSStackView(views: [libraryProcessedFilterControl, libraryMediaFilterButton, librarySearchField])
         filterRow.orientation = .horizontal
         filterRow.spacing = 8
         filterRow.translatesAutoresizingMaskIntoConstraints = false
@@ -6062,11 +6138,12 @@ final class MosaicWindowController: NSObject {
         libraryThumbnailColumn = makeLibraryColumn(id: "thumbnail", title: "", width: 44, sortKey: nil)
         libraryNameColumn = makeLibraryColumn(id: "name", title: "ファイル名", width: 160, sortKey: .name)
         libraryStatusColumn = makeLibraryColumn(id: "status", title: "状態", width: 60, sortKey: .status)
+        libraryKindColumn = makeLibraryColumn(id: "kind", title: "種別", width: 58, sortKey: .kind)
         libraryResolutionColumn = makeLibraryColumn(id: "resolution", title: "解像度", width: 90, sortKey: .resolution)
         libraryROIColumn = makeLibraryColumn(id: "roi", title: "ROI", width: 40, sortKey: .roiCount)
         libraryUpdatedColumn = makeLibraryColumn(id: "updated", title: "更新日時", width: 120, sortKey: .updatedAt)
         for column in [libraryThumbnailColumn, libraryNameColumn, libraryStatusColumn,
-                       libraryResolutionColumn, libraryROIColumn, libraryUpdatedColumn] {
+                       libraryKindColumn, libraryResolutionColumn, libraryROIColumn, libraryUpdatedColumn] {
             tableView.addTableColumn(column)
         }
         // 既定ソート（更新日時の新しい順）に合わせた初期インジケータを表示する
@@ -6146,6 +6223,67 @@ final class MosaicWindowController: NSObject {
             column.sortDescriptorPrototype = NSSortDescriptor(key: sortKey.rawValue, ascending: true)
         }
         return column
+    }
+
+    private static func libraryFileFormat(for item: MosaicLibraryItem) -> String {
+        let sourceNameExtension = (item.sourceName as NSString).pathExtension
+        let source = sourceNameExtension.isEmpty
+            ? (item.linkedOriginalPath ?? item.originalRelativePath)
+            : item.sourceName
+        let ext = (source as NSString).pathExtension.lowercased()
+        if !ext.isEmpty { return ext }
+        return item.isVideo ? "video" : "image"
+    }
+
+    private var availableLibraryFormats: [String] {
+        Array(Set(libraryItems.map { Self.libraryFileFormat(for: $0) }))
+            .sorted { $0.localizedStandardCompare($1) == .orderedAscending }
+    }
+
+    @objc private func showLibraryMediaFilterMenu(_ sender: NSButton) {
+        let menu = NSMenu()
+        let kindHeader = NSMenuItem(title: "種別", action: nil, keyEquivalent: "")
+        kindHeader.isEnabled = false
+        menu.addItem(kindHeader)
+        for kind in LibraryKindFilter.allCases {
+            let item = NSMenuItem(title: kind.title, action: #selector(selectLibraryKindFilter(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = kind.rawValue
+            item.state = kind == libraryKindFilter ? .on : .off
+            menu.addItem(item)
+        }
+        menu.addItem(.separator())
+        let formatHeader = NSMenuItem(title: "ファイル形式", action: nil, keyEquivalent: "")
+        formatHeader.isEnabled = false
+        menu.addItem(formatHeader)
+        let allFormats = NSMenuItem(title: "すべて", action: #selector(selectLibraryFormatFilter(_:)), keyEquivalent: "")
+        allFormats.target = self
+        allFormats.representedObject = ""
+        allFormats.state = libraryFormatFilter == nil ? .on : .off
+        menu.addItem(allFormats)
+        for format in availableLibraryFormats {
+            let item = NSMenuItem(title: format.uppercased(), action: #selector(selectLibraryFormatFilter(_:)), keyEquivalent: "")
+            item.target = self
+            item.representedObject = format
+            item.state = libraryFormatFilter == format ? .on : .off
+            menu.addItem(item)
+        }
+        menu.popUp(positioning: nil, at: NSPoint(x: 0, y: sender.bounds.height + 4), in: sender)
+    }
+
+    @objc private func selectLibraryKindFilter(_ sender: NSMenuItem) {
+        guard let rawValue = sender.representedObject as? Int,
+              let filter = LibraryKindFilter(rawValue: rawValue) else { return }
+        libraryKindFilter = filter
+        refreshLibraryDisplay()
+        updateStatus("ライブラリ種別フィルタ: \(filter.title)")
+    }
+
+    @objc private func selectLibraryFormatFilter(_ sender: NSMenuItem) {
+        guard let value = sender.representedObject as? String else { return }
+        libraryFormatFilter = value.isEmpty ? nil : value
+        refreshLibraryDisplay()
+        updateStatus("ライブラリ形式フィルタ: \(libraryFormatFilter?.uppercased() ?? "すべて")")
     }
 
     @objc private func libraryFilterChanged() {
@@ -7057,16 +7195,15 @@ extension MosaicWindowController {
         content.orientation = .vertical
         content.alignment = .trailing
         content.spacing = 20
-        content.edgeInsets = NSEdgeInsets(top: 20, left: 20, bottom: 20, right: 20)
         content.translatesAutoresizingMaskIntoConstraints = false
 
         let container = NSView()
         container.addSubview(content)
         NSLayoutConstraint.activate([
-            content.topAnchor.constraint(equalTo: container.topAnchor),
-            content.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-            content.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-            content.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            content.topAnchor.constraint(equalTo: container.topAnchor, constant: 24),
+            content.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 24),
+            content.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -24),
+            content.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -24),
             mainRow.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             mainRow.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             buttonRow.trailingAnchor.constraint(equalTo: content.trailingAnchor)
@@ -7075,7 +7212,7 @@ extension MosaicWindowController {
         // 「画像を書き出す」→「画像出力」への名称統一に合わせ、操作ウィンドウ名も同一にする。
         // 可変サイズ（.resizable）にし、旧NSSavePanelより大幅に広い初期幅を確保する。
         let window = NSWindow(
-            contentRect: NSRect(x: 0, y: 0, width: 820, height: 520),
+            contentRect: NSRect(x: 0, y: 0, width: 860, height: 560),
             styleMask: [.titled, .closable, .resizable],
             backing: .buffered,
             defer: false
@@ -7088,7 +7225,7 @@ extension MosaicWindowController {
         // （クラッシュ報告 2026-08-02「キー割当後、再度設定画面が開けない」）。
         window.isReleasedWhenClosed = false
         window.delegate = self
-        window.minSize = NSSize(width: 640, height: 420)
+        window.minSize = NSSize(width: 760, height: 480)
         window.contentView = container
         return window
     }
@@ -8193,16 +8330,12 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
             switch columnID {
             case "name":
                 let linkMark = isBroken ? "⚠️ " : (item.isLinked ? "🔗" : "")
-                // 動画は一覧で静止画と一目で区別できるようバッジを付ける
-                let kindMark = item.isVideo ? "🎬 " : ""
-                label.stringValue = kindMark + linkMark + item.sourceName
+                label.stringValue = linkMark + item.sourceName
                 label.toolTip = isBroken ? "リンク切れ: \(item.sourceName)" : item.sourceName
             case "status":
-                if item.isVideo {
-                    label.stringValue = item.processedRelativePath == nil ? "動画" : "動画済"
-                } else {
-                    label.stringValue = item.processedRelativePath == nil ? "元" : "済"
-                }
+                label.stringValue = item.processedRelativePath == nil ? "元" : "済"
+            case "kind":
+                label.stringValue = item.isVideo ? "動画" : "静止画"
             case "resolution":
                 // 動画は解像度に加えて尺も表示する（一覧から長さを把握できるようにする）
                 if item.isVideo, let duration = item.videoDurationSeconds {
@@ -8613,6 +8746,10 @@ final class ImageCanvasView: NSView {
     var maskBrushWidth: Double = 0.15
     /// 描画中のストローク（ROIローカル座標）。mouseUpで対象ROIへ確定する。
     private var maskStrokeInProgress: (roiID: UUID, points: [NormalizedPoint], isAdditive: Bool, isNewLayer: Bool)?
+    /// タブレットペンは高頻度にdragイベントを送るため、画面上でほぼ同じ点は取り込まない。
+    /// 筆跡は1px台の間隔で残せば見た目の連続性を保ちつつ、配列肥大化と再描画頻度を抑えられる。
+    private var lastMaskStrokeViewPoint: NSPoint?
+    private let maskStrokeMinimumViewSpacing: CGFloat = 1.25
     /// マスク追加ペン／消しゴムで塗った・消したときの通知（再描画・undo登録はコントローラ側で行う）。
     /// 第3引数は、このストロークのために `onMaskStrokeNeedsNewLayer` で新規レイヤを作ったか。
     /// true の場合、レイヤ追加時点で既にundoスナップショットを積んであるので、
@@ -8757,6 +8894,16 @@ final class ImageCanvasView: NSView {
 
     private let handleRadius: CGFloat = 7
     private let dragThreshold: CGFloat = 4
+    private static let maskPaintCursor = ImageCanvasView.makeSymbolCursor(
+        symbolName: "paintbrush.pointed",
+        fallback: .crosshair,
+        hotSpot: NSPoint(x: 4, y: 21)
+    )
+    private static let maskEraseCursor = ImageCanvasView.makeSymbolCursor(
+        symbolName: "eraser",
+        fallback: .crosshair,
+        hotSpot: NSPoint(x: 5, y: 20)
+    )
 
     override var isFlipped: Bool { true }
 
@@ -8788,16 +8935,47 @@ final class ImageCanvasView: NSView {
     /// 編集モード=＋（crosshair、ドラッグでROIを描く）、範囲選択モード=矢印（ドラッグで一括選択）。
     private func applyHoverCursor(at point: NSPoint, modifiers: NSEvent.ModifierFlags) {
         let imageRect = imageDrawRect()
+        guard imageRect.contains(point) else {
+            NSCursor.arrow.set()
+            return
+        }
+        if interactionMode.editsMask {
+            maskCursor(erasing: currentMaskStrokeIsErasing(modifiers: modifiers)).set()
+            return
+        }
         let marquee = modifiers.contains(.option)
             ? interactionMode == .edit
             : interactionMode == .marqueeSelect
-        if roiHit(at: point, imageRect: imageRect) != nil {
+        let detectionKind = marquee
+            ? detectionLayerHit(at: point, imageRect: imageRect)
+            : detectionLayerEdgeHit(at: point, imageRect: imageRect)
+        if roiHit(at: point, imageRect: imageRect) != nil || detectionKind != nil {
             NSCursor.openHand.set()
-        } else if imageRect.contains(point) {
-            (marquee ? NSCursor.arrow : NSCursor.crosshair).set()
         } else {
-            NSCursor.arrow.set()
+            (marquee ? NSCursor.arrow : NSCursor.crosshair).set()
         }
+    }
+
+    private static func makeSymbolCursor(symbolName: String, fallback: NSCursor, hotSpot: NSPoint) -> NSCursor {
+        guard let source = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) else {
+            return fallback
+        }
+        let size = NSSize(width: 24, height: 24)
+        let image = NSImage(size: size)
+        image.lockFocus()
+        source.draw(in: NSRect(x: 2, y: 2, width: 20, height: 20),
+                    from: .zero, operation: .sourceOver, fraction: 1)
+        image.unlockFocus()
+        return NSCursor(image: image, hotSpot: hotSpot)
+    }
+
+    private func currentMaskStrokeIsErasing(modifiers: NSEvent.ModifierFlags) -> Bool {
+        let inverted = modifiers.contains(.option)
+        return (interactionMode == .maskErase) != inverted
+    }
+
+    private func maskCursor(erasing: Bool) -> NSCursor {
+        erasing ? Self.maskEraseCursor : Self.maskPaintCursor
     }
 
     /// マウスを動かさなくても、Optionキーの押下/解放やモード切替の瞬間にカーソルを更新する。
@@ -8916,6 +9094,7 @@ final class ImageCanvasView: NSView {
         if showROILayer {
             drawROIs(in: target)
         }
+        drawMaskStrokePreview(in: target)
         if let dragStart, let dragCurrent {
             let rect = NSRect(
                 x: min(dragStart.x, dragCurrent.x),
@@ -9626,6 +9805,43 @@ final class ImageCanvasView: NSView {
                 drawSelectedLayerHighlight(rect)
             }
         }
+    }
+
+    private func drawMaskStrokePreview(in imageRect: NSRect) {
+        guard let state = maskStrokeInProgress,
+              !state.points.isEmpty,
+              let roi = rois.first(where: { $0.id == state.roiID }) else { return }
+        let rect = viewRect(from: roi.rect, imageRect: imageRect)
+        guard rect.width > 0, rect.height > 0 else { return }
+
+        let points = state.points.map { point in
+            NSPoint(x: rect.minX + point.x * rect.width, y: rect.minY + point.y * rect.height)
+        }
+        let lineWidth = max(2, min(rect.width, rect.height) * CGFloat(maskBrushWidth))
+        let color = state.isAdditive ? NSColor.systemGreen : NSColor.systemRed
+        color.withAlphaComponent(0.72).setStroke()
+        color.withAlphaComponent(0.22).setFill()
+
+        if points.count == 1, let point = points.first {
+            let dotRect = NSRect(
+                x: point.x - lineWidth / 2,
+                y: point.y - lineWidth / 2,
+                width: lineWidth,
+                height: lineWidth
+            )
+            NSBezierPath(ovalIn: dotRect).fill()
+            return
+        }
+
+        let path = NSBezierPath()
+        path.move(to: points[0])
+        for point in points.dropFirst() {
+            path.line(to: point)
+        }
+        path.lineCapStyle = .round
+        path.lineJoinStyle = .round
+        path.lineWidth = lineWidth
+        path.stroke()
     }
 
     /// ROIのカテゴリ名を矩形の左上へ小さく表示する（対象カテゴリ変更の結果を画面上で確認できるようにする）。
@@ -10375,6 +10591,21 @@ extension ImageCanvasView {
         )
     }
 
+    private func maskStrokeDirtyRect(roi: MosaicROI, from oldPoint: NSPoint?, to newPoint: NSPoint) -> NSRect {
+        let imageRect = imageDrawRect()
+        let roiRect = viewRect(from: roi.rect, imageRect: imageRect)
+        let padding = max(8, min(roiRect.width, roiRect.height) * CGFloat(maskBrushWidth) / 2 + 6)
+        let base = oldPoint.map {
+            NSRect(
+                x: min($0.x, newPoint.x),
+                y: min($0.y, newPoint.y),
+                width: abs($0.x - newPoint.x),
+                height: abs($0.y - newPoint.y)
+            )
+        } ?? NSRect(x: newPoint.x, y: newPoint.y, width: 1, height: 1)
+        return base.insetBy(dx: -padding, dy: -padding)
+    }
+
     /// 選択中のROI（無ければクリック位置のROI）へストロークを開始する。
     fileprivate func beginMaskStroke(at point: NSPoint, erasing: Bool) {
         let imageRect = imageDrawRect()
@@ -10401,21 +10632,31 @@ extension ImageCanvasView {
         guard let roi = target, let local = maskStrokePoint(at: point, roi: roi) else { return }
         selectedROIID = roi.id
         maskStrokeInProgress = (roi.id, [local], !erasing, isNewLayer)
-        needsDisplay = true
+        lastMaskStrokeViewPoint = point
+        maskCursor(erasing: erasing).set()
+        setNeedsDisplay(maskStrokeDirtyRect(roi: roi, from: nil, to: point))
     }
 
     fileprivate func extendMaskStroke(to point: NSPoint) {
         guard var state = maskStrokeInProgress,
               let roi = rois.first(where: { $0.id == state.roiID }),
               let local = maskStrokePoint(at: point, roi: roi) else { return }
+        if let previous = lastMaskStrokeViewPoint,
+           hypot(point.x - previous.x, point.y - previous.y) < maskStrokeMinimumViewSpacing {
+            return
+        }
+        let previous = lastMaskStrokeViewPoint
         state.points.append(local)
         maskStrokeInProgress = state
-        needsDisplay = true
+        lastMaskStrokeViewPoint = point
+        maskCursor(erasing: !state.isAdditive).set()
+        setNeedsDisplay(maskStrokeDirtyRect(roi: roi, from: previous, to: point))
     }
 
     fileprivate func finishMaskStroke() {
         guard let state = maskStrokeInProgress else { return }
         maskStrokeInProgress = nil
+        lastMaskStrokeViewPoint = nil
         guard !state.points.isEmpty else { return }
         onMaskStrokeCompleted?(state.roiID, ManualMaskStroke(
             points: state.points, width: maskBrushWidth, isAdditive: state.isAdditive
