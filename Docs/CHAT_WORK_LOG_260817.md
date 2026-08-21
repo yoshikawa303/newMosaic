@@ -45,3 +45,23 @@
 - `CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`scripts/package_macos_app.sh` を v0.0.00139 / Build 139 として同期。
 - 検証: `swift build` PASS、`git diff --check` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00139` / `139` を確認、`open -n dist/newMosaic.app` で起動確認。
 - 作業時間: 約15分。
+
+### 2026-08-21 22:35 JST - Codex GPT-5 - 種別: 依頼内容 - 動画ダブルクリック/解析導線/外部アプリ動画リアルタイム処理確認
+
+```text
+☆バグ：ライブラリから動画をダブルクリックした際エラーになる。再生アイコンをクリックするとプレビューウィンドウでは表示。
+☆バグ：動画解析できない。動画解析の操作手順を教えて。
+☆質問：動画をライブラリにインポート後の解析の他に、Chromeなどの別アプリ内の動画コントロールに表示された無修正動画をリアルタイムにモザイク処理可能？
+```
+
+### 2026-08-21 22:35 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00140 動画編集導線修正
+
+- 作業AIモデル: Codex GPT-5（動画ダブルクリック分岐、動画解析手順メッセージ、保存導線修正、文書同期を同モデルで実施。実行中モデル自体は切替不可）
+- ライブラリの動画ダブルクリック/「元画像/動画を開く」操作を、静止画ローダーではなく動画キーフレーム編集モードへ分岐。
+- 動画登録直後も、確認用プレビューではなくキャンバス下部タイムライン付き編集モードへ入るよう変更。プレビュー再生はライブラリの再生アイコンに限定。
+- 動画追跡/書き出しで手順不足のとき、`自動候補生成→ROI修正→キーフレーム追加→時刻移動→追跡確認→書き出し` の流れが分かるステータスを表示。
+- 動画編集中の未保存確認で「保存」を選んだ場合、静止画の加工済み画像ではなく現在時刻の動画キーフレームとして保存するよう修正。
+- Chrome等の別アプリ上の動画リアルタイム処理は現行未対応。将来対応する場合は ScreenCaptureKit 等の画面/ウィンドウ取得、ローカル推論、処理済みビュー/オーバーレイ/仮想カメラ出力の別アーキテクチャが必要。DRM/HDCP保護コンテンツは取得・処理できない可能性がある。
+- 検証: `swift build` PASS、`swift test` 162件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS。
+- パッケージ: `scripts/package_macos_app.sh` PASS。`dist/newMosaic.app` は `CFBundleShortVersionString=0.0.00140` / `CFBundleVersion=140`。
+- 署名/起動: `codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`open -n dist/newMosaic.app` で `NewMosaicApp` プロセス起動を確認。

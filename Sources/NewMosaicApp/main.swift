@@ -1509,7 +1509,7 @@ final class MosaicWindowController: NSObject {
                     key: "-", modifiers: [.command], isRecommended: false, action: #selector(zoomOut)),
         AppShortcut(id: "zoomToFit", category: "表示", title: "ウィンドウに合わせる",
                     key: "0", modifiers: [.command], isRecommended: false, action: #selector(zoomToFit)),
-        AppShortcut(id: "openSelectedLibraryOriginal", category: "ライブラリ", title: "元画像を開く",
+        AppShortcut(id: "openSelectedLibraryOriginal", category: "ライブラリ", title: "元画像/動画を開く",
                     key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryOriginal)),
         AppShortcut(id: "jumpToPreviousKeyframe", category: "動画", title: "前のキーフレームへ",
                     key: "", modifiers: [], isRecommended: false, action: #selector(jumpToPreviousKeyframe)),
@@ -4660,7 +4660,7 @@ final class MosaicWindowController: NSObject {
         importVideoFile(at: url)
     }
 
-    /// 動画ファイルをライブラリへリンク登録し、プレビュー再生まで開く。
+    /// 動画ファイルをライブラリへリンク登録し、キーフレーム編集モードで開く。
     /// 「動画を開く」「画像を開く（動画を選んだ場合）」「動画ファイルの貼り付け」で共用する。
     private func importVideoFile(at url: URL) {
         guard confirmCurrentChangesBeforeLeaving() else { return }
@@ -4681,11 +4681,16 @@ final class MosaicWindowController: NSObject {
                     guard let self else { return }
                     self.reloadLibrary()
                     self.selectLibraryItemInUI(item)
-                    self.openVideoPreview(for: item)
+                    self.enterVideoEditingMode(
+                        item: item,
+                        info: info,
+                        reason: "動画を登録して編集モードで開きました。\(Self.videoAnalysisStepHint)"
+                    )
                     self.updateStatus(
                         "動画を登録: \(item.sourceName) "
                         + "\(Int(info.naturalSize.width))x\(Int(info.naturalSize.height)) "
-                        + "\(String(format: "%.1f", info.durationSeconds))秒"
+                        + "\(String(format: "%.1f", info.durationSeconds))秒。"
+                        + Self.videoAnalysisStepHint
                     )
                 }
             } catch {
@@ -4704,6 +4709,8 @@ final class MosaicWindowController: NSObject {
     static let videoRedetectIntervalDefaultsKey = "videoRedetectIntervalFrames"
     static let videoSceneCutDefaultsKey = "videoSceneCutRedetectEnabled"
     static let videoLostExpansionDefaultsKey = "videoLostExpansionEnabled"
+    private static let videoAnalysisStepHint =
+        "自動候補生成→必要ならROI修正→キーフレーム追加→時刻移動→追跡を確認→動画を書き出す"
     /// 再検出間隔の選択肢（フレーム）。30fps動画では 10≒0.3秒 / 30≒1秒 / 90≒3秒。
     static let videoRedetectIntervalChoices = [10, 15, 30, 60, 90]
 
@@ -4795,11 +4802,11 @@ final class MosaicWindowController: NSObject {
     /// 追跡で追随させる（ROI移動追随マスク）。進捗シートで経過表示・キャンセルができる。
     @objc private func exportVideoWithMosaic() {
         guard let item = currentVideoItem, let info = currentVideoInfo else {
-            updateStatus("動画を開いてから実行してください")
+            updateStatus("動画をライブラリでダブルクリックして編集モードで開いてから実行してください")
             return
         }
         guard !currentVideoEditState.keyframes.isEmpty else {
-            updateStatus("キーフレームがありません（ROIを設定して「キーフレーム追加」を実行してください）")
+            updateStatus("キーフレームがありません。\(Self.videoAnalysisStepHint)")
             return
         }
 
@@ -5025,7 +5032,7 @@ final class MosaicWindowController: NSObject {
             updateStatus("動画ファイルが見つかりません: \(item.sourceName)（リンク切れ修正をお試しください）")
             return
         }
-        guard confirmCurrentChangesBeforeLeaving() else { return }
+        guard item.id == currentVideoItem?.id || confirmCurrentChangesBeforeLeaving() else { return }
 
         updateStatus("動画を開いています: \(item.sourceName)")
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
@@ -5033,20 +5040,32 @@ final class MosaicWindowController: NSObject {
                 let info = try VideoFrameReader(url: url).loadInfo()
                 DispatchQueue.main.async {
                     guard let self else { return }
-                    self.currentVideoItem = item
-                    self.currentVideoInfo = info
-                    self.currentVideoEditState = self.videoEditStore.load(for: item.id) ?? VideoEditState()
-                    self.videoTimelineBar.isHidden = false
-                    self.videoTimeSlider.minValue = 0
-                    self.videoTimeSlider.maxValue = max(0.001, info.durationSeconds)
-                    // 既存キーフレームがあればその先頭、無ければ動画先頭を開く
-                    let startTime = self.currentVideoEditState.keyframes.first?.timeSeconds ?? 0
-                    self.seekVideo(to: startTime, reason: "動画を開きました")
+                    self.enterVideoEditingMode(
+                        item: item,
+                        info: info,
+                        reason: "動画を編集モードで開きました。\(Self.videoAnalysisStepHint)"
+                    )
                 }
             } catch {
                 DispatchQueue.main.async { [weak self] in self?.showError(error) }
             }
         }
+    }
+
+    private func enterVideoEditingMode(item: MosaicLibraryItem, info: VideoInfo, reason: String) {
+        currentVideoItem = item
+        currentVideoInfo = info
+        currentLibraryItem = item
+        renderedImage = nil
+        mosaicPreviewCheckbox.state = .off
+        currentVideoEditState = videoEditStore.load(for: item.id) ?? VideoEditState()
+        videoTimelineBar.isHidden = false
+        videoTimeSlider.minValue = 0
+        videoTimeSlider.maxValue = max(0.001, info.durationSeconds)
+        selectLibraryItemInUI(item)
+        // 既存キーフレームがあればその先頭、無ければ動画先頭を開く。
+        let startTime = currentVideoEditState.keyframes.first?.timeSeconds ?? 0
+        seekVideo(to: startTime, reason: reason)
     }
 
     /// 動画編集モードを終了する（静止画を開いた場合など）。
@@ -5114,7 +5133,7 @@ final class MosaicWindowController: NSObject {
     /// 現在のフレームのROIをキーフレームとして保存する。
     @objc private func addVideoKeyframe() {
         guard let item = currentVideoItem else {
-            updateStatus("動画を開いてから実行してください")
+            updateStatus("動画をライブラリでダブルクリックして編集モードで開いてから実行してください")
             return
         }
         currentVideoEditState.upsertKeyframe(
@@ -5170,17 +5189,17 @@ final class MosaicWindowController: NSObject {
     /// 見失ったROIはステータスへ件数を出し、ユーザーが修正して新しいキーフレームにできる。
     @objc private func runTrackingPreview() {
         guard let item = currentVideoItem, let info = currentVideoInfo else {
-            updateStatus("動画を開いてから実行してください")
+            updateStatus("動画をライブラリでダブルクリックして編集モードで開いてから実行してください")
             return
         }
         guard let keyframe = currentVideoEditState.keyframe(at: currentVideoTimeSeconds),
               !keyframe.rois.isEmpty else {
-            updateStatus("追跡の起点となるキーフレーム（ROIあり）がありません")
+            updateStatus("追跡の起点となるROI付きキーフレームがありません。\(Self.videoAnalysisStepHint)")
             return
         }
         let targetTime = currentVideoTimeSeconds
         guard targetTime > keyframe.timeSeconds + 0.001 else {
-            updateStatus("キーフレーム上のため追跡は不要です")
+            updateStatus("キーフレーム上です。タイムラインを後の時刻へ移動してから追跡を確認してください")
             return
         }
         let url = libraryEngine.originalURL(for: item)
@@ -6505,6 +6524,10 @@ final class MosaicWindowController: NSObject {
 
     @objc private func openSelectedLibraryOriginal() {
         guard let item = selectedLibraryItem() else { return }
+        if item.isVideo {
+            openVideoForEditing(item)
+            return
+        }
         guard item.id == currentLibraryItem?.id || confirmCurrentChangesBeforeLeaving() else { return }
         loadLibraryImage(at: libraryEngine.originalURL(for: item), item: item, useProcessed: false)
     }
@@ -6740,6 +6763,20 @@ final class MosaicWindowController: NSObject {
 
     private func performLibraryAutoSave() {
         guard hasUnsavedChanges, let loadedImage, let item = currentLibraryItem else { return }
+        if item.isVideo {
+            currentVideoEditState.upsertKeyframe(
+                VideoKeyframe(timeSeconds: currentVideoTimeSeconds, rois: canvas.rois)
+            )
+            do {
+                try videoEditStore.save(currentVideoEditState, for: item.id)
+                hasUnsavedChanges = false
+                updateVideoTimelineLabels()
+                updateStatus("動画キーフレームを保存: \(VideoPreviewView.timeText(currentVideoTimeSeconds))")
+            } catch {
+                showError(error)
+            }
+            return
+        }
         do {
             let output = renderedImage ?? loadedImage.cgImage
             currentLibraryItem = try libraryEngine.saveProcessedImage(output, rois: canvas.rois, for: item.id)
