@@ -27,6 +27,16 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(state.keyframe(at: -5)?.timeSeconds == 0)
 }
 
+@Test func videoEditStateSelectsStrictPreviousKeyframeForTracking() {
+    var state = VideoEditState()
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [makeROI(x: 0.1)]))
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 10, rois: [makeROI(x: 0.5)]))
+
+    #expect(state.keyframe(before: 10, requiringROIs: true)?.timeSeconds == 0)
+    #expect(state.keyframe(before: 10.5, requiringROIs: true)?.timeSeconds == 10)
+    #expect(state.keyframe(before: 0, requiringROIs: true) == nil)
+}
+
 @Test func videoEditStateUpsertReplacesSameTimeAndKeepsSorted() {
     var state = VideoEditState()
     state.upsertKeyframe(VideoKeyframe(timeSeconds: 5, rois: [makeROI(x: 0.1)]))

@@ -122,6 +122,7 @@ enum AppLog {
     static let library = Logger(subsystem: subsystem, category: "Library")
     static let export = Logger(subsystem: subsystem, category: "Export")
     static let project = Logger(subsystem: subsystem, category: "Project")
+    static let video = Logger(subsystem: subsystem, category: "Video")
     /// 自動検出（解析）の診断。`Detection` カテゴリに揃えて既存のデバッグログ画面で拾えるようにする。
     /// ここだけはユーザー要望により**ソース画像のファイル名とMD5**を記録する（フルパス・画像内容は残さない）。
     static let analysis = Logger(subsystem: subsystem, category: "Detection")
@@ -366,8 +367,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         videoMenu.addItem(shortcutMenuItem("jumpToNextKeyframe", target: target))
         videoMenu.addItem(shortcutMenuItem("addVideoKeyframe", target: target))
         videoMenu.addItem(shortcutMenuItem("removeVideoKeyframe", target: target))
+        videoMenu.addItem(shortcutMenuItem("deleteSelectedVideoKeyframes", target: target))
+        videoMenu.addItem(shortcutMenuItem("deleteAllVideoKeyframes", target: target))
         videoMenu.addItem(.separator())
         videoMenu.addItem(shortcutMenuItem("runTrackingPreview", target: target))
+        videoMenu.addItem(shortcutMenuItem("autoProcessCurrentVideo", target: target))
         videoMenu.addItem(.separator())
         videoMenu.addItem(shortcutMenuItem("exportVideoWithMosaic", target: target))
         videoItem.submenu = videoMenu
@@ -1078,6 +1082,36 @@ private final class NavigableCollectionView: NSCollectionView {
 }
 
 @MainActor
+private final class VideoTimelineSlider: NSSlider {
+    var keyframeTimes: [Double] = [] {
+        didSet { needsDisplay = true }
+    }
+    var durationSeconds: Double = 0 {
+        didSet { needsDisplay = true }
+    }
+
+    override func draw(_ dirtyRect: NSRect) {
+        super.draw(dirtyRect)
+        guard durationSeconds > 0, !keyframeTimes.isEmpty else { return }
+        let trackInset: CGFloat = 12
+        let usableWidth = max(1, bounds.width - trackInset * 2)
+        let markerTop = bounds.midY - 9
+        let markerBottom = bounds.midY + 9
+        NSColor.controlAccentColor.setFill()
+        for time in keyframeTimes {
+            let ratio = min(1, max(0, time / durationSeconds))
+            let x = trackInset + usableWidth * CGFloat(ratio)
+            let marker = NSBezierPath()
+            marker.move(to: NSPoint(x: x, y: markerTop))
+            marker.line(to: NSPoint(x: x - 4, y: markerBottom))
+            marker.line(to: NSPoint(x: x + 4, y: markerBottom))
+            marker.close()
+            marker.fill()
+        }
+    }
+}
+
+@MainActor
 final class MosaicWindowController: NSObject {
     private(set) var view = NSView()
 
@@ -1109,9 +1143,11 @@ final class MosaicWindowController: NSObject {
     /// キャンバス＋タイムラインを縦に積むコンテナ（静止画ではタイムラインは非表示）。
     private let canvasContainer = NSView()
     private let videoTimelineBar = NSView()
-    private let videoTimeSlider = NSSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
+    private let videoTimeSlider = VideoTimelineSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let videoTimeLabel = NSTextField(labelWithString: "0:00 / 0:00")
-    private let videoKeyframeLabel = NSTextField(labelWithString: "キーフレーム 0件")
+    private let videoKeyframeCountLabel = NSTextField(labelWithString: "キーフレーム 0件")
+    private let videoKeyframeTableView = NSTableView()
+    private var isAutoProcessingVideo = false
     /// 編集中の動画（nil=静止画編集中）。
     private var currentVideoItem: MosaicLibraryItem?
     private var currentVideoInfo: VideoInfo?
@@ -1519,6 +1555,12 @@ final class MosaicWindowController: NSObject {
                     key: "k", modifiers: [.command], isRecommended: true, action: #selector(addVideoKeyframe)),
         AppShortcut(id: "removeVideoKeyframe", category: "動画", title: "キーフレーム削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(removeVideoKeyframe)),
+        AppShortcut(id: "deleteSelectedVideoKeyframes", category: "動画", title: "選択キーフレーム削除",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(deleteSelectedVideoKeyframes)),
+        AppShortcut(id: "deleteAllVideoKeyframes", category: "動画", title: "全キーフレーム削除",
+                    key: "", modifiers: [], isRecommended: false, action: #selector(deleteAllVideoKeyframes)),
+        AppShortcut(id: "autoProcessCurrentVideo", category: "動画", title: "動画自動モザイク処理",
+                    key: "", modifiers: [], isRecommended: true, action: #selector(autoProcessCurrentVideo)),
         AppShortcut(id: "exportVideoWithMosaic", category: "動画", title: "動画を書き出す",
                     key: "e", modifiers: [.command, .shift], isRecommended: true,
                     action: #selector(exportVideoWithMosaic)),
@@ -1554,9 +1596,9 @@ final class MosaicWindowController: NSObject {
     private var batchPanel: NSPanel?
     private let batchProgressBar = NSProgressIndicator()
     private let batchProgressLabel = NSTextField(labelWithString: "")
-    /// サイドパネル内の移動可能ウィンドウ（ライブラリ/レイヤ/モザイク設定）
+    /// サイドパネル内の移動可能ウィンドウ（ライブラリ/レイヤ/動画編集/モザイク設定）
     private enum SidePanelKind: String, CaseIterable {
-        case library, layers, inspector
+        case library, layers, video, inspector
     }
     private var sidePanels: [SidePanelKind: NSView] = [:]
     private var isLoadingMosaicStyleControls = false
@@ -1698,6 +1740,7 @@ final class MosaicWindowController: NSObject {
         configureMosaicStyleControls()
         let libraryPanel = makeLibraryPanel()
         let layerPanel = makeLayerPanel()
+        let videoPanel = makeVideoPanel()
         let inspectorPanel = makeInspectorPanel()
 
         // サイドパネル（左右）: 各ウィンドウ（ライブラリ/レイヤ/モザイク設定）は◀▶ボタンで左右へ移動できる。
@@ -1716,13 +1759,15 @@ final class MosaicWindowController: NSObject {
         rightPaneSplitView = rightPane
         rightPane.translatesAutoresizingMaskIntoConstraints = false
 
-        sidePanels = [.library: libraryPanel, .layers: layerPanel, .inspector: inspectorPanel]
+        sidePanels = [.library: libraryPanel, .layers: layerPanel, .video: videoPanel, .inspector: inspectorPanel]
         // 最小高さは低めに抑え、境界ドラッグで自由に配分できるようにする
         libraryPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
         layerPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 80).isActive = true
+        videoPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         inspectorPanel.heightAnchor.constraint(greaterThanOrEqualToConstant: 120).isActive = true
         attachPanelMoveButtons(to: libraryPanel, kind: .library)
         attachPanelMoveButtons(to: layerPanel, kind: .layers)
+        attachPanelMoveButtons(to: videoPanel, kind: .video)
         attachPanelMoveButtons(to: inspectorPanel, kind: .inspector)
 
         // メイン分割: 左ペイン / キャンバス / 右ペイン。各境界の左右ドラッグで幅変更できる。
@@ -2174,6 +2219,7 @@ final class MosaicWindowController: NSObject {
         switch kind {
         case .library: return "ライブラリ"
         case .layers: return "レイヤ"
+        case .video: return "動画編集"
         case .inspector: return "モザイク設定"
         }
     }
@@ -2945,6 +2991,101 @@ final class MosaicWindowController: NSObject {
             content.trailingAnchor.constraint(equalTo: document.trailingAnchor),
             content.bottomAnchor.constraint(equalTo: document.bottomAnchor)
         ])
+        return panel
+    }
+
+    private func makeVideoPanel() -> NSView {
+        let panel = NSView()
+        panel.translatesAutoresizingMaskIntoConstraints = false
+        panel.wantsLayer = true
+        panel.layer?.backgroundColor = NSColor.controlBackgroundColor.cgColor
+
+        let title = NSTextField(labelWithString: "動画編集")
+        applyScaledFont(title, size: 15, weight: .semibold)
+        title.translatesAutoresizingMaskIntoConstraints = false
+
+        videoKeyframeCountLabel.textColor = .secondaryLabelColor
+        videoKeyframeCountLabel.translatesAutoresizingMaskIntoConstraints = false
+        applyScaledFont(videoKeyframeCountLabel, size: 12)
+
+        func iconRow(_ views: [NSView]) -> NSStackView {
+            let row = NSStackView(views: views)
+            row.orientation = .horizontal
+            row.spacing = 5
+            row.alignment = .centerY
+            row.translatesAutoresizingMaskIntoConstraints = false
+            return row
+        }
+
+        let prevButton = shortcutToolbarButton("jumpToPreviousKeyframe", symbol: "backward.end")
+        let nextButton = shortcutToolbarButton("jumpToNextKeyframe", symbol: "forward.end")
+        let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle")
+        let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle")
+        let selectedDeleteButton = shortcutToolbarButton("deleteSelectedVideoKeyframes", symbol: "rectangle.badge.minus")
+        let allDeleteButton = shortcutToolbarButton("deleteAllVideoKeyframes", symbol: "trash.slash")
+        let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope")
+        let exportVideoButton = shortcutToolbarButton("exportVideoWithMosaic", symbol: "square.and.arrow.up.on.square")
+        let autoButton = shortcutToolbarButton("autoProcessCurrentVideo", symbol: "wand.and.stars")
+        let controls = NSStackView(views: [
+            iconRow([prevButton, nextButton, addButton, removeButton]),
+            iconRow([trackButton, exportVideoButton, autoButton]),
+            iconRow([selectedDeleteButton, allDeleteButton])
+        ])
+        controls.orientation = .vertical
+        controls.alignment = .leading
+        controls.spacing = 4
+        controls.translatesAutoresizingMaskIntoConstraints = false
+
+        videoKeyframeTableView.headerView = NSTableHeaderView()
+        videoKeyframeTableView.delegate = self
+        videoKeyframeTableView.dataSource = self
+        videoKeyframeTableView.target = self
+        videoKeyframeTableView.doubleAction = #selector(openSelectedVideoKeyframe)
+        videoKeyframeTableView.allowsMultipleSelection = true
+        videoKeyframeTableView.usesAlternatingRowBackgroundColors = true
+        for column in videoKeyframeTableView.tableColumns {
+            videoKeyframeTableView.removeTableColumn(column)
+        }
+        let noColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("videoKeyframeNo"))
+        noColumn.title = "No"
+        noColumn.width = 38
+        let timeColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("videoKeyframeTime"))
+        timeColumn.title = "時刻"
+        timeColumn.width = 72
+        let roiColumn = NSTableColumn(identifier: NSUserInterfaceItemIdentifier("videoKeyframeROI"))
+        roiColumn.title = "ROI"
+        roiColumn.width = 52
+        videoKeyframeTableView.addTableColumn(noColumn)
+        videoKeyframeTableView.addTableColumn(timeColumn)
+        videoKeyframeTableView.addTableColumn(roiColumn)
+
+        let tableScroll = NSScrollView()
+        tableScroll.hasVerticalScroller = true
+        tableScroll.autohidesScrollers = true
+        tableScroll.documentView = videoKeyframeTableView
+        tableScroll.translatesAutoresizingMaskIntoConstraints = false
+
+        panel.addSubview(title)
+        panel.addSubview(videoKeyframeCountLabel)
+        panel.addSubview(controls)
+        panel.addSubview(tableScroll)
+        NSLayoutConstraint.activate([
+            title.topAnchor.constraint(equalTo: panel.topAnchor, constant: 10),
+            title.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
+            title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            videoKeyframeCountLabel.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
+            videoKeyframeCountLabel.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 10),
+            videoKeyframeCountLabel.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
+            controls.topAnchor.constraint(equalTo: videoKeyframeCountLabel.bottomAnchor, constant: 8),
+            controls.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
+            controls.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            tableScroll.heightAnchor.constraint(greaterThanOrEqualToConstant: 70),
+            tableScroll.topAnchor.constraint(equalTo: controls.bottomAnchor, constant: 8),
+            tableScroll.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
+            tableScroll.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
+            tableScroll.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -10)
+        ])
+        updateVideoTimelineLabels()
         return panel
     }
 
@@ -4976,30 +5117,19 @@ final class MosaicWindowController: NSObject {
         separator.boxType = .separator
         separator.translatesAutoresizingMaskIntoConstraints = false
 
-        let prevButton = shortcutToolbarButton("jumpToPreviousKeyframe", symbol: "backward.end")
-        let nextButton = shortcutToolbarButton("jumpToNextKeyframe", symbol: "forward.end")
-        let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle")
-        let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle")
-        let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope")
-        let exportVideoButton = shortcutToolbarButton("exportVideoWithMosaic", symbol: "square.and.arrow.up.on.square")
-
         videoTimeSlider.target = self
         videoTimeSlider.action = #selector(videoTimeSliderChanged)
         videoTimeSlider.translatesAutoresizingMaskIntoConstraints = false
-        videoTimeSlider.toolTip = "再生位置（ドラッグでそのフレームへ移動）"
+        videoTimeSlider.toolTip = "再生位置（ドラッグでそのフレームへ移動。三角マーカーはキーフレーム位置）"
         videoTimeSlider.setAccessibilityLabel("再生位置")
 
-        for label in [videoTimeLabel, videoKeyframeLabel] {
-            label.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
-            label.textColor = .secondaryLabelColor
-            label.translatesAutoresizingMaskIntoConstraints = false
-        }
+        videoTimeLabel.font = Self.scaledMonospacedDigitFont(11, weight: .regular)
+        videoTimeLabel.textColor = .secondaryLabelColor
+        videoTimeLabel.translatesAutoresizingMaskIntoConstraints = false
         videoTimeLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
-        videoKeyframeLabel.widthAnchor.constraint(equalToConstant: 120).isActive = true
 
         let row = NSStackView(views: [
-            prevButton, nextButton, addButton, removeButton, trackButton, exportVideoButton,
-            videoTimeSlider, videoTimeLabel, videoKeyframeLabel
+            videoTimeSlider, videoTimeLabel
         ])
         row.orientation = .horizontal
         row.alignment = .centerY
@@ -5116,14 +5246,23 @@ final class MosaicWindowController: NSObject {
     }
 
     private func updateVideoTimelineLabels() {
-        guard let info = currentVideoInfo else { return }
+        guard let info = currentVideoInfo else {
+            videoKeyframeCountLabel.stringValue = "動画未選択"
+            videoTimeSlider.keyframeTimes = []
+            videoTimeSlider.durationSeconds = 0
+            videoKeyframeTableView.reloadData()
+            return
+        }
         videoTimeLabel.stringValue = "\(VideoPreviewView.timeText(currentVideoTimeSeconds))"
             + " / \(VideoPreviewView.timeText(info.durationSeconds))"
         let isKeyframe = currentVideoEditState.keyframes.contains {
             abs($0.timeSeconds - currentVideoTimeSeconds) < 0.01
         }
-        videoKeyframeLabel.stringValue = "キーフレーム \(currentVideoEditState.keyframes.count)件"
+        videoKeyframeCountLabel.stringValue = "キーフレーム \(currentVideoEditState.keyframes.count)件"
             + (isKeyframe ? "（現在）" : "")
+        videoTimeSlider.keyframeTimes = currentVideoEditState.keyframes.map(\.timeSeconds)
+        videoTimeSlider.durationSeconds = info.durationSeconds
+        videoKeyframeTableView.reloadData()
     }
 
     @objc private func videoTimeSliderChanged() {
@@ -5153,6 +5292,118 @@ final class MosaicWindowController: NSObject {
         saveCurrentVideoEditState(item: item)
         updateVideoTimelineLabels()
         updateStatus("キーフレームを削除: \(VideoPreviewView.timeText(currentVideoTimeSeconds))")
+    }
+
+    @objc private func deleteSelectedVideoKeyframes() {
+        guard let item = currentVideoItem else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        let selectedRows = videoKeyframeTableView.selectedRowIndexes
+        guard !selectedRows.isEmpty else {
+            updateStatus("削除するキーフレームを一覧で選択してください")
+            return
+        }
+        let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        for row in selectedRows.reversed() where row >= 0 && row < sorted.count {
+            currentVideoEditState.removeKeyframe(atTime: sorted[row].timeSeconds)
+        }
+        saveCurrentVideoEditState(item: item)
+        updateVideoTimelineLabels()
+        updateStatus("選択キーフレームを削除しました（\(selectedRows.count)件）")
+        AppLog.video.info("選択キーフレーム削除: count=\(selectedRows.count, privacy: .public)")
+    }
+
+    @objc private func deleteAllVideoKeyframes() {
+        guard let item = currentVideoItem else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        guard !currentVideoEditState.keyframes.isEmpty else {
+            updateStatus("削除するキーフレームはありません")
+            return
+        }
+        let alert = NSAlert()
+        alert.messageText = "すべてのキーフレームを削除しますか？"
+        alert.informativeText = "この動画のキーフレーム編集内容をすべて削除します。この操作は取り消せません。"
+        alert.addButton(withTitle: "削除")
+        alert.addButton(withTitle: "キャンセル")
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let count = currentVideoEditState.keyframes.count
+        currentVideoEditState.keyframes.removeAll()
+        saveCurrentVideoEditState(item: item)
+        updateVideoTimelineLabels()
+        updateStatus("全キーフレームを削除しました（\(count)件）")
+        AppLog.video.info("全キーフレーム削除: count=\(count, privacy: .public)")
+    }
+
+    @objc private func openSelectedVideoKeyframe() {
+        let row = videoKeyframeTableView.clickedRow >= 0 ? videoKeyframeTableView.clickedRow : videoKeyframeTableView.selectedRow
+        let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        guard row >= 0, row < sorted.count else { return }
+        seekVideo(to: sorted[row].timeSeconds, reason: "キーフレーム")
+    }
+
+    @objc private func autoProcessCurrentVideo() {
+        guard let item = currentVideoItem, let info = currentVideoInfo else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        guard !isAutoProcessingVideo else {
+            updateStatus("動画自動モザイク処理は実行中です")
+            return
+        }
+        let detector = makeVideoFrameDetector()
+        let intervalFrames = currentVideoTrackingOptions().redetectIntervalFrames
+        let intervalSeconds = max(0.5, Double(intervalFrames) / max(1, info.frameRate))
+        let times = stride(from: 0.0, through: info.durationSeconds, by: intervalSeconds).map { $0 }
+        guard !times.isEmpty else {
+            updateStatus("処理できる動画フレームがありません")
+            return
+        }
+        let url = libraryEngine.originalURL(for: item)
+        let baseState = currentVideoEditState
+        isAutoProcessingVideo = true
+        updateStatus("動画自動モザイク処理中… 0/\(times.count)")
+        AppLog.video.info("動画自動モザイク処理開始: samples=\(times.count, privacy: .public)")
+
+        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+            var state = baseState
+            var detectedKeyframes = 0
+            do {
+                for (index, time) in times.enumerated() {
+                    let frame = try VideoFrameReader(url: url)
+                        .frame(at: CMTime(seconds: time, preferredTimescale: 600))
+                    let rois = try detector(frame)
+                    if !rois.isEmpty {
+                        state.upsertKeyframe(VideoKeyframe(timeSeconds: time, rois: rois))
+                        detectedKeyframes += 1
+                    }
+                    DispatchQueue.main.async { [weak self] in
+                        self?.updateStatus("動画自動モザイク処理中… \(index + 1)/\(times.count)")
+                    }
+                }
+                DispatchQueue.main.async {
+                    guard let self else { return }
+                    self.isAutoProcessingVideo = false
+                    guard self.currentVideoItem?.id == item.id else { return }
+                    self.currentVideoEditState = state
+                    self.saveCurrentVideoEditState(item: item)
+                    self.updateVideoTimelineLabels()
+                    self.seekVideo(to: self.currentVideoTimeSeconds, reason: "動画自動モザイク処理完了")
+                    self.updateStatus("動画自動モザイク処理完了: キーフレーム\(state.keyframes.count)件（ROIあり \(detectedKeyframes)件）。必要なら確認後に動画を書き出してください")
+                    AppLog.video.info(
+                        "動画自動モザイク処理完了: keyframes=\(state.keyframes.count, privacy: .public) detected=\(detectedKeyframes, privacy: .public)"
+                    )
+                }
+            } catch {
+                DispatchQueue.main.async { [weak self] in
+                    self?.isAutoProcessingVideo = false
+                    self?.showError(error)
+                    AppLog.video.error("動画自動モザイク処理失敗: \(error.localizedDescription, privacy: .public)")
+                }
+            }
+        }
     }
 
     private func saveCurrentVideoEditState(item: MosaicLibraryItem) {
@@ -5190,16 +5441,13 @@ final class MosaicWindowController: NSObject {
     @objc private func runTrackingPreview() {
         guard let item = currentVideoItem, let info = currentVideoInfo else {
             updateStatus("動画をライブラリでダブルクリックして編集モードで開いてから実行してください")
-            return
-        }
-        guard let keyframe = currentVideoEditState.keyframe(at: currentVideoTimeSeconds),
-              !keyframe.rois.isEmpty else {
-            updateStatus("追跡の起点となるROI付きキーフレームがありません。\(Self.videoAnalysisStepHint)")
+            AppLog.video.info("追跡確認を中止: 動画未選択")
             return
         }
         let targetTime = currentVideoTimeSeconds
-        guard targetTime > keyframe.timeSeconds + 0.001 else {
-            updateStatus("キーフレーム上です。タイムラインを後の時刻へ移動してから追跡を確認してください")
+        guard let keyframe = trackingStartKeyframe(before: targetTime) else {
+            updateStatus("追跡の起点となる直前のROI付きキーフレームがありません。先にROIを作り「キーフレーム追加」後、後の時刻へ移動してください")
+            AppLog.video.info("追跡確認を中止: 起点なし target=\(targetTime, privacy: .public)")
             return
         }
         let url = libraryEngine.originalURL(for: item)
@@ -5213,6 +5461,9 @@ final class MosaicWindowController: NSObject {
         let startIndex = Int((keyframe.timeSeconds * frameRate).rounded())
         let endIndex = Int((targetTime * frameRate).rounded())
         updateStatus("追跡中… \(VideoPreviewView.timeText(keyframe.timeSeconds)) → \(VideoPreviewView.timeText(targetTime))")
+        AppLog.video.info(
+            "追跡確認開始: start=\(keyframe.timeSeconds, privacy: .public) target=\(targetTime, privacy: .public) roi=\(keyframe.rois.count, privacy: .public)"
+        )
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
             // 書き出しと同じ`VideoTrackingCoordinator`を使う。プレビューと書き出しで
@@ -5258,8 +5509,15 @@ final class MosaicWindowController: NSObject {
                         + "（直前の位置を保持しています。修正後「キーフレーム追加」で確定してください）"
                     )
                 }
+                AppLog.video.info(
+                    "追跡確認完了: roi=\(resultROIs.count, privacy: .public) lost=\(resultLost.count, privacy: .public)"
+                )
             }
         }
+    }
+
+    private func trackingStartKeyframe(before targetTime: Double) -> VideoKeyframe? {
+        currentVideoEditState.keyframe(before: targetTime, requiringROIs: true)
     }
 
     /// 動画プレビュー再生ウィンドウを開く（V2。確認用の再生のみで編集は行わない）。
@@ -8310,13 +8568,20 @@ private extension OSLogEntryLog.Level {
 
 extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
     nonisolated func numberOfRows(in tableView: NSTableView) -> Int {
-        MainActor.assumeIsolated { displayedLibraryItems.count }
+        MainActor.assumeIsolated {
+            tableView === videoKeyframeTableView
+                ? currentVideoEditState.keyframes.count
+                : displayedLibraryItems.count
+        }
     }
 
     /// 列ごとにセルを生成する（項目を横一列に並べたリスト表示。列見出しクリックでソート可能）。
     /// サムネイル列はサムネイル表示モードのみ使用する。
     nonisolated func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
         MainActor.assumeIsolated {
+            if tableView === videoKeyframeTableView {
+                return videoKeyframeCell(tableColumn: tableColumn, row: row)
+            }
             guard row >= 0, row < displayedLibraryItems.count,
                   let columnID = tableColumn?.identifier.rawValue else { return nil }
             let item = displayedLibraryItems[row]
@@ -8394,17 +8659,54 @@ extension MosaicWindowController: NSTableViewDataSource, NSTableViewDelegate {
     }
 
     nonisolated func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        MainActor.assumeIsolated { libraryViewMode == .thumbnailList ? 40 : 22 }
+        MainActor.assumeIsolated {
+            tableView === videoKeyframeTableView ? 22 : (libraryViewMode == .thumbnailList ? 40 : 22)
+        }
     }
 
     /// 列見出しクリックによるソート（項目名クリックでリストソート可能にする改善への対応）。
     func tableView(_ tableView: NSTableView, sortDescriptorsDidChange oldDescriptors: [NSSortDescriptor]) {
+        guard tableView !== videoKeyframeTableView else { return }
         guard let descriptor = tableView.sortDescriptors.first,
               let key = descriptor.key,
               let sortKey = LibrarySortKey(rawValue: key) else { return }
         librarySortKey = sortKey
         librarySortAscending = descriptor.ascending
         refreshLibraryDisplay()
+    }
+
+    private func videoKeyframeCell(tableColumn: NSTableColumn?, row: Int) -> NSView? {
+        let keyframes = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        guard row >= 0, row < keyframes.count,
+              let columnID = tableColumn?.identifier.rawValue else { return nil }
+        let identifier = NSUserInterfaceItemIdentifier("VideoKeyframeCell.\(columnID)")
+        let cell = videoKeyframeTableView.makeView(withIdentifier: identifier, owner: self) as? NSTableCellView ?? {
+            let cell = NSTableCellView()
+            let label = NSTextField(labelWithString: "")
+            label.lineBreakMode = .byTruncatingTail
+            label.translatesAutoresizingMaskIntoConstraints = false
+            cell.addSubview(label)
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: cell.leadingAnchor, constant: 4),
+                label.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: -4),
+                label.centerYAnchor.constraint(equalTo: cell.centerYAnchor)
+            ])
+            cell.textField = label
+            return cell
+        }()
+        cell.identifier = identifier
+        cell.textField?.font = Self.scaledFont(11)
+        switch columnID {
+        case "videoKeyframeNo":
+            cell.textField?.stringValue = "\(row + 1)"
+        case "videoKeyframeTime":
+            cell.textField?.stringValue = VideoPreviewView.timeText(keyframes[row].timeSeconds)
+        case "videoKeyframeROI":
+            cell.textField?.stringValue = "\(keyframes[row].rois.count)"
+        default:
+            cell.textField?.stringValue = ""
+        }
+        return cell
     }
 }
 

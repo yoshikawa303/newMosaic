@@ -65,3 +65,29 @@
 - 検証: `swift build` PASS、`swift test` 162件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS。
 - パッケージ: `scripts/package_macos_app.sh` PASS。`dist/newMosaic.app` は `CFBundleShortVersionString=0.0.00140` / `CFBundleVersion=140`。
 - 署名/起動: `codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`open -n dist/newMosaic.app` で `NewMosaicApp` プロセス起動を確認。
+
+### 2026-08-22 00:00 JST - Codex GPT-5 - 種別: 依頼内容 - 動画追跡確認バグ/動画自動処理/動画編集パネル
+
+```text
+☆動画
+・バグ：ヘルプの通りの操作を行っても、追跡の確認を行っても何も処理されない。
+・改善：動画＞自動モザイク処理（指定カテゴリで動画モザイク処理の一覧の操作を自動化、一括処理）
+・改善：動画＞動画編集パネル追加
+　ー動画関連の編集、コントロールボタンをパネル内に移動
+　ーキーフレーム編集(選択／すべて 一括削除）
+　ーキーフレーム数
+　ー 動画下は、シークバーとシークバー上にキーフレーム位置を表示する。
+　ーキーフレームリスト（No、時刻、ROI）
+```
+
+### 2026-08-22 00:00 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00141 動画追跡/編集パネル改善
+
+- 作業AIモデル: Codex GPT-5（追跡起点修正、AppKit動画編集パネル、キーフレーム一覧、シークバーマーカー、動画自動処理、回帰テスト、文書同期を同モデルで実施。実行中モデル自体は切替不可）
+- 追跡確認の起点を「現在時刻より前のROI付きキーフレーム」へ修正。2つ目以降のキーフレーム上で追跡確認しても、現在キーフレーム自身を起点にして0秒区間で止まる問題を解消。
+- `Video` ログカテゴリを追加し、追跡確認の開始/中止/完了と動画自動処理の開始/完了/失敗を記録。
+- 右サイドパネルに「動画編集」パネルを追加。キーフレーム移動、追加/削除、追跡確認、書き出し、動画自動モザイク処理、選択/全キーフレーム削除を集約。
+- 動画下部はシークバーと時刻表示のみに整理し、シークバー上へキーフレーム位置マーカーを表示。
+- キーフレーム一覧（No、時刻、ROI）を追加し、ダブルクリックで該当時刻へ移動できるようにした。
+- 「動画自動モザイク処理」を追加。現在の候補カテゴリ/検出設定で動画全体を一定間隔で解析し、ROIが検出された時刻だけキーフレームを作成。
+- 回帰テスト `videoEditStateSelectsStrictPreviousKeyframeForTracking` を追加。
+- 検証: `swift build` PASS、`swift test --filter videoEditStateSelectsStrictPreviousKeyframeForTracking` PASS、`swift test` 163件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00141` / `141` を確認、`open -n dist/newMosaic.app` で起動確認。

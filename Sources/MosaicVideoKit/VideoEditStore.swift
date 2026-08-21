@@ -58,6 +58,17 @@ public struct VideoEditState: Codable, Equatable, Sendable {
         return sorted.last { $0.timeSeconds <= timeSeconds + 0.0001 } ?? sorted.first
     }
 
+    /// 指定時刻より前で最も近いキーフレームを返す。
+    /// 追跡確認では、現在時刻がキーフレーム上でも「現在のキーフレーム」ではなく
+    /// 直前のキーフレームを起点にする必要がある。
+    public func keyframe(before timeSeconds: Double, requiringROIs: Bool = false) -> VideoKeyframe? {
+        let sorted = keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        return sorted.last {
+            $0.timeSeconds < timeSeconds - 0.001
+                && (!requiringROIs || !$0.rois.isEmpty)
+        }
+    }
+
     /// キーフレームを追加/更新する。時刻昇順で保持する。
     /// 既存キーフレームと±0.01秒以内の場合は「同じ時刻の編集」とみなして丸ごと置き換える
     /// （時刻も新しい値になる。ユーザーが再生位置を微調整して編集し直したケースを想定）。
