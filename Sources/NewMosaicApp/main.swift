@@ -4957,27 +4957,49 @@ final class MosaicWindowController: NSObject {
         )
     }
 
+    private typealias VideoFrameDetector = @Sendable (CGImage) throws -> [MosaicROI]
+
+    private struct VideoFrameDetectionConfiguration: Sendable {
+        let domainMode: Int
+        let groinPositionRatio: Double
+        let categories: Set<MosaicTargetCategory>
+        let shape: ROIShape
+    }
+
     /// 動画フレーム1枚からROIを検出するクロージャを作る。
     ///
     /// 静止画の「候補生成」と同じ`CandidateGenerationWorker`・同じ候補カテゴリ絞り込み・
     /// 同じ形状適用を通すため、動画の自動再検出は静止画の検出精度をそのまま引き継ぐ。
     /// 学習モードによる候補の補正（`refineCandidates`）はフレーム毎に走らせると
     /// 学習履歴の重み付けが動画1本で偏るため、動画側では適用しない。
-    private func makeVideoFrameDetector() -> (CGImage) throws -> [MosaicROI] {
+    private func makeVideoFrameDetector() -> VideoFrameDetector {
         let worker = candidateGenerationWorker
-        let domainMode = domainModeControl.indexOfSelectedItem
-        let groinRatio = groinPositionSlider.doubleValue
-        let categories = checkedGenerationCategories()
-        let shape = canvas.currentShape
+        let configuration = VideoFrameDetectionConfiguration(
+            domainMode: domainModeControl.indexOfSelectedItem,
+            groinPositionRatio: groinPositionSlider.doubleValue,
+            categories: checkedGenerationCategories(),
+            shape: canvas.currentShape
+        )
+        return Self.makeVideoFrameDetector(worker: worker, configuration: configuration)
+    }
+
+    nonisolated private static func makeVideoFrameDetector(
+        worker: CandidateGenerationWorker,
+        configuration: VideoFrameDetectionConfiguration
+    ) -> VideoFrameDetector {
         return { frame in
             let output = try worker.run(
-                CandidateGenerationInput(image: frame, domainMode: domainMode, groinPositionRatio: groinRatio)
+                CandidateGenerationInput(
+                    image: frame,
+                    domainMode: configuration.domainMode,
+                    groinPositionRatio: configuration.groinPositionRatio
+                )
             )
-            var rois = output.rois.filter { categories.contains($0.category) }
+            var rois = output.rois.filter { configuration.categories.contains($0.category) }
             rois = rois.map { roi in
                 var updated = roi
-                updated.shape = shape
-                if shape == .polygon && updated.polygonPoints == nil {
+                updated.shape = configuration.shape
+                if configuration.shape == .polygon && updated.polygonPoints == nil {
                     updated.polygonPoints = MosaicROI.defaultPolygonPoints
                 }
                 if updated.roiGroupName == nil {
@@ -5049,7 +5071,7 @@ final class MosaicWindowController: NSObject {
         let options = currentVideoTrackingOptions()
         // 検出器は自動再検出（またはシーンカット再検出）が有効なときだけ用意する。
         // 生成コスト自体は小さいが、無効時に誤って呼ばれないよう nil を渡す。
-        let detector: ((CGImage) throws -> [MosaicROI])? =
+        let detector: VideoFrameDetector? =
             (options.autoRedetectEnabled || options.sceneCutRedetectEnabled)
             ? makeVideoFrameDetector()
             : nil
@@ -5434,7 +5456,7 @@ final class MosaicWindowController: NSObject {
             updateStatus("動画自動モザイク処理は実行中です")
             return
         }
-        let detector = makeVideoFrameDetector()
+        let detector: VideoFrameDetector = makeVideoFrameDetector()
         let intervalFrames = currentVideoTrackingOptions().redetectIntervalFrames
         let intervalSeconds = max(0.5, Double(intervalFrames) / max(1, info.frameRate))
         let times = stride(from: 0.0, through: info.durationSeconds, by: intervalSeconds).map { $0 }
@@ -5535,7 +5557,7 @@ final class MosaicWindowController: NSObject {
         let frameRate = max(1, info.frameRate)
         let editState = currentVideoEditState
         let options = currentVideoTrackingOptions()
-        let detector: ((CGImage) throws -> [MosaicROI])? =
+        let detector: VideoFrameDetector? =
             (options.autoRedetectEnabled || options.sceneCutRedetectEnabled)
             ? makeVideoFrameDetector()
             : nil

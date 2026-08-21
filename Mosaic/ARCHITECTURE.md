@@ -392,6 +392,13 @@ newMosaic は、画像・動画のモザイク作業を完全自動化ではな�
 - **対応**: 復元結果を `SplitRestoreResult` として幅復元と左右ペイン内高さ復元に分離した。高さが復元できなかった側は `rebalancePanelHeights(in:)` で現在の `SidePanelKind` 構成に合わせて既定配分する。パネルを左右へ移動した直後も移動元/移動先を再配分し、ライブラリを含む各パネルが見える状態を維持する。
 - **保存保険**: 起動直後の `splitViewDidResizeSubviews(_:)` で `[0, 0, 残り]` のような過渡的高さが保存されないよう、最小表示高さ未満のパネルを含む高さ配列は保存しない。さらに起動後1ターン遅延で `enforceSidePanelMinimumHeights()` を実行し、表示中ペインに潰れたパネルがあれば再配分する。
 
+## 5.34.6 動画自動処理のバックグラウンド検出器隔離（2026-08-22 v0.0.00143〜）
+
+- **症状**: 動画編集パネルの「動画自動モザイク処理」を押すと、バックグラウンドキュー `com.apple.root.user-initiated-qos` で `EXC_BREAKPOINT (SIGTRAP)` によりアプリが強制終了する。クラッシュスタックは `MosaicWindowController.makeVideoFrameDetector()` が返した検出クロージャ内の `filter` から Swift Concurrency の `_swift_task_checkIsolatedSwift` へ到達していた。
+- **真因**: `makeVideoFrameDetector()` は AppKit コントローラ上で生成されるため、返却したクロージャがメインアクター隔離を帯びたままになっていた。`autoProcessCurrentVideo()`、動画書き出し、追跡確認はいずれもこのクロージャをバックグラウンドキューで呼ぶため、実行時の隔離チェックで停止した。
+- **対応**: UI状態（画像種別、鼠径部位置、候補カテゴリ、ROI形状）を `VideoFrameDetectionConfiguration` へ値としてスナップショット化し、`nonisolated` な static helper で `@Sendable` の `VideoFrameDetector` を生成する。これにより検出処理は `CandidateGenerationWorker` と Sendable な設定値だけを捕捉し、メインアクターへ依存しない。
+- **適用範囲**: 動画自動モザイク処理だけでなく、同じ検出器をバックグラウンドで使う `VideoTrackingCoordinator` の自動再検出（動画書き出し・追跡確認）も `@Sendable` 境界に合わせる。UIから最新設定を読むのは検出器作成時だけで、フレームごとの処理中には AppKit オブジェクトへ触れない。
+
 ## 5.35 「対象形状」の初期実装を比較用に併存（2026-07-28 v0.0.00090〜）
 
 - **経緯**: 「対象形状の精度がリリース初期より悪い」というGUI報告に対し、初期実装（Build 41、コミット`2170d1a`）と現行の差分を再確認した。クロップ範囲・前景抽出・顕著領域マスクはv0.0.00083で当時と同一へ復元済みで、**残る差分は最終段の制限方法のみ**だった。

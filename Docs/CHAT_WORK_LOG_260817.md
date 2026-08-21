@@ -106,3 +106,18 @@
 - パネルを左右へ移動した直後も、移動元/移動先のサイド内高さを再配分し、ライブラリ/レイヤ/動画編集/インスペクタが見える状態を維持するよう修正。
 - 追加確認で、実設定に `Layout.rightPaneHeights = [0, 0, 819]` が残っていることを確認。潰れた高さを保存しない保険と、起動後1ターン遅延での高さ再確認を追加。
 - 検証: `swift build` PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00142` / `142` を確認、`Layout.rightPaneHeights = [0, 0, 819]` を持つ設定から再起動して `[280, 119, 420]` へ復旧することを確認、スクリーンショット `/tmp/newmosaic-v00142-layout-single.png` でライブラリパネル表示を目視確認。
+
+### 2026-08-22 00:50 JST - Codex GPT-5 - 種別: 依頼内容 - 動画自動モザイク処理クラッシュ
+
+```text
+☆バグ：動画自動処理ボタンを押すとアプリが強制終了する。
+```
+
+### 2026-08-22 00:50 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00143 動画自動処理クラッシュ修正
+
+- 作業AIモデル: Codex GPT-5（クラッシュログ解析、Swift Concurrency隔離修正、動画自動処理/追跡/書き出しの共通検出器境界整理、文書同期を同モデルで実施。実行中モデル自体は切替不可）
+- 添付クラッシュログの `MosaicWindowController.makeVideoFrameDetector()` → `Array.filter` → `_swift_task_checkIsolatedSwift` から、動画自動モザイク処理がバックグラウンドキューでメインアクター隔離された検出クロージャを呼んでいることを原因と判断。
+- 動画フレーム検出器を `@Sendable` な `VideoFrameDetector` として明示し、UI状態を `VideoFrameDetectionConfiguration` へスナップショット化。`nonisolated` static helper で検出クロージャを生成し、フレーム処理中にAppKitオブジェクトへ触れないよう修正。
+- 同じ検出器を使う動画書き出し時の自動再検出、追跡確認時の自動再検出も `@Sendable` 境界に合わせて修正。
+- リリースアップ: `scripts/package_macos_app.sh` を `0.0.00143` / `143` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
+- 検証: `swift build` PASS、`swift test` 163件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00143` / `143` を確認、`open -n dist/newMosaic.app` で起動確認。

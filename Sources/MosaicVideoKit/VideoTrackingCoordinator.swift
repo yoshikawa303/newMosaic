@@ -103,7 +103,7 @@ public final class VideoTrackingCoordinator {
     public func rois(
         forFrame index: Int,
         image: CGImage,
-        detector: ((CGImage) throws -> [MosaicROI])? = nil
+        detector: (@Sendable (CGImage) throws -> [MosaicROI])? = nil
     ) throws -> FrameOutcome {
         guard let keyframe = editState.keyframe(at: Double(index) / frameRate) else {
             return FrameOutcome(rois: [], lostIDs: [], didRedetect: false,

@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00143 - 2026-08-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: 動画編集パネルの「動画自動モザイク処理」を押すとアプリが強制終了する問題を修正した。検出クロージャがメインアクター隔離を帯びたままバックグラウンド処理から呼ばれ、Swift Concurrency の隔離チェックで停止していた。
+- 修正: 同じ動画フレーム検出器を使う動画書き出し時の自動再検出、および追跡確認時の自動再検出でも同じクラッシュが起きないようにした。
+
+■更新履歴
+
+- 動画フレーム検出器を `@Sendable` な `VideoFrameDetector` として明示し、UI状態を `VideoFrameDetectionConfiguration` にスナップショット化してから非隔離 static helper で生成するよう変更。
+- `VideoTrackingCoordinator.rois(forFrame:image:detector:)` の検出器引数を `@Sendable` に変更し、バックグラウンドで使う検出クロージャの型境界を明確化。
+
 ## v0.0.00142 - 2026-08-22
 
 ■更新履歴（Readme / ChangeLog 用）
