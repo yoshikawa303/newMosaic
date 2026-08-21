@@ -31,3 +31,17 @@
 - パッケージ: `scripts/package_macos_app.sh` PASS。`dist/newMosaic.app` は `CFBundleShortVersionString=0.0.00138` / `CFBundleVersion=138`。
 - 署名/起動: `codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`open -n dist/newMosaic.app` で `NewMosaicApp` プロセス起動を確認。
 - 作業時間: 約80分。
+
+### 2026-08-21 21:20 JST - Codex GPT-5 - 種別: 依頼内容 - ツールバーのフォルダ一括登録アイコン移動
+
+```text
+☆ツールバー＞フォルダ一括登録アイコンを「開く」アイコンの右に移動。
+```
+
+### 2026-08-21 21:20 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00139 ツールバー配置調整
+
+- 作業AIモデル: Codex GPT-5（定型的なUI配置変更だが、実行中モデルを実際には切替不可のため同モデルで実施）
+- メインツールバーのファイル系アイコン順を `開く` → `フォルダを一括登録` → `貼り付け` に変更。
+- `CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`scripts/package_macos_app.sh` を v0.0.00139 / Build 139 として同期。
+- 検証: `swift build` PASS、`git diff --check` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00139` / `139` を確認、`open -n dist/newMosaic.app` で起動確認。
+- 作業時間: 約15分。

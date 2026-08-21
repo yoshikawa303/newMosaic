@@ -1610,7 +1610,7 @@ final class MosaicWindowController: NSObject {
         // ライブラリパネル側の操作行へ移動した。
         configureLearningModeButton()
         let toolbar = NSStackView(views: [
-            openButton, pasteButton, linkFolderButton, makeToolbarSeparator(),
+            openButton, linkFolderButton, pasteButton, makeToolbarSeparator(),
             batchButton, detectButton, applyButton, clearButton, makeToolbarSeparator(),
             undoButton, redoButton, makeToolbarSeparator(),
             canvasModeControl, learningModeButton,
