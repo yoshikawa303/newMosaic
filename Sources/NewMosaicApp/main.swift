@@ -3685,11 +3685,55 @@ final class MosaicWindowController: NSObject {
             selectedLayerStatusSummary = "\(canvas.rois[index].category.displayName) <個別>"
             updateStatsBar()
         } else {
-            defaultMosaicStyle = currentMosaicStyle()
+            let previousStyle = defaultMosaicStyleForRendering().persistentStyle()
+            let nextStyle = currentMosaicStyle()
+            defaultMosaicStyle = nextStyle
             saveMosaicStyleSettings()
+            applyVideoDefaultMosaicStyleChange(
+                from: previousStyle,
+                to: nextStyle.persistentStyle()
+            )
         }
         // モザイク表示中は変更を即時反映する
         resumeMosaicPreviewIfNeeded()
+    }
+
+    private func applyVideoDefaultMosaicStyleChange(
+        from previousStyle: MosaicROIStyle,
+        to nextStyle: MosaicROIStyle
+    ) {
+        guard let item = currentVideoItem else { return }
+        var changed = false
+        currentVideoEditState.keyframes = currentVideoEditState.keyframes.map { keyframe in
+            var updatedKeyframe = keyframe
+            updatedKeyframe.rois = keyframe.rois.map { roi in
+                var updatedROI = roi
+                if updatedROI.style == nil || updatedROI.style == previousStyle {
+                    updatedROI.style = nextStyle
+                }
+                if updatedROI != roi {
+                    changed = true
+                }
+                return updatedROI
+            }
+            return updatedKeyframe
+        }
+        canvas.rois = canvas.rois.map { roi in
+            var updatedROI = roi
+            if updatedROI.style == nil || updatedROI.style == previousStyle {
+                updatedROI.style = nextStyle
+            }
+            return updatedROI
+        }
+        guard changed else { return }
+        do {
+            try videoEditStore.save(currentVideoEditState, for: item.id)
+            updateVideoTimelineLabels()
+            reloadLayerList()
+            updateStatsBar()
+        } catch {
+            showError(error)
+        }
     }
 
     @objc private func applyCurrentStyleToAllLayers() {
@@ -5352,6 +5396,8 @@ final class MosaicWindowController: NSObject {
         let groinPositionRatio: Double
         let categories: Set<MosaicTargetCategory>
         let shape: ROIShape
+        let maskEngineRawValue: String
+        let maskThreshold: Double
     }
 
     /// 動画フレーム1枚からROIを検出するクロージャを作る。
@@ -5366,7 +5412,9 @@ final class MosaicWindowController: NSObject {
             domainMode: domainModeControl.indexOfSelectedItem,
             groinPositionRatio: groinPositionSlider.doubleValue,
             categories: checkedGenerationCategories(),
-            shape: canvas.currentShape
+            shape: canvas.currentShape,
+            maskEngineRawValue: currentSegmentEngineKind().rawValue,
+            maskThreshold: maskThresholdSlider.doubleValue
         )
         return Self.makeVideoFrameDetector(worker: worker, configuration: configuration)
     }
@@ -5395,7 +5443,16 @@ final class MosaicWindowController: NSObject {
                 }
                 return updated
             }
-            return DetectedROIRefiner.expandGenitalROIsToCoverShape(rois)
+            return DetectedROIRefiner.expandGenitalROIsToCoverShape(rois).map { roi in
+                var updated = roi
+                if updated.maskEngine == nil {
+                    updated.maskEngine = configuration.maskEngineRawValue
+                }
+                if updated.maskThreshold == nil {
+                    updated.maskThreshold = configuration.maskThreshold
+                }
+                return updated
+            }
         }
     }
 
@@ -5453,7 +5510,7 @@ final class MosaicWindowController: NSObject {
         let inputURL = libraryEngine.originalURL(for: item)
         let style = defaultMosaicStyleForRendering()
         let segmentEngine = currentSegmentEngine()
-        let editState = videoEditStateWithResolvedInheritedStyles(currentVideoEditState)
+        let editState = videoEditStateWithResolvedInheritedSettings(currentVideoEditState)
         let frameRate = max(1, info.frameRate)
         let cancellation = VideoMosaicExporter.CancellationFlag()
         let options = currentVideoTrackingOptions()
@@ -5742,7 +5799,7 @@ final class MosaicWindowController: NSObject {
                         to: frame,
                         rois: visibleROIs,
                         style: style,
-                        segmentEngine: ShapeSegmentEngine(),
+                        segmentEngine: Self.videoPlaybackSegmentEngine(),
                         patternImageProvider: { patternImages[$0] },
                         skipIncompletePatterns: true
                     )
@@ -5873,14 +5930,33 @@ final class MosaicWindowController: NSObject {
     }
 
     private func videoROIsForKeyframePersistence() -> [MosaicROI] {
-        let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
-        return VideoKeyframe(timeSeconds: currentVideoTimeSeconds, rois: canvas.rois)
-            .resolvingInheritedStyle(inheritedStyle)
+        videoKeyframeWithResolvedInheritedSettings(
+            timeSeconds: currentVideoTimeSeconds,
+            rois: canvas.rois,
+            trackingStatus: currentVideoKeyframeTrackingStatus()
+        )
             .rois
     }
 
-    private func videoEditStateWithResolvedInheritedStyles(_ state: VideoEditState) -> VideoEditState {
-        state.resolvingInheritedStyles(defaultMosaicStyleForRendering().persistentStyle())
+    private func videoKeyframeWithResolvedInheritedSettings(
+        timeSeconds: Double,
+        rois: [MosaicROI],
+        trackingStatus: VideoKeyframeTrackingStatus
+    ) -> VideoKeyframe {
+        VideoKeyframe(timeSeconds: timeSeconds, rois: rois, trackingStatus: trackingStatus)
+            .resolvingInheritedSettings(
+                inheritedStyle: defaultMosaicStyleForRendering().persistentStyle(),
+                maskEngineRawValue: currentSegmentEngineKind().rawValue,
+                maskThreshold: maskThresholdSlider.doubleValue
+            )
+    }
+
+    private func videoEditStateWithResolvedInheritedSettings(_ state: VideoEditState) -> VideoEditState {
+        state.resolvingInheritedSettings(
+            inheritedStyle: defaultMosaicStyleForRendering().persistentStyle(),
+            maskEngineRawValue: currentSegmentEngineKind().rawValue,
+            maskThreshold: maskThresholdSlider.doubleValue
+        )
     }
 
     private func currentVideoKeyframeTrackingStatus() -> VideoKeyframeTrackingStatus {
@@ -6040,6 +6116,8 @@ final class MosaicWindowController: NSObject {
         let url = libraryEngine.originalURL(for: item)
         let baseState = currentVideoEditState
         let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
+        let inheritedMaskEngineRawValue = currentSegmentEngineKind().rawValue
+        let inheritedMaskThreshold = maskThresholdSlider.doubleValue
         let cancellation = VideoMosaicExporter.CancellationFlag()
         videoAutoProcessCancellation = cancellation
         isAutoProcessingVideo = true
@@ -6063,7 +6141,11 @@ final class MosaicWindowController: NSObject {
                             timeSeconds: time,
                             rois: rois,
                             trackingStatus: .autoDetected
-                        ).resolvingInheritedStyle(inheritedStyle)
+                        ).resolvingInheritedSettings(
+                            inheritedStyle: inheritedStyle,
+                            maskEngineRawValue: inheritedMaskEngineRawValue,
+                            maskThreshold: inheritedMaskThreshold
+                        )
                         state.upsertKeyframe(persistedKeyframe)
                         detectedKeyframes += 1
                     }
@@ -6105,7 +6187,7 @@ final class MosaicWindowController: NSObject {
 
     private func saveCurrentVideoEditState(item: MosaicLibraryItem) {
         do {
-            currentVideoEditState = videoEditStateWithResolvedInheritedStyles(currentVideoEditState)
+            currentVideoEditState = videoEditStateWithResolvedInheritedSettings(currentVideoEditState)
             try videoEditStore.save(currentVideoEditState, for: item.id)
         } catch {
             showError(error)
@@ -6143,7 +6225,7 @@ final class MosaicWindowController: NSObject {
             return
         }
         let targetTime = currentVideoTimeSeconds
-        let editState = videoEditStateWithResolvedInheritedStyles(currentVideoEditState)
+        let editState = videoEditStateWithResolvedInheritedSettings(currentVideoEditState)
         guard let keyframe = editState.keyframe(before: targetTime, requiringROIs: true) else {
             updateStatus("追跡の起点となる直前のROI付きキーフレームがありません。先にROIを作り「キーフレーム追加」後、後の時刻へ移動してください")
             AppLog.video.info("追跡確認を中止: 起点なし target=\(targetTime, privacy: .public)")
@@ -6193,13 +6275,11 @@ final class MosaicWindowController: NSObject {
             DispatchQueue.main.async {
                 guard let self, self.currentVideoItem?.id == item.id,
                       abs(self.currentVideoTimeSeconds - targetTime) < 0.01 else { return }
-                self.canvas.rois = resultROIs.map { roi in
-                    var persisted = roi
-                    if persisted.style == nil {
-                        persisted.style = self.defaultMosaicStyleForRendering().persistentStyle()
-                    }
-                    return persisted
-                }
+                self.canvas.rois = self.videoKeyframeWithResolvedInheritedSettings(
+                    timeSeconds: targetTime,
+                    rois: resultROIs,
+                    trackingStatus: .tracked
+                ).rois
                 self.videoTrackingLostIDs = resultLost
                 self.canvas.trackingLostROIIDs = resultLost
                 self.lastTrackedVideoTimeSeconds = targetTime
@@ -6691,6 +6771,10 @@ final class MosaicWindowController: NSObject {
         mosaicEngine.invalidateMaskCache()
         if applyDetectionSettingToSelectedLayers() { return }
         AppSettings.shared.set(value, forKey: Self.maskThresholdDefaultsKey)
+        applyVideoDefaultMaskSettingChange(
+            maskEngineRawValue: currentSegmentEngineKind().rawValue,
+            maskThreshold: value
+        )
         // モザイク表示中は変更を即時反映する
         resumeMosaicPreviewIfNeeded()
     }
@@ -6720,7 +6804,48 @@ final class MosaicWindowController: NSObject {
             )
         }
         if applyDetectionSettingToSelectedLayers() { return }
+        applyVideoDefaultMaskSettingChange(
+            maskEngineRawValue: currentSegmentEngineKind().rawValue,
+            maskThreshold: maskThresholdSlider.doubleValue
+        )
         resumeMosaicPreviewIfNeeded()
+    }
+
+    private func applyVideoDefaultMaskSettingChange(
+        maskEngineRawValue: String,
+        maskThreshold: Double
+    ) {
+        guard let item = currentVideoItem else { return }
+        var changed = currentVideoEditState.maskEngineRawValue != maskEngineRawValue
+        currentVideoEditState.maskEngineRawValue = maskEngineRawValue
+        currentVideoEditState.keyframes = currentVideoEditState.keyframes.map { keyframe in
+            var updatedKeyframe = keyframe
+            updatedKeyframe.rois = keyframe.rois.map { roi in
+                var updatedROI = roi
+                updatedROI.maskEngine = maskEngineRawValue
+                updatedROI.maskThreshold = maskThreshold
+                if updatedROI != roi {
+                    changed = true
+                }
+                return updatedROI
+            }
+            return updatedKeyframe
+        }
+        canvas.rois = canvas.rois.map { roi in
+            var updatedROI = roi
+            updatedROI.maskEngine = maskEngineRawValue
+            updatedROI.maskThreshold = maskThreshold
+            return updatedROI
+        }
+        guard changed else { return }
+        do {
+            try videoEditStore.save(currentVideoEditState, for: item.id)
+            updateVideoTimelineLabels()
+            reloadLayerList()
+            updateStatsBar()
+        } catch {
+            showError(error)
+        }
     }
 
     @objc private func individualDetectionChanged() {
@@ -6787,6 +6912,10 @@ final class MosaicWindowController: NSObject {
 
     /// マスク生成方式としきい値から実際のエンジンを作る。全体設定・ROI個別設定の双方から使う。
     private func makeSegmentEngine(kind: SegmentEngineKind, threshold: Double) -> Segmenting {
+        Self.makeSegmentEngine(kind: kind, threshold: threshold)
+    }
+
+    nonisolated private static func makeSegmentEngine(kind: SegmentEngineKind, threshold: Double) -> Segmenting {
         switch kind {
         case .shape: return ShapeSegmentEngine()
         case .visionPersonSegmentation: return VisionPersonSegmentEngine()
@@ -6794,6 +6923,13 @@ final class MosaicWindowController: NSObject {
         case .regionForeground: return RegionForegroundSegmentEngine(maskThreshold: threshold)
         case .learnedShape: return LearnedShapeSegmentEngine()
         case .samShape: return SAMSegmentEngine()
+        }
+    }
+
+    nonisolated private static func videoPlaybackSegmentEngine() -> Segmenting {
+        PerROISegmentEngine(base: ShapeSegmentEngine()) { rawValue, threshold in
+            guard let kind = SegmentEngineKind(rawValue: rawValue) else { return ShapeSegmentEngine() }
+            return Self.makeSegmentEngine(kind: kind, threshold: threshold ?? 0)
         }
     }
 
@@ -6845,9 +6981,9 @@ final class MosaicWindowController: NSObject {
             base = ShapeSegmentEngine()
         }
         // 個別のマスク生成設定を持つROIは、全体設定ではなくそのROIの設定でマスクを作る
-        base = PerROISegmentEngine(base: base) { [weak self] rawValue, threshold in
-            guard let self, let kind = SegmentEngineKind(rawValue: rawValue) else { return ShapeSegmentEngine() }
-            return self.makeSegmentEngine(kind: kind, threshold: threshold ?? 0)
+        base = PerROISegmentEngine(base: base) { rawValue, threshold in
+            guard let kind = SegmentEngineKind(rawValue: rawValue) else { return ShapeSegmentEngine() }
+            return Self.makeSegmentEngine(kind: kind, threshold: threshold ?? 0)
         }
         // 人物レイヤ由来のROIは、選択中のマスク生成方式に関係なく候補生成時の人物シルエットで
         // マスクする（「人物矩形全体がモザイクされてしまう」報告への修正。人物の輪郭に沿った

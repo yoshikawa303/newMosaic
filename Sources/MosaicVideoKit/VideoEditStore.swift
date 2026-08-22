@@ -62,12 +62,35 @@ public struct VideoKeyframe: Codable, Equatable, Sendable {
     /// 動画は後から別フレームを開き直しても同じ見た目で再現できる必要があるため、
     /// nilのまま保存せず、キーフレーム確定時の設定を埋め込む。
     public func resolvingInheritedStyle(_ inheritedStyle: MosaicROIStyle) -> VideoKeyframe {
+        resolvingInheritedSettings(
+            inheritedStyle: inheritedStyle,
+            maskEngineRawValue: nil,
+            maskThreshold: nil
+        )
+    }
+
+    /// ROIが画面全体のモザイク/マスク設定を継承している場合、保存時点の設定をROIへ固定する。
+    ///
+    /// 動画の自動解析・追跡はバックグラウンドで後から同じROIを再利用するため、`nil` のまま
+    /// 保存すると、再生・書き出し時に当時とは違う全体設定で描画される。未設定項目だけを埋め、
+    /// ROI個別設定は上書きしない。
+    public func resolvingInheritedSettings(
+        inheritedStyle: MosaicROIStyle,
+        maskEngineRawValue: String?,
+        maskThreshold: Double?
+    ) -> VideoKeyframe {
         VideoKeyframe(
             timeSeconds: timeSeconds,
             rois: rois.map { roi in
                 var persisted = roi
                 if persisted.style == nil {
                     persisted.style = inheritedStyle
+                }
+                if persisted.maskEngine == nil {
+                    persisted.maskEngine = maskEngineRawValue
+                }
+                if persisted.maskThreshold == nil {
+                    persisted.maskThreshold = maskThreshold
                 }
                 return persisted
             },
@@ -143,10 +166,29 @@ public struct VideoEditState: Codable, Equatable, Sendable {
 
     /// 全キーフレームの継承スタイルを保存時点のスタイルへ固定する。
     public func resolvingInheritedStyles(_ inheritedStyle: MosaicROIStyle) -> VideoEditState {
+        resolvingInheritedSettings(
+            inheritedStyle: inheritedStyle,
+            maskEngineRawValue: nil,
+            maskThreshold: nil
+        )
+    }
+
+    /// 全キーフレームの継承スタイル/マスク設定を保存時点の設定へ固定する。
+    public func resolvingInheritedSettings(
+        inheritedStyle: MosaicROIStyle,
+        maskEngineRawValue: String?,
+        maskThreshold: Double?
+    ) -> VideoEditState {
         VideoEditState(
-            keyframes: keyframes.map { $0.resolvingInheritedStyle(inheritedStyle) },
+            keyframes: keyframes.map {
+                $0.resolvingInheritedSettings(
+                    inheritedStyle: inheritedStyle,
+                    maskEngineRawValue: maskEngineRawValue,
+                    maskThreshold: maskThreshold
+                )
+            },
             keyframeInterval: keyframeInterval,
-            maskEngineRawValue: maskEngineRawValue
+            maskEngineRawValue: maskEngineRawValue ?? self.maskEngineRawValue
         )
     }
 }

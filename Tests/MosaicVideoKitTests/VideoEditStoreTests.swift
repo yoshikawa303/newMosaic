@@ -94,10 +94,12 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(decoded.trackingStatus == .manual)
 }
 
-@Test func videoEditStateResolvesInheritedStylesWithoutOverwritingExistingROIStyle() {
+@Test func videoEditStateResolvesInheritedSettingsWithoutOverwritingExistingROISettings() {
     let inheritedROI = makeROI(x: 0.1)
     var explicitROI = makeROI(x: 0.4)
     explicitROI.style = MosaicROIStyle(pattern: .border, blockScale: 12, stripeWidth: 3)
+    explicitROI.maskEngine = "shape"
+    explicitROI.maskThreshold = 0.1
 
     var state = VideoEditState()
     state.upsertKeyframe(
@@ -109,16 +111,36 @@ private func makeROI(x: Double) -> MosaicROI {
     )
 
     let inheritedStyle = MosaicROIStyle(pattern: .noise, opacity: 0.5, blockScale: 6)
-    let resolved = state.resolvingInheritedStyles(inheritedStyle)
+    let resolved = state.resolvingInheritedSettings(
+        inheritedStyle: inheritedStyle,
+        maskEngineRawValue: "samShape",
+        maskThreshold: 0.4
+    )
     let keyframe = resolved.keyframes[0]
 
     #expect(keyframe.trackingStatus == .tracked)
     #expect(keyframe.rois[0].style == inheritedStyle)
+    #expect(keyframe.rois[0].maskEngine == "samShape")
+    #expect(keyframe.rois[0].maskThreshold == 0.4)
     #expect(keyframe.rois[1].style == explicitROI.style)
+    #expect(keyframe.rois[1].maskEngine == "shape")
+    #expect(keyframe.rois[1].maskThreshold == 0.1)
+    #expect(resolved.maskEngineRawValue == "samShape")
 }
 
 @Test func videoThumbnailProviderIdentifiesVideoExtensions() {
     #expect(VideoThumbnailProvider.isVideoFile(URL(fileURLWithPath: "/tmp/a.mp4")))
     #expect(VideoThumbnailProvider.isVideoFile(URL(fileURLWithPath: "/tmp/a.MOV")))
     #expect(!VideoThumbnailProvider.isVideoFile(URL(fileURLWithPath: "/tmp/a.png")))
+}
+
+@Test func videoEditStateLegacyStyleResolverKeepsSavedMaskEngine() {
+    let state = VideoEditState(
+        keyframes: [VideoKeyframe(timeSeconds: 1, rois: [makeROI(x: 0.2)])],
+        maskEngineRawValue: "samShape"
+    )
+
+    let resolved = state.resolvingInheritedStyles(MosaicROIStyle(pattern: .pixelate))
+
+    #expect(resolved.maskEngineRawValue == "samShape")
 }

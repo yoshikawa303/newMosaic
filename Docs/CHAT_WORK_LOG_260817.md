@@ -279,3 +279,23 @@
 - `scripts/package_macos_app.sh` を `0.0.00148` / `148` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
 - 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test` 165件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、`scripts/package_macos_app.sh` PASS、署名検証 PASS、`Info.plist` で `0.0.00148` / `148` を確認。
 - `open -n dist/newMosaic.app` で `PID 31085 /Volumes/DATA/XCode_Project/newMosaic/dist/newMosaic.app/Contents/MacOS/NewMosaicApp` の起動を確認。旧版アプリプロセスが複数残っているため、v0.0.00148ウィンドウタイトルの目視確定は未完了。
+
+### 2026-08-22 16:31 JST - Codex GPT-5 - 種別: 依頼内容 - 動画SAMマスク/追随モザイク設定同期修正
+
+```text
+☆動画
+・バグ：自動解析等で、対象形状(SAM)形式のマスク形状になっていない。一部男性器がマスク範囲に含まれず、はみでる。
+・バグ：自動解析後、モザイク種類を変更しても、動画追随モザイク設定に反映されない。
+```
+
+### 2026-08-22 16:31 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00149 動画SAMマスク/追随モザイク設定同期修正
+
+- 作業AIモデル: Codex GPT-5（動画SAMマスク設定の永続化、動画追随スタイル反映、回帰テスト、リリース更新まで同モデルで対応。実行中モデル自体は切替不可のため、軽量な別モデルへの切替は不可）
+- 動画自動解析ROIに、検出時点のマスク生成方式 `maskEngineRawValue` と形状しきい値を保存するよう修正。対象形状（SAM）を選択して自動解析したROIは、再生・追跡・書き出しでもSAM指定として扱われる。
+- `VideoKeyframe` / `VideoEditState` の継承設定固定処理を、モザイクスタイルだけでなくマスク生成方式・しきい値にも拡張。手動保存、未保存確認保存、追跡確認、自動処理、書き出しが同じ設定固定処理を通るよう統一。
+- 動画再生中の軽量プレビューでもROI個別 `maskEngine` を解決し、保存済みROIがSAM指定を持つ場合はSAMマスクで描画するよう修正。
+- 全体のモザイク種類変更時、旧既定スタイルを持つ動画キーフレームROIを新しい既定スタイルへ同期。個別スタイルは上書きしない。
+- 全体のマスク生成方式・形状しきい値変更時、個別設定OFFの全体適用として動画キーフレームへ同期するよう修正。
+- `scripts/package_macos_app.sh` を `0.0.00149` / `149` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
+- 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test --filter VideoEditStoreTests` 9件 PASS、`swift test` 166件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、`scripts/package_macos_app.sh` PASS、署名検証 PASS、`Info.plist` で `0.0.00149` / `149` を確認。
+- `open -n dist/newMosaic.app` で `PID 72100 /Volumes/DATA/XCode_Project/newMosaic/dist/newMosaic.app/Contents/MacOS/NewMosaicApp` の起動を確認。実動画での目視確認は未実施。

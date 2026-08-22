@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.0.00149 - 2026-08-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: 動画の自動解析ROIが、選択中の「対象形状（SAM）」マスク設定を保持せず、再生・追跡・書き出し時に図形マスク扱いへ戻る問題を修正。
+- 修正: 動画の自動解析後にモザイク種類を変更しても、既存キーフレームの追随モザイクへ反映されない問題を修正。
+
+■更新履歴
+
+- `VideoKeyframe` / `VideoEditState` の継承設定固定処理を、モザイクスタイルだけでなくマスク生成方式と形状しきい値も保存する共通処理へ拡張。
+- 動画フレーム検出器の設定スナップショットに `maskEngineRawValue` と `maskThreshold` を追加し、自動解析ROIへ選択中のSAM/しきい値を埋め込むようにした。
+- 追跡確認、動画自動モザイク処理、手動キーフレーム保存、動画書き出しの各経路を、同じ継承設定固定処理へ統一。
+- 動画再生中の軽量プレビューでもROI個別の `maskEngine` を解決し、保存済みROIがSAM指定を持つ場合はSAMマスクで描画するようにした。
+- 全体のモザイク種類・マスク生成方式・形状しきい値を変更した場合、動画編集中の既存キーフレームへ同期するようにした（個別設定ON時は選択ROIのみ）。
+- 検証: `swift build` PASS、`swift test --filter VideoEditStoreTests` 9件 PASS、`swift test` 166件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、macOSパッケージ作成 PASS、署名検証 PASS。`0.0.00149` / `149` の反映と `dist/newMosaic.app` 起動プロセス生成を確認。実動画での目視確認は未実施。
+
 ## v0.0.00148 - 2026-08-22
 
 ■更新履歴（Readme / ChangeLog 用）
