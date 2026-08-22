@@ -367,6 +367,7 @@ final class NewMosaicApplication {
         let delegate = AppDelegate()
         app.delegate = delegate
         app.setActivationPolicy(.regular)
+        delegate.prepareMainMenu()
         app.run()
     }
 }
@@ -409,7 +410,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         window.contentView = controller.view
         window.delegate = controller
-        installMainMenu(target: controller)
         window.makeKeyAndOrderFront(nil)
         self.window = window
         NSApp.activate(ignoringOtherApps: true)
@@ -471,7 +471,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         return "newMosaic v\(marketingVersion)"
     }
 
-    private func installMainMenu(target: MosaicWindowController) {
+    /// AppKitがメニューバーの追跡領域を作る前に、全トップレベル項目と特殊メニューを確定する。
+    /// 起動通知後の差し替えでは、表示タイトルだけ更新されプルダウンが画面左端へ残る場合がある。
+    func prepareMainMenu() {
+        let target = controller
         let mainMenu = NSMenu()
 
         let appItem = NSMenuItem(title: "newMosaic", action: nil, keyEquivalent: "")
