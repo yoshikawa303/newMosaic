@@ -474,7 +474,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private func installMainMenu(target: MosaicWindowController) {
         let mainMenu = NSMenu()
 
-        let appItem = NSMenuItem()
+        let appItem = NSMenuItem(title: "newMosaic", action: nil, keyEquivalent: "")
         mainMenu.addItem(appItem)
         let appMenu = NSMenu(title: "newMosaic")
         appMenu.addItem(withTitle: "newMosaicについて", action: #selector(NSApplication.orderFrontStandardAboutPanel(_:)), keyEquivalent: "")
@@ -482,7 +482,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         appMenu.addItem(withTitle: "newMosaicを終了", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
         appItem.submenu = appMenu
 
-        let fileItem = NSMenuItem()
+        let fileItem = NSMenuItem(title: "ファイル", action: nil, keyEquivalent: "")
         mainMenu.addItem(fileItem)
         let fileMenu = NSMenu(title: "ファイル")
         fileMenu.addItem(shortcutMenuItem("openImage", titleSuffix: "…", target: target))
@@ -513,7 +513,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         fileMenu.addItem(settingsItem)
         fileItem.submenu = fileMenu
 
-        let editItem = NSMenuItem()
+        let editItem = NSMenuItem(title: "編集", action: nil, keyEquivalent: "")
         mainMenu.addItem(editItem)
         let editMenu = NSMenu(title: "編集")
         editMenu.addItem(shortcutMenuItem("performUndo", target: target))
@@ -522,7 +522,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         editMenu.addItem(shortcutMenuItem("clearROIs", target: target))
         editItem.submenu = editMenu
 
-        let processItem = NSMenuItem()
+        let processItem = NSMenuItem(title: "処理", action: nil, keyEquivalent: "")
         mainMenu.addItem(processItem)
         let processMenu = NSMenu(title: "処理")
         processMenu.addItem(shortcutMenuItem("generateCandidates", target: target))
@@ -530,7 +530,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         processItem.submenu = processMenu
 
         // 動画メニュー（V3。キーフレーム操作と追跡確認）
-        let videoItem = NSMenuItem()
+        let videoItem = NSMenuItem(title: "動画", action: nil, keyEquivalent: "")
         mainMenu.addItem(videoItem)
         let videoMenu = NSMenu(title: "動画")
         videoMenu.addItem(shortcutMenuItem("previewSelectedVideo", target: target))
@@ -552,7 +552,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         videoMenu.addItem(shortcutMenuItem("exportVideoWithMosaic", target: target))
         videoItem.submenu = videoMenu
 
-        let viewItem = NSMenuItem()
+        let viewItem = NSMenuItem(title: "表示", action: nil, keyEquivalent: "")
         mainMenu.addItem(viewItem)
         let viewMenu = NSMenu(title: "表示")
         viewMenu.addItem(shortcutMenuItem("zoomIn", target: target))
@@ -560,15 +560,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         viewMenu.addItem(shortcutMenuItem("zoomToFit", target: target))
         viewItem.submenu = viewMenu
 
-        let windowItem = NSMenuItem()
+        let windowItem = NSMenuItem(title: "ウィンドウ", action: nil, keyEquivalent: "")
         mainMenu.addItem(windowItem)
         let windowMenu = NSMenu(title: "ウィンドウ")
         windowMenu.addItem(withTitle: "しまう", action: #selector(NSWindow.performMiniaturize(_:)), keyEquivalent: "m")
         windowMenu.addItem(withTitle: "拡大／縮小", action: #selector(NSWindow.performZoom(_:)), keyEquivalent: "")
         windowItem.submenu = windowMenu
-        NSApp.windowsMenu = windowMenu
 
-        let helpItem = NSMenuItem()
+        let helpItem = NSMenuItem(title: "ヘルプ", action: nil, keyEquivalent: "")
         mainMenu.addItem(helpItem)
         let helpMenu = NSMenu(title: "ヘルプ")
         helpMenu.addItem(menuItem("ショートカット一覧…", action: "showShortcutsWindow", key: "", target: target))
@@ -577,9 +576,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // ログウィンドウを開きやすくするためのユーザー要望 2026-08-06 で1階層に変更）。
         helpMenu.addItem(menuItem("デバッグログ…", action: "showDebugLogWindow", key: "", target: target))
         helpItem.submenu = helpMenu
-        NSApp.helpMenu = helpMenu
-
         NSApp.mainMenu = mainMenu
+        // 特殊メニューは階層をmainMenuへ取り付けた後に登録する。トップレベル項目の
+        // 空タイトルと登録順が重なると、AppKitがプルダウンの基準位置を画面左端として
+        // 扱うことがある（GUI報告 2026-08-22「メニュー表示がずれる」）。
+        NSApp.windowsMenu = windowMenu
+        NSApp.helpMenu = helpMenu
     }
 
     private func menuItem(_ title: String, action: String, key: String, target: AnyObject) -> NSMenuItem {
@@ -2220,6 +2222,12 @@ final class MosaicWindowController: NSObject {
         // 画像種別（自動判定の誤りを手動で上書きできるようにする）
         domainModeControl.removeAllItems()
         domainModeControl.addItems(withTitles: ["自動判定", "実写", "イラスト・漫画"])
+        // NSPopUpButtonのメニュー自動検証を有効にしたままtarget/actionを後付けすると、
+        // 未選択項目が無効化されて現在値以外を選べなくなることがある。
+        domainModeControl.target = self
+        domainModeControl.action = #selector(domainModeChanged)
+        domainModeControl.menu?.autoenablesItems = false
+        domainModeControl.itemArray.forEach { $0.isEnabled = true }
         domainModeControl.toolTip = "人物・部位検出に使用する画像種別"
         applyScaledFont(domainModeControl, size: 13)
         let savedDomainMode = AppSettings.shared.integer(forKey: Self.domainModeDefaultsKey)
@@ -2399,8 +2407,6 @@ final class MosaicWindowController: NSObject {
         mosaicPreviewCheckbox.action = #selector(toggleMosaicPreview)
         groinPositionSlider.target = self
         groinPositionSlider.action = #selector(groinPositionChanged)
-        domainModeControl.target = self
-        domainModeControl.action = #selector(domainModeChanged)
         applyStyleToAllButton.target = self
         applyStyleToAllButton.action = #selector(applyCurrentStyleToAllLayers)
         loadMosaicStyleSettings()
