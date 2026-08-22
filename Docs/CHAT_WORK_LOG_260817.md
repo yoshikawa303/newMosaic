@@ -299,3 +299,39 @@
 - `scripts/package_macos_app.sh` を `0.0.00149` / `149` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
 - 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test --filter VideoEditStoreTests` 9件 PASS、`swift test` 166件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、`scripts/package_macos_app.sh` PASS、署名検証 PASS、`Info.plist` で `0.0.00149` / `149` を確認。
 - `open -n dist/newMosaic.app` で `PID 72100 /Volumes/DATA/XCode_Project/newMosaic/dist/newMosaic.app/Contents/MacOS/NewMosaicApp` の起動を確認。実動画での目視確認は未実施。
+
+### 2026-08-22 18:01 JST - Codex GPT-5 - 種別: 依頼内容 - 動画ショートカット/再生高速化/追跡精度改善
+
+```text
+☆改善：動画表示時、下記ショートカット操作追加
+※Windowsの場合：「Cmd」→「Ctrl」。「Option」→「Alt」
+・Cmd+「<」 or Cmd+「>」：フレーム前後移動。
+・「<」「>」：キーフレーム前後移動。
+・(動画編集パネルリスト選択時) カーソルキー左右：キーフレーム前後移動。
+・スペースキー：動画再生、一時停止切替
+・Cmd+「K」：キーフレーム追加
+・Cmd+Option+「K」：選択中のキーフレーム削除
+・キーフレームリストでキーフレーム選択後、Enterで選択キーフレームへ移動。
+☆バグ：動画編集時、モザイク掛けた状態で、元の動画のフレームレートで動画再生しない。カクつく。
+☆バグ：自動解析時、マスクが自動追随できていないところがある。
+☆改善：Dabinci Resolve、Adobe Premiere ProやPower Director、Video Studio Pro並みの、全体の処理の高速化、モザイク範囲のトラッキング精度改善を行って。
+```
+
+### 2026-08-22 18:01 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00150 動画操作/再生/追跡改善
+
+- 作業AIモデル: Codex GPT-5（動画再生パイプライン、Vision追跡、SAM輪郭キャッシュ、AppKitショートカット、レビュー/リリースを同モデルで対応。実行中モデル自体は切替不可）
+- 動画ショートカットを共通レジストリと動画文脈イベント処理へ追加。テキスト入力を妨げず、キーフレーム一覧の左右/Enterは選択行基準で動作する。
+- 再生タイマーの24fps上限を撤去し、元動画fpsで実時間追従。再生用デコーダ、Core Imageコンテキスト、マスクエンジンを再利用し、表示解像度デコードと古いフレーム要求破棄を組み合わせた。
+- 再生用SAMは輪郭を一定間隔で再生成し、中間フレームでは追跡ROIへGPU/Core Image変換で移動・拡縮する。停止中表示と書き出しは高品質SAMを維持する。
+- 自動解析を順次デコード＋全フレーム追跡＋定期再検出へ変更。小ROIは周辺コンテキストで追跡し、IoUが無い高速移動も中心距離/サイズ比で再接続する。前後キーフレームの同一ROIは補間表示する。
+- コードレビュー3回を実施。P1 3件、P2 1件を修正し、3回目で追加P0/P1なし。詳細は `Docs/QC/CodeReview/QC_CodeReview_v0.0.00150.md`。
+- 作業時間: 約40分。
+
+### 2026-08-22 18:09 JST - Codex GPT-5 - 種別: 検証結果 - v0.0.00150
+
+- `swift build` PASS。
+- `swift test --filter VideoEditStoreTests` 10件 PASS、`swift test --filter VideoKitTests` 27件 PASS、`swift test` 170件 PASS。
+- `scripts/ci/agent_governance_guard.sh`、`scripts/ci/local_quality_gate.sh`、`git diff --check` PASS。
+- macOSパッケージ作成、`codesign --verify --deep --strict` PASS。`CFBundleShortVersionString=0.0.00150`、`CFBundleVersion=150` を確認。
+- `open -n dist/newMosaic.app` で配布アプリの起動プロセス生成を確認。
+- 実動画での目視fps・複数ROI/SAM追跡精度の測定は未実施。DaVinci Resolve / Adobe Premiere Pro等との製品同等性は未認定で、現行構成内のボトルネック除去と追跡改善として完了した。

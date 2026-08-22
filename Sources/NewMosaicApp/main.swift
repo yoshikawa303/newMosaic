@@ -57,6 +57,178 @@ private final class PerROISegmentEngine: Segmenting {
     }
 }
 
+/// 動画再生用のSAMマスクは毎フレーム再推論せず、一定間隔で再生成した輪郭を
+/// 追跡済みROIの移動・拡縮へワープする。停止中の表示と書き出しは従来どおり
+/// 各フレームのSAMを使い、これは実時間プレビューだけの高速経路である。
+private final class VideoPlaybackSegmentEngine: Segmenting {
+    private struct CachedMask {
+        let image: CIImage
+        let roiRect: NormalizedRect
+        let extent: CGRect
+        let settingsSignature: String
+        let generatedFrame: Int
+    }
+
+    private let samEngine: Segmenting
+    private let otherEngine: Segmenting
+    private var cachedSAMMasks: [UUID: CachedMask] = [:]
+    private var frameNumber = 0
+    private let refreshInterval = 30
+
+    init(engineFactory: @escaping (String, Double?) -> Segmenting) {
+        samEngine = engineFactory(SegmentEngineKind.samShape.rawValue, nil)
+        otherEngine = PerROISegmentEngine(base: ShapeSegmentEngine(), engineForOverride: engineFactory)
+    }
+
+    func reset() {
+        cachedSAMMasks.removeAll()
+        frameNumber = 0
+    }
+
+    func createMasks(for rois: [MosaicROI], in image: CGImage, extent: CGRect) throws -> [CIImage] {
+        frameNumber += 1
+        var results = [CIImage?](repeating: nil, count: rois.count)
+        var samRefreshIndices: [Int] = []
+        var otherIndices: [Int] = []
+        let activeIDs = Set(rois.map(\.id))
+        cachedSAMMasks = cachedSAMMasks.filter { activeIDs.contains($0.key) }
+
+        for (index, roi) in rois.enumerated() {
+            guard roi.maskEngine == SegmentEngineKind.samShape.rawValue else {
+                otherIndices.append(index)
+                continue
+            }
+            let signature = settingsSignature(for: roi)
+            if let cached = cachedSAMMasks[roi.id],
+               cached.extent.width == extent.width,
+               cached.extent.height == extent.height,
+               cached.settingsSignature == signature,
+               frameNumber - cached.generatedFrame < refreshInterval {
+                results[index] = Self.warp(
+                    cached.image,
+                    from: cached.roiRect,
+                    to: roi.rect,
+                    extent: extent
+                )
+            } else {
+                samRefreshIndices.append(index)
+            }
+        }
+
+        if !samRefreshIndices.isEmpty {
+            let refreshROIs = samRefreshIndices.map { rois[$0] }
+            let masks = try samEngine.createMasks(for: refreshROIs, in: image, extent: extent)
+            for (offset, index) in samRefreshIndices.enumerated() where offset < masks.count {
+                let mask = masks[offset]
+                results[index] = mask
+                cachedSAMMasks[rois[index].id] = CachedMask(
+                    image: mask,
+                    roiRect: rois[index].rect,
+                    extent: extent,
+                    settingsSignature: settingsSignature(for: rois[index]),
+                    generatedFrame: frameNumber
+                )
+            }
+        }
+        if !otherIndices.isEmpty {
+            let masks = try otherEngine.createMasks(for: otherIndices.map { rois[$0] }, in: image, extent: extent)
+            for (offset, index) in otherIndices.enumerated() where offset < masks.count {
+                results[index] = masks[offset]
+            }
+        }
+        return results.map { $0 ?? CIImage(color: .black).cropped(to: extent) }
+    }
+
+    private func settingsSignature(for roi: MosaicROI) -> String {
+        [
+            roi.shape.rawValue,
+            "rotationBucket:\(Int((roi.rotation / 15).rounded()))",
+            roi.maskThreshold.map { String(format: "%.3f", $0) } ?? "-",
+            roi.maskShapeScale.map { String(format: "%.3f", $0) } ?? "-",
+            roi.polygonPoints?.map { String(format: "%.3f:%.3f", $0.x, $0.y) }.joined(separator: ",") ?? "-"
+        ].joined(separator: "|")
+    }
+
+    private static func warp(
+        _ mask: CIImage,
+        from oldROI: NormalizedRect,
+        to newROI: NormalizedRect,
+        extent: CGRect
+    ) -> CIImage {
+        let oldRect = oldROI.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        let newRect = newROI.cgRect(imageSize: extent.size, origin: .bottomLeft)
+        guard oldRect.width > 0.5, oldRect.height > 0.5 else { return mask }
+        let scaleX = newRect.width / oldRect.width
+        let scaleY = newRect.height / oldRect.height
+        let transform = CGAffineTransform(
+            a: scaleX,
+            b: 0,
+            c: 0,
+            d: scaleY,
+            tx: newRect.minX - oldRect.minX * scaleX,
+            ty: newRect.minY - oldRect.minY * scaleY
+        )
+        return mask.transformed(by: transform).cropped(to: extent)
+    }
+}
+
+/// 再生中のランダムアクセスデコーダ、Core Image描画コンテキスト、SAM等の
+/// マスクエンジンを動画ごと・フレームごとに作り直さず、専用直列キュー上で再利用する。
+private final class VideoPlaybackRenderer: @unchecked Sendable {
+    private var readerURL: URL?
+    private var reader: VideoFrameReader?
+    private let mosaicEngine = MosaicEngine()
+    private let segmentEngine: VideoPlaybackSegmentEngine
+    private var lastTimeSeconds: Double?
+
+    init(segmentEngine: VideoPlaybackSegmentEngine) {
+        self.segmentEngine = segmentEngine
+    }
+
+    func render(
+        url: URL,
+        time: CMTime,
+        tolerance: CMTime,
+        maximumSize: CGSize?,
+        rois: [MosaicROI],
+        style: MosaicStyle,
+        patternImages: [String: CGImage],
+        previewEnabled: Bool
+    ) throws -> (frame: CGImage, rendered: CGImage?) {
+        if readerURL != url || reader == nil {
+            readerURL = url
+            reader = VideoFrameReader(url: url)
+            mosaicEngine.invalidateMaskCache()
+            segmentEngine.reset()
+            lastTimeSeconds = nil
+        }
+        let seconds = CMTimeGetSeconds(time)
+        if let lastTimeSeconds,
+           seconds.isFinite,
+           (seconds < lastTimeSeconds - 0.001 || seconds > lastTimeSeconds + 1.0) {
+            segmentEngine.reset()
+        }
+        if seconds.isFinite { lastTimeSeconds = seconds }
+        guard let reader else {
+            throw VideoFrameReaderError.readerCreationFailed("再生用デコーダを初期化できません")
+        }
+        let frame = try reader.frame(at: time, tolerance: tolerance, maximumSize: maximumSize)
+        guard previewEnabled, !rois.isEmpty else { return (frame, nil) }
+        // フレームごとに画像内容が変わるため、画像オブジェクトIDを使う静止画向け
+        // マスクキャッシュは持ち越さない。CIContextと推論エンジンだけを再利用する。
+        mosaicEngine.invalidateMaskCache()
+        let rendered = try mosaicEngine.applyMosaic(
+            to: frame,
+            rois: rois,
+            style: style,
+            segmentEngine: segmentEngine,
+            patternImageProvider: { patternImages[$0] },
+            skipIncompletePatterns: true
+        )
+        return (frame, rendered)
+    }
+}
+
 private final class PersonLayerSegmentEngine: Segmenting {
     static let sourcePrefix = "person-layer-"
     private let base: Segmenting
@@ -363,8 +535,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         let videoMenu = NSMenu(title: "動画")
         videoMenu.addItem(shortcutMenuItem("previewSelectedVideo", target: target))
         videoMenu.addItem(.separator())
-        videoMenu.addItem(shortcutMenuItem("jumpToPreviousKeyframe", target: target))
-        videoMenu.addItem(shortcutMenuItem("jumpToNextKeyframe", target: target))
+        videoMenu.addItem(shortcutMenuItem("toggleVideoPlayback", target: target, registersKeyEquivalent: false))
+        videoMenu.addItem(shortcutMenuItem("stepToPreviousVideoFrame", target: target))
+        videoMenu.addItem(shortcutMenuItem("stepToNextVideoFrame", target: target))
+        videoMenu.addItem(.separator())
+        videoMenu.addItem(shortcutMenuItem("jumpToPreviousKeyframe", target: target, registersKeyEquivalent: false))
+        videoMenu.addItem(shortcutMenuItem("jumpToNextKeyframe", target: target, registersKeyEquivalent: false))
         videoMenu.addItem(shortcutMenuItem("addVideoKeyframe", target: target))
         videoMenu.addItem(shortcutMenuItem("removeVideoKeyframe", target: target))
         videoMenu.addItem(shortcutMenuItem("deleteSelectedVideoKeyframes", target: target))
@@ -415,11 +591,20 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `AppShortcut` レジストリを参照してメニュー項目を構築する。タイトル・キー等価文字・
     /// 修飾キー・アクションのすべてを登録データから取得するため、メニュー表示と実際の
     /// 動作が食い違うことがない（手入力の重複によるバグを構造的に防ぐ）。
-    private func shortcutMenuItem(_ id: String, titleSuffix: String = "", target: AnyObject) -> NSMenuItem {
+    private func shortcutMenuItem(
+        _ id: String,
+        titleSuffix: String = "",
+        target: AnyObject,
+        registersKeyEquivalent: Bool = true
+    ) -> NSMenuItem {
         guard let shortcut = MosaicWindowController.shortcut(id: id) else {
             return NSMenuItem(title: id, action: nil, keyEquivalent: "")
         }
-        let item = NSMenuItem(title: shortcut.title + titleSuffix, action: shortcut.action, keyEquivalent: shortcut.key)
+        let item = NSMenuItem(
+            title: shortcut.title + titleSuffix,
+            action: shortcut.action,
+            keyEquivalent: registersKeyEquivalent ? shortcut.key : ""
+        )
         item.keyEquivalentModifierMask = shortcut.modifiers
         item.target = target
         return item
@@ -772,6 +957,7 @@ struct AppShortcut {
         switch key {
         case "\r": text += "⏎"
         case "\u{1b}": text += "⎋"
+        case " ": text += "Space"
         case "+": text += "+"
         case "-": text += "-"
         default: text += key.uppercased()
@@ -1353,6 +1539,29 @@ private final class NavigableCollectionView: NSCollectionView {
     }
 }
 
+/// 動画キーフレーム一覧では左右キーを「行内移動」ではなく前後キーフレーム移動として扱う。
+/// Enterは選択行を確定して、そのキーフレーム時刻をキャンバスへ開く。
+@MainActor
+private final class VideoKeyframeTableView: NSTableView {
+    var onNavigate: ((Int) -> Void)?
+    var onOpenSelection: (() -> Void)?
+
+    override func keyDown(with event: NSEvent) {
+        switch Int(event.specialKey?.rawValue ?? 0) {
+        case Int(NSLeftArrowFunctionKey):
+            onNavigate?(-1)
+        case Int(NSRightArrowFunctionKey):
+            onNavigate?(1)
+        default:
+            if event.keyCode == 36 || event.keyCode == 76 {
+                onOpenSelection?()
+            } else {
+                super.keyDown(with: event)
+            }
+        }
+    }
+}
+
 @MainActor
 private final class VideoTimelineSlider: NSSlider {
     var keyframeTimes: [Double] = [] {
@@ -1418,7 +1627,7 @@ final class MosaicWindowController: NSObject {
     private let videoTimeSlider = VideoTimelineSlider(value: 0, minValue: 0, maxValue: 1, target: nil, action: nil)
     private let videoTimeLabel = NSTextField(labelWithString: "0:00 / 0:00")
     private let videoKeyframeCountLabel = NSTextField(labelWithString: "キーフレーム 0件")
-    private let videoKeyframeTableView = NSTableView()
+    private let videoKeyframeTableView = VideoKeyframeTableView()
     private let videoPlayButton = SquareIconButton()
     private let videoPauseButton = SquareIconButton()
     private let videoStopButton = SquareIconButton()
@@ -1429,6 +1638,7 @@ final class MosaicWindowController: NSObject {
     private var cancelledCandidateGenerationIDs: Set<UUID> = []
     private var videoPlaybackTimer: Timer?
     private let videoPreviewRenderQueue = DispatchQueue(label: "com.yoshikawa.newMosaic.videoPreviewRender", qos: .userInitiated)
+    private lazy var videoPlaybackRenderer = VideoPlaybackRenderer(segmentEngine: Self.videoPlaybackSegmentEngine())
     private var videoSeekRequestID = 0
     private var videoPlaybackRenderInFlight = false
     private var pendingVideoPlaybackSeekSeconds: Double?
@@ -1798,6 +2008,7 @@ final class MosaicWindowController: NSObject {
     // MARK: テンキー割当（詳細設定）・ショートカット一覧（ヘルプ）
     private static let numpadAssignmentsDefaultsKey = "AdvancedSettings.numpadAssignments"
     private var numpadEventMonitor: Any?
+    private var videoShortcutEventMonitor: Any?
     private var shortcutsWindow: NSWindow?
     private var numpadAssignmentWindow: NSWindow?
     private var debugLogWindow: NSWindow?
@@ -1835,16 +2046,24 @@ final class MosaicWindowController: NSObject {
                     key: "0", modifiers: [.command], isRecommended: false, action: #selector(zoomToFit)),
         AppShortcut(id: "openSelectedLibraryOriginal", category: "ライブラリ", title: "元画像/動画を開く",
                     key: "", modifiers: [], isRecommended: false, action: #selector(openSelectedLibraryOriginal)),
+        AppShortcut(id: "toggleVideoPlayback", category: "動画", title: "動画の再生／一時停止",
+                    key: " ", modifiers: [], isRecommended: true, action: #selector(toggleVideoPlayback)),
+        AppShortcut(id: "stepToPreviousVideoFrame", category: "動画", title: "1フレーム前へ",
+                    key: "<", modifiers: [.command], isRecommended: true, action: #selector(stepToPreviousVideoFrame)),
+        AppShortcut(id: "stepToNextVideoFrame", category: "動画", title: "1フレーム後へ",
+                    key: ">", modifiers: [.command], isRecommended: true, action: #selector(stepToNextVideoFrame)),
         AppShortcut(id: "jumpToPreviousKeyframe", category: "動画", title: "前のキーフレームへ",
-                    key: "", modifiers: [], isRecommended: false, action: #selector(jumpToPreviousKeyframe)),
+                    key: "<", modifiers: [], isRecommended: false, action: #selector(jumpToPreviousKeyframe)),
         AppShortcut(id: "jumpToNextKeyframe", category: "動画", title: "次のキーフレームへ",
-                    key: "", modifiers: [], isRecommended: false, action: #selector(jumpToNextKeyframe)),
+                    key: ">", modifiers: [], isRecommended: false, action: #selector(jumpToNextKeyframe)),
         AppShortcut(id: "addVideoKeyframe", category: "動画", title: "キーフレーム追加",
                     key: "k", modifiers: [.command], isRecommended: true, action: #selector(addVideoKeyframe)),
         AppShortcut(id: "removeVideoKeyframe", category: "動画", title: "キーフレーム削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(removeVideoKeyframe)),
         AppShortcut(id: "deleteSelectedVideoKeyframes", category: "動画", title: "選択キーフレーム削除",
-                    key: "", modifiers: [], isRecommended: false, action: #selector(deleteSelectedVideoKeyframes)),
+                    key: "k", modifiers: [.command, .option], isRecommended: false, action: #selector(deleteSelectedVideoKeyframes)),
+        AppShortcut(id: "openSelectedVideoKeyframe", category: "動画", title: "一覧の選択キーフレームへ移動",
+                    key: "\r", modifiers: [], isRecommended: false, action: #selector(openSelectedVideoKeyframe)),
         AppShortcut(id: "deleteAllVideoKeyframes", category: "動画", title: "全キーフレーム削除",
                     key: "", modifiers: [], isRecommended: false, action: #selector(deleteAllVideoKeyframes)),
         AppShortcut(id: "autoProcessCurrentVideo", category: "動画", title: "動画自動モザイク処理",
@@ -3452,6 +3671,12 @@ final class MosaicWindowController: NSObject {
         videoKeyframeTableView.dataSource = self
         videoKeyframeTableView.target = self
         videoKeyframeTableView.doubleAction = #selector(openSelectedVideoKeyframe)
+        videoKeyframeTableView.onNavigate = { [weak self] direction in
+            self?.navigateVideoKeyframeSelection(by: direction)
+        }
+        videoKeyframeTableView.onOpenSelection = { [weak self] in
+            self?.openSelectedVideoKeyframe()
+        }
         videoKeyframeTableView.allowsMultipleSelection = true
         videoKeyframeTableView.usesAlternatingRowBackgroundColors = true
         for column in videoKeyframeTableView.tableColumns {
@@ -5774,39 +5999,36 @@ final class MosaicWindowController: NSObject {
             videoPlaybackRenderInFlight = true
             pendingVideoPlaybackSeekSeconds = nil
         }
-        let keyframe = currentVideoEditState.keyframe(at: clamped)
+        let keyframe = currentVideoEditState.interpolatedKeyframe(at: clamped)
         let rois = keyframe?.rois ?? []
         let previewEnabled = mosaicPreviewCheckbox.state == .on && !rois.isEmpty
         let hiddenROIIDs = canvas.hiddenROIIDs
+        let visibleROIs = rois.filter { !hiddenROIIDs.contains($0.id) }
         let style = defaultMosaicStyleForRendering()
         let patternImages = videoPreviewPatternImages(for: rois, style: style)
+        let renderer = videoPlaybackRenderer
+        let backingScale = view.window?.backingScaleFactor ?? NSScreen.main?.backingScaleFactor ?? 1
+        let playbackMaximumSize: CGSize? = playback ? CGSize(
+            width: max(640, canvas.bounds.width * backingScale),
+            height: max(360, canvas.bounds.height * backingScale)
+        ) : nil
         videoSeekRequestID += 1
         let requestID = videoSeekRequestID
         let tolerance = playback
-            ? CMTime(seconds: max(1.0 / 60.0, 1.0 / min(max(1, info.frameRate), 24)), preferredTimescale: 600)
+            ? CMTime(seconds: max(1.0 / 240.0, 0.5 / max(1, info.frameRate)), preferredTimescale: 600)
             : .zero
         videoPreviewRenderQueue.async { [weak self] in
             guard let self else { return }
-            let frame = try? VideoFrameReader(url: url)
-                .frame(at: CMTime(seconds: clamped, preferredTimescale: 600), tolerance: tolerance)
-            let rendered: CGImage?
-            if let frame, playback, previewEnabled {
-                let visibleROIs = rois.filter { !hiddenROIIDs.contains($0.id) }
-                if visibleROIs.isEmpty {
-                    rendered = nil
-                } else {
-                    rendered = try? MosaicEngine().applyMosaic(
-                        to: frame,
-                        rois: visibleROIs,
-                        style: style,
-                        segmentEngine: Self.videoPlaybackSegmentEngine(),
-                        patternImageProvider: { patternImages[$0] },
-                        skipIncompletePatterns: true
-                    )
-                }
-            } else {
-                rendered = nil
-            }
+            let result = try? renderer.render(
+                url: url,
+                time: CMTime(seconds: clamped, preferredTimescale: 600),
+                tolerance: tolerance,
+                maximumSize: playbackMaximumSize,
+                rois: visibleROIs,
+                style: style,
+                patternImages: patternImages,
+                previewEnabled: playback && previewEnabled
+            )
             DispatchQueue.main.async {
                 defer {
                     if playback {
@@ -5822,18 +6044,19 @@ final class MosaicWindowController: NSObject {
                       self.currentVideoItem?.id == item.id else {
                     return
                 }
-                guard let frame else {
+                guard let result else {
                     self.updateStatus("フレームを取得できませんでした（\(VideoPreviewView.timeText(clamped))）")
                     return
                 }
+                let frame = result.frame
                 self.currentVideoTimeSeconds = clamped
                 self.videoTimeSlider.doubleValue = clamped
                 self.loadedImage = LoadedImage(url: url, cgImage: frame)
                 // その時刻に効くキーフレームのROIを表示（無ければ空）
                 self.canvas.rois = rois
                 if playback {
-                    self.renderedImage = rendered
-                    self.canvas.setImage(rendered ?? frame)
+                    self.renderedImage = result.rendered
+                    self.canvas.setImage(result.rendered ?? frame)
                     self.updateVideoPlaybackLabels()
                 } else {
                     self.displayVideoFrame(frame, rois: self.canvas.rois)
@@ -5972,6 +6195,38 @@ final class MosaicWindowController: NSObject {
         seekVideo(to: videoTimeSlider.doubleValue)
     }
 
+    @objc private func toggleVideoPlayback() {
+        if isVideoPlaying {
+            pauseVideoTimeline()
+            updateStatus("動画タイムラインを一時停止")
+        } else {
+            playVideoTimeline()
+        }
+    }
+
+    @objc private func stepToPreviousVideoFrame() {
+        stepVideoFrame(by: -1)
+    }
+
+    @objc private func stepToNextVideoFrame() {
+        stepVideoFrame(by: 1)
+    }
+
+    private func stepVideoFrame(by offset: Int) {
+        guard let info = currentVideoInfo else {
+            updateStatus("動画を開いてから実行してください")
+            return
+        }
+        pauseVideoTimeline()
+        let frameRate = max(1, info.frameRate)
+        let currentFrame = Int((currentVideoTimeSeconds * frameRate).rounded())
+        let targetFrame = max(0, min(info.frameCount - 1, currentFrame + offset))
+        seekVideo(
+            to: Double(targetFrame) / frameRate,
+            reason: offset < 0 ? "1フレーム前へ" : "1フレーム後へ"
+        )
+    }
+
     @objc private func playVideoTimeline() {
         guard let info = currentVideoInfo else {
             updateStatus("動画を開いてから実行してください")
@@ -5981,8 +6236,8 @@ final class MosaicWindowController: NSObject {
         isVideoPlaying = true
         videoPlaybackStartedAt = Date()
         videoPlaybackStartTimeSeconds = currentVideoTimeSeconds
-        let tick = 1.0 / min(max(1, info.frameRate), 24)
-        videoPlaybackTimer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
+        let tick = 1.0 / min(max(1, info.frameRate), 240)
+        let timer = Timer(timeInterval: tick, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let info = self.currentVideoInfo else { return }
                 let elapsed = Date().timeIntervalSince(self.videoPlaybackStartedAt ?? Date())
@@ -5994,6 +6249,8 @@ final class MosaicWindowController: NSObject {
                 }
             }
         }
+        RunLoop.main.add(timer, forMode: .common)
+        videoPlaybackTimer = timer
         updateStatus("動画タイムラインを再生中")
     }
 
@@ -6090,10 +6347,23 @@ final class MosaicWindowController: NSObject {
     }
 
     @objc private func openSelectedVideoKeyframe() {
-        let row = videoKeyframeTableView.clickedRow >= 0 ? videoKeyframeTableView.clickedRow : videoKeyframeTableView.selectedRow
+        let row = videoKeyframeTableView.selectedRow
         let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
         guard row >= 0, row < sorted.count else { return }
         seekVideo(to: sorted[row].timeSeconds, reason: "キーフレーム")
+    }
+
+    private func navigateVideoKeyframeSelection(by offset: Int) {
+        let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        guard !sorted.isEmpty else { return }
+        let selected = videoKeyframeTableView.selectedRow
+        let currentRow = selected >= 0 ? selected : (sorted.firstIndex {
+            abs($0.timeSeconds - currentVideoTimeSeconds) < 0.01
+        } ?? 0)
+        let destination = max(0, min(sorted.count - 1, currentRow + offset))
+        videoKeyframeTableView.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
+        videoKeyframeTableView.scrollRowToVisible(destination)
+        seekVideo(to: sorted[destination].timeSeconds, reason: offset < 0 ? "前のキーフレーム" : "次のキーフレーム")
     }
 
     @objc private func autoProcessCurrentVideo() {
@@ -6106,10 +6376,9 @@ final class MosaicWindowController: NSObject {
             return
         }
         let detector: VideoFrameDetector = makeVideoFrameDetector()
-        let intervalFrames = currentVideoTrackingOptions().redetectIntervalFrames
-        let intervalSeconds = max(0.5, Double(intervalFrames) / max(1, info.frameRate))
-        let times = stride(from: 0.0, through: info.durationSeconds, by: intervalSeconds).map { $0 }
-        guard !times.isEmpty else {
+        let trackingOptions = currentVideoTrackingOptions()
+        let intervalFrames = trackingOptions.redetectIntervalFrames
+        guard info.frameCount > 0 else {
             updateStatus("処理できる動画フレームがありません")
             return
         }
@@ -6122,25 +6391,43 @@ final class MosaicWindowController: NSObject {
         videoAutoProcessCancellation = cancellation
         isAutoProcessingVideo = true
         updateAnalysisStopButtonVisibility()
-        updateStatus("動画自動モザイク処理中… 0/\(times.count)")
-        AppLog.video.info("動画自動モザイク処理開始: samples=\(times.count, privacy: .public)")
+        updateStatus("動画自動モザイク処理中… 0/\(info.frameCount)フレーム")
+        AppLog.video.info(
+            "動画自動モザイク処理開始: frames=\(info.frameCount, privacy: .public) redetect=\(intervalFrames, privacy: .public)"
+        )
 
         DispatchQueue.global(qos: .userInitiated).async { [weak self] in
-            var state = baseState
+            var state = VideoEditState(
+                keyframeInterval: intervalFrames,
+                maskEngineRawValue: inheritedMaskEngineRawValue
+            )
             var detectedKeyframes = 0
+            var previousLostIDs: Set<UUID> = []
+            let trackingSampleInterval = max(1, min(intervalFrames, Int((max(1, info.frameRate) / 6).rounded())))
+            let coordinator = VideoTrackingCoordinator(
+                editState: VideoEditState(),
+                frameRate: info.frameRate,
+                options: trackingOptions
+            )
             do {
-                for (index, time) in times.enumerated() {
-                    if cancellation.isCancelled {
-                        break
-                    }
-                    let frame = try VideoFrameReader(url: url)
-                        .frame(at: CMTime(seconds: time, preferredTimescale: 600))
-                    let rois = try detector(frame)
-                    if !rois.isEmpty {
+                try VideoFrameReader(url: url).readFrames(
+                    shouldContinue: { !cancellation.isCancelled }
+                ) { index, frame, presentationTime in
+                    let outcome = try coordinator.rois(forFrame: index, image: frame, detector: detector)
+                    let rawTime = CMTimeGetSeconds(presentationTime)
+                    let time = rawTime.isFinite ? rawTime : Double(index) / max(1, info.frameRate)
+                    let lostStateChanged = outcome.lostIDs != previousLostIDs
+                    let shouldSave = !outcome.rois.isEmpty && (
+                        outcome.didRedetect
+                            || lostStateChanged
+                            || index % trackingSampleInterval == 0
+                            || index >= info.frameCount - 1
+                    )
+                    if shouldSave {
                         let persistedKeyframe = VideoKeyframe(
                             timeSeconds: time,
-                            rois: rois,
-                            trackingStatus: .autoDetected
+                            rois: outcome.rois,
+                            trackingStatus: outcome.didRedetect ? .autoDetected : .tracked
                         ).resolvingInheritedSettings(
                             inheritedStyle: inheritedStyle,
                             maskEngineRawValue: inheritedMaskEngineRawValue,
@@ -6149,9 +6436,18 @@ final class MosaicWindowController: NSObject {
                         state.upsertKeyframe(persistedKeyframe)
                         detectedKeyframes += 1
                     }
-                    DispatchQueue.main.async { [weak self] in
-                        self?.updateStatus("動画自動モザイク処理中… \(index + 1)/\(times.count)")
+                    previousLostIDs = outcome.lostIDs
+                    if index % max(1, Int(info.frameRate / 5)) == 0 {
+                        DispatchQueue.main.async { [weak self] in
+                            self?.updateStatus(
+                                "動画自動モザイク処理中… \(min(index + 1, info.frameCount))/\(info.frameCount)フレーム"
+                            )
+                        }
                     }
+                }
+                // 手動で確定したキーフレームは自動解析結果より優先して残す。
+                for keyframe in baseState.keyframes where keyframe.trackingStatus == .manual {
+                    state.upsertKeyframe(keyframe)
                 }
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -6167,7 +6463,7 @@ final class MosaicWindowController: NSObject {
                     self.seekVideo(to: self.currentVideoTimeSeconds, reason: wasCancelled ? "動画自動モザイク処理を停止" : "動画自動モザイク処理完了")
                     self.updateStatus(
                         (wasCancelled ? "動画自動モザイク処理を停止しました" : "動画自動モザイク処理完了")
-                        + ": キーフレーム\(state.keyframes.count)件（ROIあり \(detectedKeyframes)件）。必要なら確認後に動画を書き出してください"
+                        + ": キーフレーム\(state.keyframes.count)件（追跡保存 \(detectedKeyframes)件）。必要なら確認後に動画を書き出してください"
                     )
                     AppLog.video.info(
                         "動画自動モザイク処理完了: keyframes=\(state.keyframes.count, privacy: .public) detected=\(detectedKeyframes, privacy: .public)"
@@ -6926,8 +7222,8 @@ final class MosaicWindowController: NSObject {
         }
     }
 
-    nonisolated private static func videoPlaybackSegmentEngine() -> Segmenting {
-        PerROISegmentEngine(base: ShapeSegmentEngine()) { rawValue, threshold in
+    nonisolated private static func videoPlaybackSegmentEngine() -> VideoPlaybackSegmentEngine {
+        VideoPlaybackSegmentEngine { rawValue, threshold in
             guard let kind = SegmentEngineKind(rawValue: rawValue) else { return ShapeSegmentEngine() }
             return Self.makeSegmentEngine(kind: kind, threshold: threshold ?? 0)
         }
@@ -8227,6 +8523,14 @@ extension MosaicWindowController: NSWindowDelegate {
         // 残しておくと本体が終了できず、画面にウィンドウだけ取り残される
         // （ユーザー要望 2026-08-02）。
         if !isAuxiliaryWindow(window) {
+            if let videoShortcutEventMonitor {
+                NSEvent.removeMonitor(videoShortcutEventMonitor)
+                self.videoShortcutEventMonitor = nil
+            }
+            if let numpadEventMonitor {
+                NSEvent.removeMonitor(numpadEventMonitor)
+                self.numpadEventMonitor = nil
+            }
             closeAllAuxiliaryWindows()
         }
     }
@@ -9085,6 +9389,10 @@ extension MosaicWindowController {
     /// メニューのkeyEquivalentでは（文字一致のため）テンキーとトップ行の数字キーを区別できないため、
     /// ローカルイベント監視でキーコードから直接判定する。
     func installNumpadShortcutMonitor() {
+        videoShortcutEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, self.handleVideoShortcut(event) else { return event }
+            return nil
+        }
         numpadEventMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             guard let self, let numpadKey = NumpadKey(rawValue: Int(event.keyCode)) else { return event }
             let assignments = Self.numpadAssignments()
@@ -9093,6 +9401,48 @@ extension MosaicWindowController {
             _ = self.perform(shortcut.action)
             return nil
         }
+    }
+
+    /// 動画編集中だけ有効な文脈依存ショートカット。
+    /// テキスト編集中は文字入力を優先し、`<`/`>`/Spaceを横取りしない。
+    private func handleVideoShortcut(_ event: NSEvent) -> Bool {
+        guard currentVideoItem != nil else { return false }
+        if view.window?.firstResponder is NSTextView { return false }
+
+        let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
+        let characters = event.characters ?? ""
+        let key = (event.charactersIgnoringModifiers ?? characters).lowercased()
+
+        if modifiers.contains(.command), modifiers.contains(.option),
+           !modifiers.contains(.control), !modifiers.contains(.shift), key == "k" {
+            deleteSelectedVideoKeyframes()
+            return true
+        }
+        if modifiers.contains(.command), !modifiers.contains(.option), !modifiers.contains(.control) {
+            if characters == "<" || (event.keyCode == 43 && modifiers.contains(.shift)) {
+                stepToPreviousVideoFrame()
+                return true
+            }
+            if characters == ">" || (event.keyCode == 47 && modifiers.contains(.shift)) {
+                stepToNextVideoFrame()
+                return true
+            }
+        }
+        if !modifiers.contains(.command), !modifiers.contains(.option), !modifiers.contains(.control) {
+            if event.keyCode == 49 {
+                toggleVideoPlayback()
+                return true
+            }
+            if characters == "<" {
+                jumpToPreviousKeyframe()
+                return true
+            }
+            if characters == ">" {
+                jumpToNextKeyframe()
+                return true
+            }
+        }
+        return false
     }
 
     /// 詳細設定「テンキー割当…」ウィンドウを表示する。各ショートカットへテンキーを割り当てられる

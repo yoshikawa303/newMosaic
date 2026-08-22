@@ -337,6 +337,20 @@ private func makeROI(_ rect: NormalizedRect, source: String = "auto",
     MosaicROI(rect: rect, confidence: 1.0, source: source, shape: .rectangle, category: category)
 }
 
+@Test func trackerUsesExpandedContextWithoutExpandingOutputROI() {
+    let roi = makeROI(
+        NormalizedRect(x: 0.4, y: 0.4, width: 0.08, height: 0.1),
+        category: .maleGenital
+    )
+    let trackingRect = VideoROITracker.trackingRect(for: roi)
+    #expect(trackingRect.width > roi.rect.width)
+    #expect(trackingRect.height > roi.rect.height)
+    #expect(trackingRect.x <= roi.rect.x)
+    #expect(trackingRect.y <= roi.rect.y)
+    #expect(trackingRect.x + trackingRect.width >= roi.rect.x + roi.rect.width)
+    #expect(trackingRect.y + trackingRect.height >= roi.rect.y + roi.rect.height)
+}
+
 @Test func sceneCutDetectorFlagsLargeLuminanceChange() {
     var detector = SceneCutDetector(threshold: 0.18)
     #expect(detector.isSceneCut(makeSolidImage(gray: 0)) == false)  // 最初のフレームは常にfalse
@@ -359,6 +373,40 @@ private func makeROI(_ rect: NormalizedRect, source: String = "auto",
     #expect(merged.rois[0].id == tracked[0].id)
     #expect(merged.rois[0].rect.x == 0.12)
     #expect(merged.reanchoredIDs.contains(tracked[0].id))
+}
+
+@Test func mergeReanchorsFastMovingSameCategoryByCenterDistance() {
+    let tracked = makeROI(NormalizedRect(x: 0.10, y: 0.3, width: 0.16, height: 0.16))
+    let moved = makeROI(NormalizedRect(x: 0.28, y: 0.3, width: 0.16, height: 0.16))
+    #expect(VideoTrackingCoordinator.intersectionOverUnion(tracked.rect, moved.rect) == 0)
+
+    let merged = VideoTrackingCoordinator.merge(tracked: [tracked], detected: [moved])
+    #expect(merged.rois.count == 1)
+    #expect(merged.addedCount == 0)
+    #expect(merged.rois[0].id == tracked.id)
+    #expect(merged.rois[0].rect == moved.rect)
+}
+
+@Test func detectorDrivenCoordinatorBootstrapsWithoutManualKeyframes() throws {
+    let roi = makeROI(NormalizedRect(x: 0.2, y: 0.2, width: 0.2, height: 0.2))
+    let coordinator = VideoTrackingCoordinator(
+        editState: VideoEditState(),
+        frameRate: 30,
+        options: .init(
+            autoRedetectEnabled: true,
+            redetectIntervalFrames: 3,
+            sceneCutRedetectEnabled: false,
+            lostExpansionEnabled: false
+        )
+    )
+    let image = makeSolidImage(gray: 128)
+    let first = try coordinator.rois(forFrame: 0, image: image) { _ in [roi] }
+    let second = try coordinator.rois(forFrame: 1, image: image) { _ in [roi] }
+
+    #expect(first.didRedetect)
+    #expect(first.rois.count == 1)
+    #expect(second.didRedetect == false)
+    #expect(second.rois.count == 1)
 }
 
 @Test func mergeDoesNotReanchorManualROIs() {

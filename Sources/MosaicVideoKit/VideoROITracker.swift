@@ -36,13 +36,31 @@ public final class VideoROITracker {
         let request: VNTrackObjectRequest
         let handler = VNSequenceRequestHandler()
         var lastVisionRect: CGRect
+        /// 元ROIが追跡用の周辺コンテキスト矩形内で占める相対位置。
+        let roiWithinTrackingRect: CGRect
         var isLost = false
 
-        init(initialObservation: VNDetectedObjectObservation) {
+        init(initialObservation: VNDetectedObjectObservation, roiVisionRect: CGRect) {
             let request = VNTrackObjectRequest(detectedObjectObservation: initialObservation)
             request.trackingLevel = .accurate
             self.request = request
             self.lastVisionRect = initialObservation.boundingBox
+            let trackingRect = initialObservation.boundingBox
+            self.roiWithinTrackingRect = CGRect(
+                x: (roiVisionRect.minX - trackingRect.minX) / max(0.0001, trackingRect.width),
+                y: (roiVisionRect.minY - trackingRect.minY) / max(0.0001, trackingRect.height),
+                width: roiVisionRect.width / max(0.0001, trackingRect.width),
+                height: roiVisionRect.height / max(0.0001, trackingRect.height)
+            )
+        }
+
+        func roiVisionRect() -> CGRect {
+            CGRect(
+                x: lastVisionRect.minX + roiWithinTrackingRect.minX * lastVisionRect.width,
+                y: lastVisionRect.minY + roiWithinTrackingRect.minY * lastVisionRect.height,
+                width: roiWithinTrackingRect.width * lastVisionRect.width,
+                height: roiWithinTrackingRect.height * lastVisionRect.height
+            )
         }
     }
 
@@ -59,15 +77,24 @@ public final class VideoROITracker {
 
     public init() {}
 
+    /// 小さな対象部位そのものだけではフレーム間で特徴量が不足しやすいため、追跡には
+    /// 周辺の肌・衣服を含むコンテキスト矩形を使う。出力ROIは元の相対位置へ戻すので、
+    /// モザイク範囲そのものがこの倍率で広がることはない。
+    static func trackingRect(for roi: MosaicROI) -> MosaicCore.NormalizedRect {
+        let isGenital = roi.category == .maleGenital || roi.category == .femaleGenital
+        return roi.rect.expanded(scale: isGenital ? 1.8 : 1.45)
+    }
+
     /// キーフレーム上の初期ROI群から追跡を開始する。以後`track(next:)`を順番に呼び出す。
     public func start(with rois: [MosaicROI], on frame: CGImage) throws {
         states.removeAll()
         lostIDs.removeAll()
         currentROIs = rois
         for roi in rois {
-            let visionRect = CoordinateConversion.toVisionRect(roi.rect)
-            let observation = VNDetectedObjectObservation(boundingBox: visionRect)
-            states[roi.id] = TrackState(initialObservation: observation)
+            let roiVisionRect = CoordinateConversion.toVisionRect(roi.rect)
+            let trackingVisionRect = CoordinateConversion.toVisionRect(Self.trackingRect(for: roi))
+            let observation = VNDetectedObjectObservation(boundingBox: trackingVisionRect)
+            states[roi.id] = TrackState(initialObservation: observation, roiVisionRect: roiVisionRect)
         }
     }
 
@@ -110,7 +137,7 @@ public final class VideoROITracker {
             }
 
             var updated = roi
-            updated.rect = CoordinateConversion.toNormalizedRect(state.lastVisionRect).clamped()
+            updated.rect = CoordinateConversion.toNormalizedRect(state.roiVisionRect()).clamped()
             updatedROIs.append(updated)
         }
 

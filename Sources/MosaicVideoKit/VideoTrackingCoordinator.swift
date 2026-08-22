@@ -105,6 +105,11 @@ public final class VideoTrackingCoordinator {
         image: CGImage,
         detector: (@Sendable (CGImage) throws -> [MosaicROI])? = nil
     ) throws -> FrameOutcome {
+        // 動画全体の自動解析では手動キーフレーム無しで開始する。検出で初期化した後は
+        // 次の再検出までVision追跡を連続適用し、独立した間引き検出の隙間を埋める。
+        if editState.keyframes.isEmpty {
+            return try detectorDrivenROIs(forFrame: index, image: image, detector: detector)
+        }
         guard let keyframe = editState.keyframe(at: Double(index) / frameRate) else {
             return FrameOutcome(rois: [], lostIDs: [], didRedetect: false,
                                 didDetectSceneCut: false, addedROICount: 0)
@@ -165,6 +170,68 @@ public final class VideoTrackingCoordinator {
                             didDetectSceneCut: isSceneCut, addedROICount: addedCount)
     }
 
+    private func detectorDrivenROIs(
+        forFrame index: Int,
+        image: CGImage,
+        detector: (@Sendable (CGImage) throws -> [MosaicROI])?
+    ) throws -> FrameOutcome {
+        guard let detector else {
+            return FrameOutcome(rois: [], lostIDs: [], didRedetect: false,
+                                didDetectSceneCut: false, addedROICount: 0)
+        }
+
+        if currentROIs.isEmpty {
+            framesSinceRedetect += 1
+            let shouldDetect = index == 0 || framesSinceRedetect >= options.redetectIntervalFrames
+            guard shouldDetect else {
+                return FrameOutcome(rois: [], lostIDs: [], didRedetect: false,
+                                    didDetectSceneCut: false, addedROICount: 0)
+            }
+            let detected = try detector(image)
+            framesSinceRedetect = 0
+            currentROIs = detected
+            guard !detected.isEmpty else {
+                return FrameOutcome(rois: [], lostIDs: [], didRedetect: true,
+                                    didDetectSceneCut: false, addedROICount: 0)
+            }
+            try tracker.start(with: detected, on: image)
+            sceneCutDetector.reset(with: image)
+            addedFrameIndices.append(index)
+            return FrameOutcome(rois: detected, lostIDs: [], didRedetect: true,
+                                didDetectSceneCut: false, addedROICount: detected.count)
+        }
+
+        let isSceneCut = options.sceneCutRedetectEnabled && sceneCutDetector.isSceneCut(image)
+        if isSceneCut { sceneCutFrameIndices.append(index) }
+        framesSinceRedetect += 1
+        var tracked = tracker.track(next: image)
+        var lostIDs = tracker.lostIDs
+        var didRedetect = false
+        var addedCount = 0
+        if framesSinceRedetect >= options.redetectIntervalFrames || isSceneCut {
+            let detected = try detector(image)
+            let merged = Self.merge(tracked: tracked, detected: detected)
+            tracked = merged.rois
+            addedCount = merged.addedCount
+            didRedetect = true
+            framesSinceRedetect = 0
+            try tracker.start(with: tracked, on: image)
+            sceneCutDetector.reset(with: image)
+            for id in merged.reanchoredIDs {
+                lostIDs.remove(id)
+                lostExpansion[id] = nil
+            }
+            if addedCount > 0 { addedFrameIndices.append(index) }
+        }
+        if !lostIDs.isEmpty { lostFrameIndices.append(index) }
+        currentROIs = tracked
+        let output = options.lostExpansionEnabled
+            ? applyLostExpansion(to: tracked, lostIDs: lostIDs)
+            : tracked
+        return FrameOutcome(rois: output, lostIDs: lostIDs, didRedetect: didRedetect,
+                            didDetectSceneCut: isSceneCut, addedROICount: addedCount)
+    }
+
     /// 見失っているROIをフレームごとに少しずつ広げる（C）。
     ///
     /// 見失い＝「対象がどこへ動いたか分からない」状態のため、直前位置を保持するだけでは
@@ -206,24 +273,26 @@ public final class VideoTrackingCoordinator {
         detected: [MosaicROI]
     ) -> (rois: [MosaicROI], addedCount: Int, reanchoredIDs: Set<UUID>) {
         var result = tracked
-        var usedDetectionIndices = Set<Int>()
         var reanchored = Set<UUID>()
-
-        for (resultIndex, roi) in result.enumerated() {
-            var bestIndex: Int?
-            var bestIoU = redetectMatchIoU
-            for (index, candidate) in detected.enumerated()
-            where !usedDetectionIndices.contains(index) && candidate.category == roi.category {
-                let iou = intersectionOverUnion(roi.rect, candidate.rect)
-                if iou >= bestIoU {
-                    bestIoU = iou
-                    bestIndex = index
-                }
+        let candidatePairs = tracked.enumerated().flatMap { trackedIndex, roi in
+            detected.enumerated().compactMap { detectedIndex, candidate
+                -> (tracked: Int, detected: Int, score: Double)? in
+                guard candidate.category == roi.category else { return nil }
+                let score = redetectMatchScore(roi.rect, candidate.rect)
+                return score > 0 ? (trackedIndex, detectedIndex, score) : nil
             }
-            guard let bestIndex else { continue }
-            usedDetectionIndices.insert(bestIndex)
+        }.sorted { $0.score > $1.score }
+        var matchedTrackedIndices = Set<Int>()
+        var usedDetectionIndices = Set<Int>()
+        for pair in candidatePairs
+        where !matchedTrackedIndices.contains(pair.tracked)
+            && !usedDetectionIndices.contains(pair.detected) {
+            matchedTrackedIndices.insert(pair.tracked)
+            usedDetectionIndices.insert(pair.detected)
+            let roi = tracked[pair.tracked]
             guard roi.source != "manual" else { continue }
-            result[resultIndex].rect = detected[bestIndex].rect
+            result[pair.tracked].rect = detected[pair.detected].rect
+            result[pair.tracked].confidence = detected[pair.detected].confidence
             reanchored.insert(roi.id)
         }
 
@@ -235,6 +304,24 @@ public final class VideoTrackingCoordinator {
             added += 1
         }
         return (result, added, reanchored)
+    }
+
+    /// 再検出間隔内に対象がROI幅以上動くとIoUは0になるため、IoUに加えて中心距離と
+    /// サイズ比でも同一対象を照合する。遠方・大きさが極端に違う候補は新規ROIのままにする。
+    static func redetectMatchScore(_ lhs: NormalizedRect, _ rhs: NormalizedRect) -> Double {
+        let iou = intersectionOverUnion(lhs, rhs)
+        if iou >= redetectMatchIoU { return 2 + iou }
+
+        let lhsCenter = CGPoint(x: lhs.x + lhs.width / 2, y: lhs.y + lhs.height / 2)
+        let rhsCenter = CGPoint(x: rhs.x + rhs.width / 2, y: rhs.y + rhs.height / 2)
+        let distance = hypot(lhsCenter.x - rhsCenter.x, lhsCenter.y - rhsCenter.y)
+        let referenceSize = max(0.0001, max(max(lhs.width, lhs.height), max(rhs.width, rhs.height)))
+        let distanceRatio = distance / referenceSize
+        let smallerArea = min(lhs.area, rhs.area)
+        let largerArea = max(lhs.area, rhs.area)
+        let sizeRatio = largerArea > 0 ? smallerArea / largerArea : 0
+        guard distanceRatio <= 1.5, sizeRatio >= 0.25 else { return 0 }
+        return 1 - distanceRatio / 1.5
     }
 
     static func intersectionOverUnion(_ lhs: NormalizedRect, _ rhs: NormalizedRect) -> Double {

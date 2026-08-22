@@ -136,6 +136,51 @@ public struct VideoEditState: Codable, Equatable, Sendable {
         return sorted.last { $0.timeSeconds <= timeSeconds + 0.0001 } ?? sorted.first
     }
 
+    /// 再生プレビュー用に、前後キーフレームで同じIDのROI位置を線形補間する。
+    ///
+    /// 保存済みキーフレーム自体は変更しない。新規登場/消失ROIは次キーフレームまで
+    /// 先読み表示せず、両端に存在する同一ROIだけを滑らかに移動・拡縮する。
+    public func interpolatedKeyframe(at timeSeconds: Double) -> VideoKeyframe? {
+        let sorted = keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
+        guard let previous = sorted.last(where: { $0.timeSeconds <= timeSeconds + 0.0001 }) ?? sorted.first else {
+            return nil
+        }
+        guard timeSeconds > previous.timeSeconds + 0.0001,
+              let next = sorted.first(where: { $0.timeSeconds > timeSeconds + 0.0001 }),
+              next.timeSeconds > previous.timeSeconds else {
+            return previous
+        }
+
+        let progress = min(1, max(0, (timeSeconds - previous.timeSeconds)
+            / (next.timeSeconds - previous.timeSeconds)))
+        let nextByID = Dictionary(next.rois.map { ($0.id, $0) }, uniquingKeysWith: { first, _ in first })
+        let rois = previous.rois.map { roi -> MosaicROI in
+            guard let destination = nextByID[roi.id] else { return roi }
+            var interpolated = roi
+            interpolated.rect = NormalizedRect(
+                x: Self.interpolate(roi.rect.x, destination.rect.x, progress),
+                y: Self.interpolate(roi.rect.y, destination.rect.y, progress),
+                width: Self.interpolate(roi.rect.width, destination.rect.width, progress),
+                height: Self.interpolate(roi.rect.height, destination.rect.height, progress)
+            ).clamped()
+            interpolated.rotation = Self.interpolateAngle(roi.rotation, destination.rotation, progress)
+            interpolated.confidence = Self.interpolate(roi.confidence, destination.confidence, progress)
+            return interpolated
+        }
+        return VideoKeyframe(timeSeconds: timeSeconds, rois: rois, trackingStatus: previous.trackingStatus)
+    }
+
+    private static func interpolate(_ start: Double, _ end: Double, _ progress: Double) -> Double {
+        start + (end - start) * progress
+    }
+
+    private static func interpolateAngle(_ start: Double, _ end: Double, _ progress: Double) -> Double {
+        var delta = (end - start).truncatingRemainder(dividingBy: 360)
+        if delta > 180 { delta -= 360 }
+        if delta < -180 { delta += 360 }
+        return start + delta * progress
+    }
+
     /// 指定時刻より前で最も近いキーフレームを返す。
     /// 追跡確認では、現在時刻がキーフレーム上でも「現在のキーフレーム」ではなく
     /// 直前のキーフレームを起点にする必要がある。

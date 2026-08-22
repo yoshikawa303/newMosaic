@@ -27,6 +27,30 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(state.keyframe(at: -5)?.timeSeconds == 0)
 }
 
+@Test func videoEditStateInterpolatesMatchingROIsForSmoothPlayback() throws {
+    var start = makeROI(x: 0.1)
+    start.rect = NormalizedRect(x: 0.1, y: 0.2, width: 0.1, height: 0.2)
+    start.rotation = 350
+    var end = makeROI(x: 0.5)
+    end.id = start.id
+    end.rect = NormalizedRect(x: 0.5, y: 0.4, width: 0.3, height: 0.4)
+    end.rotation = 10
+    let newlyAppearing = makeROI(x: 0.8)
+
+    var state = VideoEditState()
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [start]))
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 10, rois: [end, newlyAppearing]))
+
+    let halfway = try #require(state.interpolatedKeyframe(at: 5))
+    #expect(halfway.timeSeconds == 5)
+    #expect(halfway.rois.count == 1)
+    #expect(abs(halfway.rois[0].rect.x - 0.3) < 0.0001)
+    #expect(abs(halfway.rois[0].rect.y - 0.3) < 0.0001)
+    #expect(abs(halfway.rois[0].rect.width - 0.2) < 0.0001)
+    #expect(abs(halfway.rois[0].rotation - 360) < 0.0001)
+    #expect(state.interpolatedKeyframe(at: 10)?.rois.count == 2)
+}
+
 @Test func videoEditStateSelectsStrictPreviousKeyframeForTracking() {
     var state = VideoEditState()
     state.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [makeROI(x: 0.1)]))

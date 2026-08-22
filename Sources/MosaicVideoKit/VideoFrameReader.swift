@@ -69,6 +69,12 @@ public final class VideoFrameReader {
     public let url: URL
     private let asset: AVURLAsset
     private let ciContext: CIContext
+    private let imageGeneratorLock = NSLock()
+    private lazy var imageGenerator: AVAssetImageGenerator = {
+        let generator = AVAssetImageGenerator(asset: asset)
+        generator.appliesPreferredTrackTransform = true
+        return generator
+    }()
 
     public init(url: URL, ciContext: CIContext = CIContext(options: [.cacheIntermediates: false])) {
         self.url = url
@@ -165,13 +171,20 @@ public final class VideoFrameReader {
     ///
     /// 再生プレビューでは完全一致フレームに固執するとデコード待ちでカクつくため、
     /// 呼び出し側が許容できる場合は非ゼロの`tolerance`を渡して近傍フレームを使う。
-    public func frame(at time: CMTime, tolerance: CMTime = .zero) throws -> CGImage {
-        let generator = AVAssetImageGenerator(asset: asset)
-        generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = tolerance
-        generator.requestedTimeToleranceAfter = tolerance
+    public func frame(
+        at time: CMTime,
+        tolerance: CMTime = .zero,
+        maximumSize: CGSize? = nil
+    ) throws -> CGImage {
+        // AVAssetImageGeneratorは生成コストが高い。動画再生では同じreaderを使い回し、
+        // 設定変更とcopyを直列化してデコーダ状態を再利用する。
+        imageGeneratorLock.lock()
+        defer { imageGeneratorLock.unlock() }
+        imageGenerator.requestedTimeToleranceBefore = tolerance
+        imageGenerator.requestedTimeToleranceAfter = tolerance
+        imageGenerator.maximumSize = maximumSize ?? .zero
         do {
-            return try generator.copyCGImage(at: time, actualTime: nil)
+            return try imageGenerator.copyCGImage(at: time, actualTime: nil)
         } catch {
             throw VideoFrameReaderError.imageGenerationFailed(error.localizedDescription)
         }
