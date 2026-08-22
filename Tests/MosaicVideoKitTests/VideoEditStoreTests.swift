@@ -76,6 +76,91 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(state.keyframes.count == 1)
 }
 
+@Test func manualFrameCorrectionPersistsAndPropagatesToNearbyTrackedKeyframes() throws {
+    var base = makeROI(x: 0.2)
+    base.rect = NormalizedRect(x: 0.2, y: 0.2, width: 0.1, height: 0.1)
+    var state = VideoEditState()
+    for time in stride(from: 0.0, through: 2.0, by: 0.25) {
+        var roi = base
+        roi.rect.x += time * 0.05
+        state.upsertKeyframe(
+            VideoKeyframe(timeSeconds: time, rois: [roi], trackingStatus: .tracked)
+        )
+    }
+
+    var corrected = try #require(state.interpolatedKeyframe(at: 1)?.rois.first)
+    corrected.rect.x += 0.2
+    corrected.rect.width += 0.04
+    let propagated = state.applyManualCorrection(
+        VideoKeyframe(timeSeconds: 1, rois: [corrected]),
+        propagationDuration: 1
+    )
+
+    let exact = try #require(state.keyframes.first { abs($0.timeSeconds - 1) < 0.001 })
+    #expect(exact.trackingStatus == .manual)
+    #expect(abs(exact.rois[0].rect.x - corrected.rect.x) < 0.0001)
+    #expect(propagated == 6)
+    // 近い自動キーフレームほど強く補正され、伝播範囲端は変更されない。
+    #expect(state.keyframes.first { abs($0.timeSeconds - 0.75) < 0.001 }!.rois[0].rect.x > 0.3)
+    #expect(abs(state.keyframes.first { abs($0.timeSeconds - 0) < 0.001 }!.rois[0].rect.x - 0.2) < 0.0001)
+    #expect(abs(state.keyframes.first { abs($0.timeSeconds - 2) < 0.001 }!.rois[0].rect.x - 0.3) < 0.0001)
+}
+
+@Test func manualFrameCorrectionNeverOverwritesNeighboringManualAnchors() throws {
+    var roi = makeROI(x: 0.2)
+    let id = roi.id
+    var state = VideoEditState()
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [roi], trackingStatus: .manual))
+    roi.rect.x = 0.3
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 0.5, rois: [roi], trackingStatus: .tracked))
+    roi.rect.x = 0.4
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 2, rois: [roi], trackingStatus: .manual))
+
+    var corrected = try #require(state.interpolatedKeyframe(at: 1)?.rois.first { $0.id == id })
+    corrected.rect.x += 0.2
+    _ = state.applyManualCorrection(
+        VideoKeyframe(timeSeconds: 1, rois: [corrected]),
+        propagationDuration: 2
+    )
+
+    #expect(abs(state.keyframes.first { $0.timeSeconds == 0 }!.rois[0].rect.x - 0.2) < 0.0001)
+    #expect(abs(state.keyframes.first { $0.timeSeconds == 2 }!.rois[0].rect.x - 0.4) < 0.0001)
+}
+
+@Test func frameAwareToleranceKeepsAdjacentHighFrameRateKeyframes() {
+    var state = VideoEditState()
+    let tolerance = 0.45 / 120.0
+    state.upsertKeyframe(
+        VideoKeyframe(timeSeconds: 1, rois: [makeROI(x: 0.1)]),
+        matchingTolerance: tolerance
+    )
+    state.upsertKeyframe(
+        VideoKeyframe(timeSeconds: 1 + 1.0 / 120.0, rois: [makeROI(x: 0.2)]),
+        matchingTolerance: tolerance
+    )
+
+    #expect(state.keyframes.count == 2)
+}
+
+@Test func nonGeometryManualCorrectionDoesNotRewriteNeighboringKeyframes() {
+    var roi = makeROI(x: 0.2)
+    var state = VideoEditState()
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [roi], trackingStatus: .tracked))
+    roi.rect.x = 0.3
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 1, rois: [roi], trackingStatus: .tracked))
+    var styleOnly = roi
+    styleOnly.style = MosaicROIStyle(pattern: .noise)
+
+    let propagated = state.applyManualCorrection(
+        VideoKeyframe(timeSeconds: 1, rois: [styleOnly]),
+        propagationDuration: 1
+    )
+
+    #expect(propagated == 0)
+    #expect(state.keyframes[0].rois[0].style == nil)
+    #expect(state.keyframes[1].rois[0].style?.pattern == .noise)
+}
+
 @Test func videoEditStoreRoundTripsThroughDisk() throws {
     let root = FileManager.default.temporaryDirectory
         .appendingPathComponent("newMosaicVideoEditStoreTests-\(UUID().uuidString)")

@@ -335,3 +335,29 @@
 - macOSパッケージ作成、`codesign --verify --deep --strict` PASS。`CFBundleShortVersionString=0.0.00150`、`CFBundleVersion=150` を確認。
 - `open -n dist/newMosaic.app` で配布アプリの起動プロセス生成を確認。
 - 実動画での目視fps・複数ROI/SAM追跡精度の測定は未実施。DaVinci Resolve / Adobe Premiere Pro等との製品同等性は未認定で、現行構成内のボトルネック除去と追跡改善として完了した。
+
+### 2026-08-22 18:10 JST - Codex GPT-5 - 種別: 依頼内容 - 動画フレーム修正の反映と前後補正
+
+```text
+☆改善：動画＞モザイク範囲ズレがあった場合、フレーム単位で修正して、前後の間違いも補正してほしい。
+☆バグ：動画＞フレーム単位で修正しても、修正範囲が反映されない。
+```
+
+### 2026-08-22 18:19 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00151 動画フレーム修正
+
+- 作業AIモデル: Codex GPT-5（動画状態管理、フレーム単位保存、前後補正、AppKit編集経路、レビュー/リリースを同モデルで対応。実行中モデル自体は切替不可）
+- 真因は、動画キャンバスのROI編集完了時に表示中の`canvas.rois`だけが更新され、現在フレームの`VideoEditState`とサイドカーJSONへ保存されていなかったこと。
+- ROIの移動・リサイズ・回転・形状・カテゴリ・削除、マスクペン、個別設定、Undo/Redo完了時に現在フレームを即時保存する共通経路へ統一。
+- 修正前の補間位置との差分を、前後最大1秒の自動/追跡キーフレームへ減衰伝播する。別の手動キーフレームは上書きしない。
+- 120/240fpsの隣接フレームを別キーフレームとして扱えるよう、同一フレーム許容値を元動画fpsから計算する。
+- コードレビュー3回を実施。P1 2件、P2 2件を修正し、3回目で追加P0/P1なし。詳細は`Docs/QC/CodeReview/QC_CodeReview_v0.0.00151.md`。
+- 作業時間: 約15分。
+
+### 2026-08-22 18:25 JST - Codex GPT-5 - 種別: 検証結果 - v0.0.00151
+
+- `swift build` PASS（既存のdeprecated/Sendable警告のみ）。
+- `swift test --filter VideoEditStoreTests` 14件 PASS、`swift test` 174件 PASS。
+- `git diff --check`、`agent_governance_guard`、`local_quality_gate` PASS。
+- macOSパッケージ作成、`codesign --verify --deep --strict` PASS。`CFBundleShortVersionString=0.0.00151`、`CFBundleVersion=151`を確認。
+- `open -n dist/newMosaic.app`でPID 95118の起動を確認。
+- 実動画上の手動ドラッグ、前後フレームへの補正、再生・書き出し結果の目視確認は未実施。

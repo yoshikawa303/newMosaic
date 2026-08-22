@@ -193,10 +193,17 @@ public struct VideoEditState: Codable, Equatable, Sendable {
     }
 
     /// キーフレームを追加/更新する。時刻昇順で保持する。
-    /// 既存キーフレームと±0.01秒以内の場合は「同じ時刻の編集」とみなして丸ごと置き換える
-    /// （時刻も新しい値になる。ユーザーが再生位置を微調整して編集し直したケースを想定）。
-    public mutating func upsertKeyframe(_ keyframe: VideoKeyframe) {
-        if let index = keyframes.firstIndex(where: { abs($0.timeSeconds - keyframe.timeSeconds) < 0.01 }) {
+    /// 既存キーフレームと`matchingTolerance`未満の場合は「同じ時刻の編集」とみなして
+    /// 丸ごと置き換える（時刻も新しい値になる）。既定は従来互換の0.01秒だが、
+    /// 高fps動画の編集側はフレーム間隔の半分未満を渡す。
+    public mutating func upsertKeyframe(
+        _ keyframe: VideoKeyframe,
+        matchingTolerance: Double = 0.01
+    ) {
+        let tolerance = max(0.000_001, matchingTolerance)
+        if let index = keyframes.firstIndex(where: {
+            abs($0.timeSeconds - keyframe.timeSeconds) < tolerance
+        }) {
             keyframes[index] = keyframe
         } else {
             keyframes.append(keyframe)
@@ -204,9 +211,130 @@ public struct VideoEditState: Codable, Equatable, Sendable {
         keyframes.sort { $0.timeSeconds < $1.timeSeconds }
     }
 
-    /// 指定時刻のキーフレームを削除する（±0.01秒）。
-    public mutating func removeKeyframe(atTime timeSeconds: Double) {
-        keyframes.removeAll { abs($0.timeSeconds - timeSeconds) < 0.01 }
+    /// 現在フレームの手動修正を確定し、近傍の自動追跡キーフレームへ幾何差分を減衰伝播する。
+    ///
+    /// 手動修正を1点だけ保存すると、その直前・直後に密な自動キーフレームがある動画では
+    /// 数フレームで元の誤った軌道へ戻ってしまう。修正前の補間位置との差（中心・サイズ・回転）を
+    /// 前後へ伝播し、既存の手動キーフレームまたは`propagationDuration`で影響を0へ戻す。
+    /// ユーザーが確認済みの別の手動キーフレームは変更しない。
+    ///
+    /// - Returns: 補正した近傍キーフレーム数（現在フレーム自身を含まない）。
+    @discardableResult
+    public mutating func applyManualCorrection(
+        _ correction: VideoKeyframe,
+        matchingTolerance: Double = 0.01,
+        propagationDuration: Double = 1.0
+    ) -> Int {
+        let tolerance = max(0.000_001, matchingTolerance)
+        let duration = max(tolerance, propagationDuration)
+        let time = correction.timeSeconds
+        let baselineROIs = interpolatedKeyframe(at: time)?.rois ?? []
+        let baselineByID = Dictionary(
+            baselineROIs.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let correctedByID = Dictionary(
+            correction.rois.map { ($0.id, $0) },
+            uniquingKeysWith: { first, _ in first }
+        )
+        let deltas = correctedByID.compactMapValues { corrected -> GeometryCorrection? in
+            guard let baseline = baselineByID[corrected.id] else { return nil }
+            let delta = GeometryCorrection(from: baseline, to: corrected)
+            return delta.isEffective ? delta : nil
+        }
+
+        let previousManualTime = keyframes
+            .filter { $0.trackingStatus == .manual && $0.timeSeconds < time - tolerance }
+            .map(\.timeSeconds)
+            .max()
+        let nextManualTime = keyframes
+            .filter { $0.trackingStatus == .manual && $0.timeSeconds > time + tolerance }
+            .map(\.timeSeconds)
+            .min()
+        let backwardSpan = min(duration, previousManualTime.map { time - $0 } ?? duration)
+        let forwardSpan = min(duration, nextManualTime.map { $0 - time } ?? duration)
+
+        var propagatedCount = 0
+        if !deltas.isEmpty {
+            for index in keyframes.indices {
+                let keyframeTime = keyframes[index].timeSeconds
+                let signedDistance = keyframeTime - time
+                let distance = abs(signedDistance)
+                guard distance >= tolerance,
+                      keyframes[index].trackingStatus != .manual else { continue }
+                let span = signedDistance < 0 ? backwardSpan : forwardSpan
+                guard span > tolerance, distance < span else { continue }
+                let weight = 1 - distance / span
+                var changed = false
+                keyframes[index].rois = keyframes[index].rois.map { roi in
+                    guard let delta = deltas[roi.id] else { return roi }
+                    changed = true
+                    return delta.applying(to: roi, weight: weight)
+                }
+                if changed { propagatedCount += 1 }
+            }
+        }
+
+        var manual = correction
+        manual.trackingStatus = .manual
+        upsertKeyframe(manual, matchingTolerance: tolerance)
+        return propagatedCount
+    }
+
+    private struct GeometryCorrection {
+        let centerX: Double
+        let centerY: Double
+        let width: Double
+        let height: Double
+        let rotation: Double
+
+        var isEffective: Bool {
+            abs(centerX) > 0.000_001
+                || abs(centerY) > 0.000_001
+                || abs(width) > 0.000_001
+                || abs(height) > 0.000_001
+                || abs(rotation) > 0.000_1
+        }
+
+        init(from baseline: MosaicROI, to corrected: MosaicROI) {
+            centerX = (corrected.rect.x + corrected.rect.width / 2)
+                - (baseline.rect.x + baseline.rect.width / 2)
+            centerY = (corrected.rect.y + corrected.rect.height / 2)
+                - (baseline.rect.y + baseline.rect.height / 2)
+            width = corrected.rect.width - baseline.rect.width
+            height = corrected.rect.height - baseline.rect.height
+            var angle = (corrected.rotation - baseline.rotation).truncatingRemainder(dividingBy: 360)
+            if angle > 180 { angle -= 360 }
+            if angle < -180 { angle += 360 }
+            rotation = angle
+        }
+
+        func applying(to roi: MosaicROI, weight: Double) -> MosaicROI {
+            var corrected = roi
+            let nextWidth = max(0.001, roi.rect.width + width * weight)
+            let nextHeight = max(0.001, roi.rect.height + height * weight)
+            let nextCenterX = roi.rect.x + roi.rect.width / 2 + centerX * weight
+            let nextCenterY = roi.rect.y + roi.rect.height / 2 + centerY * weight
+            corrected.rect = NormalizedRect(
+                x: nextCenterX - nextWidth / 2,
+                y: nextCenterY - nextHeight / 2,
+                width: nextWidth,
+                height: nextHeight
+            ).clamped()
+            var nextRotation = (roi.rotation + rotation * weight).truncatingRemainder(dividingBy: 360)
+            if nextRotation < 0 { nextRotation += 360 }
+            corrected.rotation = nextRotation
+            return corrected
+        }
+    }
+
+    /// 指定時刻と`matchingTolerance`未満のキーフレームを削除する。
+    public mutating func removeKeyframe(
+        atTime timeSeconds: Double,
+        matchingTolerance: Double = 0.01
+    ) {
+        let tolerance = max(0.000_001, matchingTolerance)
+        keyframes.removeAll { abs($0.timeSeconds - timeSeconds) < tolerance }
     }
 
     /// 全キーフレームの継承スタイルを保存時点のスタイルへ固定する。

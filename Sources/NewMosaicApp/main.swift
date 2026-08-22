@@ -2421,7 +2421,10 @@ final class MosaicWindowController: NSObject {
             self.pushUndoSnapshot(self.currentEditorState())
             self.canvas.rois[index].category = category
             self.refreshMaskShapeScale(at: index)
-            self.updateStatus("ROIのカテゴリを「\(category.displayName)」へ変更しました")
+            if !self.persistCurrentVideoFrameCorrectionIfNeeded() {
+                self.hasUnsavedChanges = true
+                self.updateStatus("ROIのカテゴリを「\(category.displayName)」へ変更しました")
+            }
         }
         canvas.onManualEditWillBegin = { [weak self] in
             guard let self else { return }
@@ -2437,6 +2440,9 @@ final class MosaicWindowController: NSObject {
             if let selectedID = self.canvas.selectedROIID,
                let roi = self.canvas.rois.first(where: { $0.id == selectedID }) {
                 self.pendingFlashCenter = roi.style?.flashCenter ?? self.defaultMosaicStyle.flashCenter
+            }
+            if !self.persistCurrentVideoFrameCorrectionIfNeeded() {
+                self.hasUnsavedChanges = true
             }
             self.resumeMosaicPreviewIfNeeded()
         }
@@ -2522,6 +2528,9 @@ final class MosaicWindowController: NSObject {
                 canvas.rois[roiIndex].polygonPoints = nil
             }
             refreshMaskShapeScale(at: roiIndex)
+            if !persistCurrentVideoFrameCorrectionIfNeeded() {
+                hasUnsavedChanges = true
+            }
         } else if shape == .polygon {
             updateStatus("追加形状: 多角形（ドラッグで追加後、頂点ドラッグで変形、Option+クリックで頂点の追加/削除）")
         }
@@ -3909,6 +3918,7 @@ final class MosaicWindowController: NSObject {
             hasUnsavedChanges = true
             selectedLayerStatusSummary = "\(canvas.rois[index].category.displayName) <個別>"
             updateStatsBar()
+            _ = persistCurrentVideoFrameCorrectionIfNeeded()
         } else {
             let previousStyle = defaultMosaicStyleForRendering().persistentStyle()
             let nextStyle = currentMosaicStyle()
@@ -3972,6 +3982,7 @@ final class MosaicWindowController: NSObject {
             canvas.rois[index].style = style
         }
         hasUnsavedChanges = true
+        _ = persistCurrentVideoFrameCorrectionIfNeeded()
         resumeMosaicPreviewIfNeeded()
         updateStatus("現在のモザイク設定を全レイヤへ適用しました")
     }
@@ -4725,6 +4736,7 @@ final class MosaicWindowController: NSObject {
         }
         canvas.rois[index].manualMaskStrokes.append(stroke)
         hasUnsavedChanges = true
+        _ = persistCurrentVideoFrameCorrectionIfNeeded()
         resumeMosaicPreviewIfNeeded()
         updateStatus(stroke.isAdditive
             ? "マスクを塗りました（Option(⌥)キーを押しながらで消せます）"
@@ -4952,6 +4964,7 @@ final class MosaicWindowController: NSObject {
                 canvas.selectedROIID = nil
             }
             hasUnsavedChanges = true
+            _ = persistCurrentVideoFrameCorrectionIfNeeded()
         }
         if !layerKinds.isEmpty {
             ungroupedLayers.removeAll { layerKinds.contains($0.kind) }
@@ -6132,7 +6145,7 @@ final class MosaicWindowController: NSObject {
         videoTimeLabel.stringValue = "\(VideoPreviewView.timeText(currentVideoTimeSeconds))"
             + " / \(VideoPreviewView.timeText(info.durationSeconds))"
         let isKeyframe = currentVideoEditState.keyframes.contains {
-            abs($0.timeSeconds - currentVideoTimeSeconds) < 0.01
+            abs($0.timeSeconds - currentVideoTimeSeconds) < videoFrameMatchingTolerance
         }
         videoKeyframeCountLabel.stringValue = "キーフレーム \(currentVideoEditState.keyframes.count)件"
             + (isKeyframe ? "（現在）" : "")
@@ -6144,7 +6157,9 @@ final class MosaicWindowController: NSObject {
 
     private func selectVideoKeyframeRow(at timeSeconds: Double) {
         let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
-        guard let row = sorted.firstIndex(where: { abs($0.timeSeconds - timeSeconds) < 0.01 }) else {
+        guard let row = sorted.firstIndex(where: {
+            abs($0.timeSeconds - timeSeconds) < videoFrameMatchingTolerance
+        }) else {
             videoKeyframeTableView.deselectAll(nil)
             return
         }
@@ -6184,10 +6199,60 @@ final class MosaicWindowController: NSObject {
 
     private func currentVideoKeyframeTrackingStatus() -> VideoKeyframeTrackingStatus {
         if let lastTrackedVideoTimeSeconds,
-           abs(lastTrackedVideoTimeSeconds - currentVideoTimeSeconds) < 0.01 {
+           abs(lastTrackedVideoTimeSeconds - currentVideoTimeSeconds) < videoFrameMatchingTolerance {
             return .tracked
         }
         return .manual
+    }
+
+    /// 同一フレーム判定はフレーム間隔の半分未満にする。固定0.01秒では120fps以上の
+    /// 隣接フレームを同一キーフレームとして上書きしてしまい、フレーム単位修正にならない。
+    private var videoFrameMatchingTolerance: Double {
+        min(0.01, 0.45 / max(1, currentVideoInfo?.frameRate ?? 30))
+    }
+
+    /// キャンバス上の手動ROI編集を、現在動画の現在フレームへ即時保存する。
+    /// 保存前の補間位置との差分は、手動アンカーを越えない範囲で前後の自動追跡
+    /// キーフレームへ減衰伝播し、1フレームだけ直ってすぐ誤軌道へ戻る状態を防ぐ。
+    @discardableResult
+    private func persistCurrentVideoFrameCorrectionIfNeeded() -> Bool {
+        guard let item = currentVideoItem,
+              currentLibraryItem?.id == item.id,
+              loadedImage != nil else { return false }
+        let correction = videoKeyframeWithResolvedInheritedSettings(
+            timeSeconds: currentVideoTimeSeconds,
+            rois: canvas.rois,
+            trackingStatus: .manual
+        )
+        let propagatedCount = currentVideoEditState.applyManualCorrection(
+            correction,
+            matchingTolerance: videoFrameMatchingTolerance,
+            propagationDuration: 1.0
+        )
+        lastTrackedVideoTimeSeconds = nil
+        videoSeekRequestID += 1
+        mosaicEngine.invalidateMaskCache()
+        do {
+            try videoEditStore.save(currentVideoEditState, for: item.id)
+            hasUnsavedChanges = false
+            updateVideoTimelineLabels()
+            reloadLayerList()
+            updateStatsBar()
+            updateStatus(
+                "フレーム修正を保存: \(VideoPreviewView.timeText(currentVideoTimeSeconds))"
+                + (propagatedCount > 0
+                    ? "（前後の自動キーフレーム\(propagatedCount)件を補正）"
+                    : "（現在フレーム）")
+            )
+            AppLog.video.info(
+                "フレーム修正保存: time=\(self.currentVideoTimeSeconds, privacy: .public) propagated=\(propagatedCount, privacy: .public)"
+            )
+            return true
+        } catch {
+            hasUnsavedChanges = true
+            showError(error)
+            return false
+        }
     }
 
     @objc private func videoTimeSliderChanged() {
@@ -6280,7 +6345,8 @@ final class MosaicWindowController: NSObject {
                 timeSeconds: currentVideoTimeSeconds,
                 rois: videoROIsForKeyframePersistence(),
                 trackingStatus: currentVideoKeyframeTrackingStatus()
-            )
+            ),
+            matchingTolerance: videoFrameMatchingTolerance
         )
         lastTrackedVideoTimeSeconds = nil
         mosaicPreviewCheckbox.state = .on
@@ -6297,7 +6363,10 @@ final class MosaicWindowController: NSObject {
 
     @objc private func removeVideoKeyframe() {
         guard let item = currentVideoItem else { return }
-        currentVideoEditState.removeKeyframe(atTime: currentVideoTimeSeconds)
+        currentVideoEditState.removeKeyframe(
+            atTime: currentVideoTimeSeconds,
+            matchingTolerance: videoFrameMatchingTolerance
+        )
         saveCurrentVideoEditState(item: item)
         updateVideoTimelineLabels()
         updateStatus("キーフレームを削除: \(VideoPreviewView.timeText(currentVideoTimeSeconds))")
@@ -6315,7 +6384,10 @@ final class MosaicWindowController: NSObject {
         }
         let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
         for row in selectedRows.reversed() where row >= 0 && row < sorted.count {
-            currentVideoEditState.removeKeyframe(atTime: sorted[row].timeSeconds)
+            currentVideoEditState.removeKeyframe(
+                atTime: sorted[row].timeSeconds,
+                matchingTolerance: videoFrameMatchingTolerance
+            )
         }
         saveCurrentVideoEditState(item: item)
         updateVideoTimelineLabels()
@@ -6358,7 +6430,7 @@ final class MosaicWindowController: NSObject {
         guard !sorted.isEmpty else { return }
         let selected = videoKeyframeTableView.selectedRow
         let currentRow = selected >= 0 ? selected : (sorted.firstIndex {
-            abs($0.timeSeconds - currentVideoTimeSeconds) < 0.01
+            abs($0.timeSeconds - currentVideoTimeSeconds) < videoFrameMatchingTolerance
         } ?? 0)
         let destination = max(0, min(sorted.count - 1, currentRow + offset))
         videoKeyframeTableView.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
@@ -6387,6 +6459,7 @@ final class MosaicWindowController: NSObject {
         let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
         let inheritedMaskEngineRawValue = currentSegmentEngineKind().rawValue
         let inheritedMaskThreshold = maskThresholdSlider.doubleValue
+        let frameMatchingTolerance = videoFrameMatchingTolerance
         let cancellation = VideoMosaicExporter.CancellationFlag()
         videoAutoProcessCancellation = cancellation
         isAutoProcessingVideo = true
@@ -6433,7 +6506,10 @@ final class MosaicWindowController: NSObject {
                             maskEngineRawValue: inheritedMaskEngineRawValue,
                             maskThreshold: inheritedMaskThreshold
                         )
-                        state.upsertKeyframe(persistedKeyframe)
+                        state.upsertKeyframe(
+                            persistedKeyframe,
+                            matchingTolerance: frameMatchingTolerance
+                        )
                         detectedKeyframes += 1
                     }
                     previousLostIDs = outcome.lostIDs
@@ -6446,8 +6522,16 @@ final class MosaicWindowController: NSObject {
                     }
                 }
                 // 手動で確定したキーフレームは自動解析結果より優先して残す。
-                for keyframe in baseState.keyframes where keyframe.trackingStatus == .manual {
-                    state.upsertKeyframe(keyframe)
+                // 前後の自動キーフレームへも補正差分を再適用し、自動解析のやり直しで
+                // 手動修正の周辺だけ誤軌道へ戻らないようにする。
+                for keyframe in baseState.keyframes
+                    .filter({ $0.trackingStatus == .manual })
+                    .sorted(by: { $0.timeSeconds < $1.timeSeconds }) {
+                    state.applyManualCorrection(
+                        keyframe,
+                        matchingTolerance: frameMatchingTolerance,
+                        propagationDuration: 1.0
+                    )
                 }
                 DispatchQueue.main.async {
                     guard let self else { return }
@@ -6521,6 +6605,7 @@ final class MosaicWindowController: NSObject {
             return
         }
         let targetTime = currentVideoTimeSeconds
+        let targetTolerance = videoFrameMatchingTolerance
         let editState = videoEditStateWithResolvedInheritedSettings(currentVideoEditState)
         guard let keyframe = editState.keyframe(before: targetTime, requiringROIs: true) else {
             updateStatus("追跡の起点となる直前のROI付きキーフレームがありません。先にROIを作り「キーフレーム追加」後、後の時刻へ移動してください")
@@ -6570,7 +6655,7 @@ final class MosaicWindowController: NSObject {
             let resultLost = lostIDs
             DispatchQueue.main.async {
                 guard let self, self.currentVideoItem?.id == item.id,
-                      abs(self.currentVideoTimeSeconds - targetTime) < 0.01 else { return }
+                      abs(self.currentVideoTimeSeconds - targetTime) < targetTolerance else { return }
                 self.canvas.rois = self.videoKeyframeWithResolvedInheritedSettings(
                     timeSeconds: targetTime,
                     rois: resultROIs,
@@ -7179,6 +7264,7 @@ final class MosaicWindowController: NSObject {
         guard changed else { return true }
         pushUndoSnapshot(previousState)
         hasUnsavedChanges = true
+        _ = persistCurrentVideoFrameCorrectionIfNeeded()
         resumeMosaicPreviewIfNeeded()
         updateStatus("検出設定を選択中レイヤ \(targetIDs.count)件に適用しました（他レイヤは変更していません）")
         return true
@@ -7307,7 +7393,8 @@ final class MosaicWindowController: NSObject {
                         timeSeconds: currentVideoTimeSeconds,
                         rois: persistedROIs,
                         trackingStatus: currentVideoKeyframeTrackingStatus()
-                    )
+                    ),
+                    matchingTolerance: videoFrameMatchingTolerance
                 )
                 lastTrackedVideoTimeSeconds = nil
                 try videoEditStore.save(currentVideoEditState, for: item.id)
@@ -7372,6 +7459,7 @@ final class MosaicWindowController: NSObject {
         canvas.poseLayerJointPoints = []
         rebuildDetectionLayers(personCount: 0, poseAvailability: [])
         applyLayerVisibility()
+        _ = persistCurrentVideoFrameCorrectionIfNeeded()
         resumeMosaicPreviewIfNeeded()
         updateStatus("すべてのレイヤを削除しました（人物・骨格レイヤは元に戻す対象外）")
     }
@@ -7381,6 +7469,7 @@ final class MosaicWindowController: NSObject {
         redoStack.append(currentEditorState())
         applyEditorState(previous)
         hasUnsavedChanges = true
+        _ = persistCurrentVideoFrameCorrectionIfNeeded()
         editorRevision += 1
         updateUndoRedoAvailability()
         updateStatus("元に戻しました: ROI \(canvas.rois.count)件")
@@ -7391,6 +7480,7 @@ final class MosaicWindowController: NSObject {
         undoStack.append(currentEditorState())
         applyEditorState(next)
         hasUnsavedChanges = true
+        _ = persistCurrentVideoFrameCorrectionIfNeeded()
         editorRevision += 1
         updateUndoRedoAvailability()
         updateStatus("やり直しました: ROI \(canvas.rois.count)件")
@@ -8203,7 +8293,8 @@ final class MosaicWindowController: NSObject {
                     timeSeconds: currentVideoTimeSeconds,
                     rois: videoROIsForKeyframePersistence(),
                     trackingStatus: currentVideoKeyframeTrackingStatus()
-                )
+                ),
+                matchingTolerance: videoFrameMatchingTolerance
             )
             lastTrackedVideoTimeSeconds = nil
             do {
