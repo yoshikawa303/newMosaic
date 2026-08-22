@@ -436,6 +436,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 /// 自前で`bounds`いっぱいに描くことで、サイズによらず必ずボタン枠と一致させる。
 @MainActor
 private final class SquareIconButton: NSButton {
+    var usesCompactPanelChrome = false
+
     override func draw(_ dirtyRect: NSRect) {
         if isHighlighted {
             NSColor.selectedContentBackgroundColor.withAlphaComponent(0.35).setFill()
@@ -449,10 +451,10 @@ private final class SquareIconButton: NSButton {
 private final class WrappingToolbarView: NSView {
     private let groups: [[NSView]]
     private let separators: [NSBox]
-    private let horizontalSpacing: CGFloat = 4
-    private let verticalSpacing: CGFloat = 4
+    private let horizontalSpacing: CGFloat = 2
+    private let verticalSpacing: CGFloat = 2
     private let separatorWidth: CGFloat = 1
-    private let separatorHeight: CGFloat = 22
+    private let separatorHeight: CGFloat = 18
 
     init(groups: [[NSView]]) {
         self.groups = groups
@@ -480,7 +482,17 @@ private final class WrappingToolbarView: NSView {
     override var isFlipped: Bool { true }
 
     override var intrinsicContentSize: NSSize {
-        NSSize(width: NSView.noIntrinsicMetric, height: measuredHeight(for: max(1, bounds.width)))
+        let naturalWidth = layoutGroups(maxWidth: .greatestFiniteMagnitude, applyFrames: false).width
+        let measurementWidth = bounds.width > 1 ? bounds.width : naturalWidth
+        return NSSize(width: NSView.noIntrinsicMetric, height: measuredHeight(for: measurementWidth))
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldWidth = frame.size.width
+        super.setFrameSize(newSize)
+        if abs(oldWidth - newSize.width) > 0.5 {
+            invalidateIntrinsicContentSize()
+        }
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
@@ -560,7 +572,7 @@ private final class WrappingToolbarView: NSView {
 
     private func size(for view: NSView) -> NSSize {
         let fitting = view.fittingSize
-        return NSSize(width: max(36, fitting.width), height: max(34, fitting.height))
+        return NSSize(width: max(32, fitting.width), height: max(30, fitting.height))
     }
 }
 
@@ -2681,23 +2693,58 @@ final class MosaicWindowController: NSObject {
         AppLog.ui.info("学習モード: \(next ? "ON" : "OFF", privacy: .public)")
     }
 
-    private func shortcutToolbarButton(_ id: String, symbol: String, helpOverride: String? = nil) -> NSButton {
+    private func shortcutToolbarButton(
+        _ id: String,
+        symbol: String,
+        helpOverride: String? = nil,
+        compactPanelChrome: Bool = false
+    ) -> NSButton {
         let button = SquareIconButton()
-        configureShortcutToolbarButton(button, id: id, symbol: symbol, helpOverride: helpOverride)
+        configureShortcutToolbarButton(
+            button,
+            id: id,
+            symbol: symbol,
+            helpOverride: helpOverride,
+            compactPanelChrome: compactPanelChrome
+        )
         return button
     }
 
-    private func configureShortcutToolbarButton(_ button: NSButton, id: String, symbol: String, helpOverride: String? = nil) {
+    private func configureShortcutToolbarButton(
+        _ button: NSButton,
+        id: String,
+        symbol: String,
+        helpOverride: String? = nil,
+        compactPanelChrome: Bool = false
+    ) {
         guard let shortcut = MosaicWindowController.shortcut(id: id) else {
-            configureToolbarButton(button, symbol: symbol, help: helpOverride ?? id, action: Selector(id))
+            configureToolbarButton(
+                button,
+                symbol: symbol,
+                help: helpOverride ?? id,
+                action: Selector(id),
+                compactPanelChrome: compactPanelChrome
+            )
             return
         }
         let display = shortcut.displayString
         let help = (helpOverride ?? shortcut.title) + (display.isEmpty ? "" : " (\(display))")
-        configureToolbarButton(button, symbol: symbol, help: help, action: shortcut.action)
+        configureToolbarButton(
+            button,
+            symbol: symbol,
+            help: help,
+            action: shortcut.action,
+            compactPanelChrome: compactPanelChrome
+        )
     }
 
-    private func configureToolbarButton(_ button: NSButton, symbol: String, help: String, action: Selector) {
+    private func configureToolbarButton(
+        _ button: NSButton,
+        symbol: String,
+        help: String,
+        action: Selector,
+        compactPanelChrome: Bool = false
+    ) {
         button.title = ""
         button.identifier = NSUserInterfaceItemIdentifier(symbol)
         button.imagePosition = .imageOnly
@@ -2721,6 +2768,9 @@ final class MosaicWindowController: NSObject {
         button.target = self
         button.action = action
         button.translatesAutoresizingMaskIntoConstraints = false
+        if let squareButton = button as? SquareIconButton {
+            squareButton.usesCompactPanelChrome = compactPanelChrome
+        }
         toolbarIconButtons.append(button)
         applyIconSize(to: button, symbol: symbol)
     }
@@ -2732,16 +2782,24 @@ final class MosaicWindowController: NSObject {
     private func applyIconSize(to button: NSButton, symbol: String) {
         let size = Self.currentIconSizeSetting()
         let frameSize: CGFloat
-        // 従来の既定（大=18pt/40pt枠）が小さすぎるとの指摘を受け、全体的に一段階大きくシフトした
-        // （旧「大」を新「小」の基準とし、中・大はそこから拡大。既定値は「中」）。
-        switch size {
-        case 0: frameSize = 40
-        case 2: frameSize = 58
-        default: frameSize = 48
+        if (button as? SquareIconButton)?.usesCompactPanelChrome == true {
+            frameSize = 32
+        } else {
+            // 従来の既定（大=18pt/40pt枠）が小さすぎるとの指摘を受け、全体的に一段階大きくシフトした
+            // （旧「大」を新「小」の基準とし、中・大はそこから拡大。既定値は「中」）。
+            switch size {
+            case 0: frameSize = 40
+            case 2: frameSize = 58
+            default: frameSize = 48
+            }
         }
         button.image = NSImage(systemSymbolName: symbol, accessibilityDescription: button.toolTip)?
             .withSymbolConfiguration(Self.currentIconSymbolConfiguration())
-        button.controlSize = size == 2 ? .large : (size == 0 ? .small : .regular)
+        if (button as? SquareIconButton)?.usesCompactPanelChrome == true {
+            button.controlSize = .small
+        } else {
+            button.controlSize = size == 2 ? .large : (size == 0 ? .small : .regular)
+        }
         for constraint in button.constraints where constraint.firstAttribute == .width || constraint.firstAttribute == .height {
             constraint.isActive = false
         }
@@ -3227,15 +3285,15 @@ final class MosaicWindowController: NSObject {
         videoKeyframeCountLabel.translatesAutoresizingMaskIntoConstraints = false
         applyScaledFont(videoKeyframeCountLabel, size: 12)
 
-        let prevButton = shortcutToolbarButton("jumpToPreviousKeyframe", symbol: "backward.end")
-        let nextButton = shortcutToolbarButton("jumpToNextKeyframe", symbol: "forward.end")
-        let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle")
-        let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle")
-        let selectedDeleteButton = shortcutToolbarButton("deleteSelectedVideoKeyframes", symbol: "trash")
-        let allDeleteButton = shortcutToolbarButton("deleteAllVideoKeyframes", symbol: "rectangle.badge.minus")
-        let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope")
-        let exportVideoButton = shortcutToolbarButton("exportVideoWithMosaic", symbol: "square.and.arrow.up.on.square")
-        let autoButton = shortcutToolbarButton("autoProcessCurrentVideo", symbol: "wand.and.stars")
+        let prevButton = shortcutToolbarButton("jumpToPreviousKeyframe", symbol: "backward.end", compactPanelChrome: true)
+        let nextButton = shortcutToolbarButton("jumpToNextKeyframe", symbol: "forward.end", compactPanelChrome: true)
+        let addButton = shortcutToolbarButton("addVideoKeyframe", symbol: "plus.rectangle.on.rectangle", compactPanelChrome: true)
+        let removeButton = shortcutToolbarButton("removeVideoKeyframe", symbol: "minus.rectangle", compactPanelChrome: true)
+        let selectedDeleteButton = shortcutToolbarButton("deleteSelectedVideoKeyframes", symbol: "trash", compactPanelChrome: true)
+        let allDeleteButton = shortcutToolbarButton("deleteAllVideoKeyframes", symbol: "rectangle.badge.minus", compactPanelChrome: true)
+        let trackButton = shortcutToolbarButton("runTrackingPreview", symbol: "scope", compactPanelChrome: true)
+        let exportVideoButton = shortcutToolbarButton("exportVideoWithMosaic", symbol: "square.and.arrow.up.on.square", compactPanelChrome: true)
+        let autoButton = shortcutToolbarButton("autoProcessCurrentVideo", symbol: "wand.and.stars", compactPanelChrome: true)
         let controls = WrappingToolbarView(groups: [
             [prevButton, nextButton],
             [addButton, removeButton, selectedDeleteButton, allDeleteButton],
@@ -6791,10 +6849,10 @@ final class MosaicWindowController: NSObject {
         // キャンバスのズームボタンと同じ`configureToolbarButton`経路で構築し、見た目のサイズや
         // 詳細設定「アイコンサイズ」への追従を統一する（従来は独自のtexturedRoundedベゼルで
         // サイズが揃っていなかった）。
-        configureToolbarButton(thumbSmallerButton, symbol: "minus.magnifyingglass", help: "サムネイルを縮小", action: #selector(thumbnailSizeStepDown))
-        configureToolbarButton(thumbLargerButton, symbol: "plus.magnifyingglass", help: "サムネイルを拡大", action: #selector(thumbnailSizeStepUp))
+        configureToolbarButton(thumbSmallerButton, symbol: "minus.magnifyingglass", help: "サムネイルを縮小", action: #selector(thumbnailSizeStepDown), compactPanelChrome: true)
+        configureToolbarButton(thumbLargerButton, symbol: "plus.magnifyingglass", help: "サムネイルを拡大", action: #selector(thumbnailSizeStepUp), compactPanelChrome: true)
         // 「ライブラリを更新」はツールバーから、ライブラリパネルの拡大縮小アイコンの右へ移設。
-        let reloadLibraryButton = shortcutToolbarButton("reloadLibraryFromButton", symbol: "arrow.clockwise")
+        let reloadLibraryButton = shortcutToolbarButton("reloadLibraryFromButton", symbol: "arrow.clockwise", compactPanelChrome: true)
         let modeRow = NSStackView(views: [viewModeControl, thumbSmallerButton, thumbLargerButton, reloadLibraryButton])
         modeRow.orientation = .horizontal
         modeRow.spacing = 8
@@ -6810,7 +6868,8 @@ final class MosaicWindowController: NSObject {
             libraryMediaFilterButton,
             symbol: "line.3.horizontal.decrease.circle",
             help: "種別・ファイル形式で絞り込む",
-            action: #selector(showLibraryMediaFilterMenu(_:))
+            action: #selector(showLibraryMediaFilterMenu(_:)),
+            compactPanelChrome: true
         )
         librarySearchField.placeholderString = "ファイル名で検索"
         librarySearchField.target = self
@@ -6856,17 +6915,17 @@ final class MosaicWindowController: NSObject {
         configureCollectionView()
         libraryScrollView.documentView = libraryViewMode == .thumbnailGrid ? collectionView : tableView
 
-        let openOriginalButton = shortcutToolbarButton("openSelectedLibraryOriginal", symbol: "photo")
-        let openProcessedButton = shortcutToolbarButton("openSelectedLibraryProcessed", symbol: "photo.badge.checkmark")
-        let deleteButton = shortcutToolbarButton("deleteSelectedLibraryItems", symbol: "trash")
-        let exportButton = shortcutToolbarButton("exportTrainingDataset", symbol: "shippingbox")
+        let openOriginalButton = shortcutToolbarButton("openSelectedLibraryOriginal", symbol: "photo", compactPanelChrome: true)
+        let openProcessedButton = shortcutToolbarButton("openSelectedLibraryProcessed", symbol: "photo.badge.checkmark", compactPanelChrome: true)
+        let deleteButton = shortcutToolbarButton("deleteSelectedLibraryItems", symbol: "trash", compactPanelChrome: true)
+        let exportButton = shortcutToolbarButton("exportTrainingDataset", symbol: "shippingbox", compactPanelChrome: true)
         // ライブラリ関連の操作はツールバーからライブラリパネルへ集約（ユーザー指定の配置）。
         // 並び: 元画像/加工後を開く → リンク切れ修正 → 画像出力 → Finderで表示 → データセット
         // → 削除（削除は誤操作を避けるため行末尾）。
-        let repairLinksButton = shortcutToolbarButton("repairBrokenLinksAction", symbol: "link.badge.plus")
-        let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down")
-        let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder")
-        let previewVideoButton = shortcutToolbarButton("previewSelectedVideo", symbol: "play.rectangle")
+        let repairLinksButton = shortcutToolbarButton("repairBrokenLinksAction", symbol: "link.badge.plus", compactPanelChrome: true)
+        let saveButton = shortcutToolbarButton("exportImage", symbol: "square.and.arrow.down", compactPanelChrome: true)
+        let revealButton = shortcutToolbarButton("revealLibrary", symbol: "finder", compactPanelChrome: true)
+        let previewVideoButton = shortcutToolbarButton("previewSelectedVideo", symbol: "play.rectangle", compactPanelChrome: true)
         let buttons = WrappingToolbarView(groups: [
             [openOriginalButton, openProcessedButton, previewVideoButton],
             [repairLinksButton, saveButton, revealButton],
@@ -6898,7 +6957,7 @@ final class MosaicWindowController: NSObject {
             libraryScrollView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             buttons.topAnchor.constraint(equalTo: libraryScrollView.bottomAnchor, constant: 8),
             buttons.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
-            buttons.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -8),
+            buttons.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
             buttons.bottomAnchor.constraint(equalTo: panel.bottomAnchor, constant: -8)
         ])
         updateLibraryModeVisibility()

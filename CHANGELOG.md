@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.0.00145 - 2026-08-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 改善: サイドパネル内のライブラリ/動画編集ツールアイコンをコンパクト枠へ変更し、同サイズアイコン間の左右・行間余白を最小限へ圧縮。
+- 改善: ライブラリ一覧下の操作アイコンを通常幅で1行に収まる配置へ調整し、幅不足時だけグループ単位で折り返すようにした。
+- 改善: 折り返しツールバーの初期高さ計算と幅変更時の再計算を見直し、縦配置になった後にパネルを広げても不要な高さが残りにくいようにした。
+
+■更新履歴
+
+- `SquareIconButton` にサイドパネル向けコンパクト枠を追加し、メインツールバーのアイコンサイズ設定とは分けてパネル内操作ボタンを32pt枠で配置するようにした。
+- `WrappingToolbarView` の横/縦間隔とセパレータ高さを縮小し、未レイアウト時は全グループの自然幅で高さを計算するようにした。
+- 検証: `swift build` PASS、`swift test` 164件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、codesign PASS、Info `0.0.00145` / `145` 確認、`open -n dist/newMosaic.app` 起動確認。AppKit画面目視でライブラリ一覧下の8操作アイコンが1行表示、動画編集アイコンも横詰め表示されることを確認。
+
 ## v0.0.00144 - 2026-08-22
 
 ■更新履歴（Readme / ChangeLog 用）

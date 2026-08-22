@@ -201,3 +201,24 @@
 - 他チャット実装済みの動画編集UI/追跡ROI/自動解析停止改善差分を確認し、`v0.0.00144` / `144` のリリースとして確定する方針にした。
 - 検証: `swift build` PASS、`swift test` 164件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `0.0.00144` / `144` を確認、`open -n dist/newMosaic.app` で起動確認。
 - このエントリを含めてリリースコミットを作成し、`v0.0.00144`タグを付与して `git push origin main --tags` で反映する。
+
+### 2026-08-22 12:01 JST - Codex GPT-5 - 種別: 依頼内容 - サイドパネル操作アイコン間隔圧縮
+
+```text
+☆改善：添付画像のツールバーと同様のサイズのアイコンの左右、行間などの間隔が広すぎる。最低限のマージンのみにして。
+☆改善：ライブラリリスト下のツールアイコンも動画編集のアイコンと同様に１行表示にする。
+```
+
+### 2026-08-22 12:01 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00145 サイドパネル操作アイコン間隔圧縮
+
+- 作業AIモデル: Codex GPT-5（UIレイアウト調整、版数/文書同期、検証を同モデルで実施。実行中モデル自体は切替不可のため、サブエージェント委譲なし）
+- `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift` の `WrappingToolbarView` を2pt間隔/18ptセパレータへ圧縮し、幅変更時に高さを再計算するよう変更。
+- サイドパネル内のライブラリ/動画編集操作ボタンに32ptのコンパクト枠を適用し、メインツールバーのアイコンサイズ設定とは分けて通常幅で1行に収まるよう調整。
+- `scripts/package_macos_app.sh` を `0.0.00145` / `145` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
+- 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）。追加の品質ゲート、パッケージ、codesignはこの後に実施予定。
+
+### 2026-08-22 12:07 JST - Codex GPT-5 - 種別: 検証結果 - v0.0.00145 サイドパネル操作アイコン間隔圧縮
+
+- 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test` 164件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS。
+- パッケージ: `bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `CFBundleShortVersionString=0.0.00145` / `CFBundleVersion=145` を確認。
+- 起動確認: `open -n dist/newMosaic.app` 実行後、画面目視でライブラリ一覧下の8操作アイコンが1行表示、動画編集アイコンも横詰め表示されることを確認。
