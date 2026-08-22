@@ -582,6 +582,8 @@ private final class WrappingControlRowView: NSView {
     private let itemSpacing: CGFloat
     private let groupSpacing: CGFloat
     private let rowSpacing: CGFloat
+    private var heightConstraint: NSLayoutConstraint?
+    private let minimumControlHeight: CGFloat = 24
 
     init(groups: [[NSView]], itemSpacing: CGFloat = 6, groupSpacing: CGFloat = 8, rowSpacing: CGFloat = 2) {
         self.groups = groups
@@ -593,9 +595,22 @@ private final class WrappingControlRowView: NSView {
         for group in groups {
             for view in group {
                 view.translatesAutoresizingMaskIntoConstraints = false
+                if let button = view as? NSButton {
+                    button.cell?.wraps = false
+                    button.cell?.lineBreakMode = .byClipping
+                    button.setContentCompressionResistancePriority(.required, for: .horizontal)
+                } else if let textField = view as? NSTextField {
+                    textField.cell?.wraps = false
+                    textField.cell?.lineBreakMode = .byClipping
+                    textField.setContentCompressionResistancePriority(.required, for: .horizontal)
+                }
                 addSubview(view)
             }
         }
+        let height = heightAnchor.constraint(equalToConstant: minimumControlHeight)
+        height.priority = .required
+        height.isActive = true
+        heightConstraint = height
         setContentHuggingPriority(.required, for: .vertical)
         setContentCompressionResistancePriority(.required, for: .vertical)
     }
@@ -607,25 +622,41 @@ private final class WrappingControlRowView: NSView {
     override var intrinsicContentSize: NSSize {
         let naturalWidth = layoutGroups(maxWidth: .greatestFiniteMagnitude, applyFrames: false).width
         let measurementWidth = bounds.width > 1 ? bounds.width : naturalWidth
-        return NSSize(width: NSView.noIntrinsicMetric, height: layoutGroups(maxWidth: measurementWidth, applyFrames: false).height)
+        return NSSize(width: NSView.noIntrinsicMetric, height: measuredHeight(for: measurementWidth))
     }
 
     override func setFrameSize(_ newSize: NSSize) {
         let oldWidth = frame.size.width
         super.setFrameSize(newSize)
         if abs(oldWidth - newSize.width) > 0.5 {
-            invalidateIntrinsicContentSize()
+            updateMeasuredHeight(for: newSize.width)
         }
     }
 
     override func resizeSubviews(withOldSize oldSize: NSSize) {
         super.resizeSubviews(withOldSize: oldSize)
-        invalidateIntrinsicContentSize()
+        updateMeasuredHeight(for: bounds.width)
     }
 
     override func layout() {
         super.layout()
+        updateMeasuredHeight(for: bounds.width)
         layoutGroups(applyFrames: true)
+    }
+
+    private func measuredHeight(for width: CGFloat) -> CGFloat {
+        let naturalWidth = layoutGroups(maxWidth: .greatestFiniteMagnitude, applyFrames: false).width
+        let measurementWidth = width > 1 ? width : naturalWidth
+        return max(minimumControlHeight, ceil(layoutGroups(maxWidth: measurementWidth, applyFrames: false).height))
+    }
+
+    private func updateMeasuredHeight(for width: CGFloat) {
+        let height = measuredHeight(for: width)
+        if let constraint = heightConstraint, abs(constraint.constant - height) > 0.5 {
+            constraint.constant = height
+            invalidateIntrinsicContentSize()
+            superview?.needsLayout = true
+        }
     }
 
     @discardableResult
@@ -670,7 +701,7 @@ private final class WrappingControlRowView: NSView {
 
     private func size(for group: [NSView]) -> NSSize {
         var width: CGFloat = 0
-        var height: CGFloat = 0
+        var height: CGFloat = minimumControlHeight
         for (index, view) in group.enumerated() {
             let viewSize = size(for: view)
             if index > 0 { width += itemSpacing }
@@ -682,7 +713,7 @@ private final class WrappingControlRowView: NSView {
 
     private func size(for view: NSView) -> NSSize {
         let fitting = view.fittingSize
-        return NSSize(width: ceil(fitting.width), height: ceil(fitting.height))
+        return NSSize(width: ceil(fitting.width), height: max(minimumControlHeight, ceil(fitting.height)))
     }
 }
 
@@ -5645,8 +5676,8 @@ final class MosaicWindowController: NSObject {
         currentVideoInfo = info
         currentLibraryItem = item
         renderedImage = nil
-        mosaicPreviewCheckbox.state = .off
         currentVideoEditState = videoEditStore.load(for: item.id) ?? VideoEditState()
+        mosaicPreviewCheckbox.state = currentVideoEditState.keyframes.contains { !$0.rois.isEmpty } ? .on : .off
         videoTimelineBar.isHidden = false
         videoTimeSlider.minValue = 0
         videoTimeSlider.maxValue = max(0.001, info.durationSeconds)
@@ -5683,12 +5714,10 @@ final class MosaicWindowController: NSObject {
                 self.currentVideoTimeSeconds = clamped
                 self.videoTimeSlider.doubleValue = clamped
                 self.loadedImage = LoadedImage(url: url, cgImage: frame)
-                self.renderedImage = nil
-                self.mosaicPreviewCheckbox.state = .off
-                self.canvas.setImage(frame)
                 // その時刻に効くキーフレームのROIを表示（無ければ空）
                 let keyframe = self.currentVideoEditState.keyframe(at: clamped)
                 self.canvas.rois = keyframe?.rois ?? []
+                self.displayVideoFrame(frame, rois: self.canvas.rois)
                 self.canvas.selectedROIID = nil
                 self.videoTrackingLostIDs = []
                 self.canvas.trackingLostROIIDs = []
@@ -5701,6 +5730,24 @@ final class MosaicWindowController: NSObject {
                     self.updateStatus("\(reason): \(item.sourceName) \(VideoPreviewView.timeText(clamped))")
                 }
             }
+        }
+    }
+
+    private func displayVideoFrame(_ frame: CGImage, rois: [MosaicROI]) {
+        guard mosaicPreviewCheckbox.state == .on, !rois.isEmpty else {
+            renderedImage = nil
+            canvas.setImage(frame)
+            return
+        }
+        do {
+            let output = try renderMosaicOutput(for: rois)
+            renderedImage = output
+            canvas.setImage(output ?? frame)
+        } catch {
+            renderedImage = nil
+            mosaicPreviewCheckbox.state = .off
+            canvas.setImage(frame)
+            updateStatus("動画モザイク表示を解除しました: \(error.localizedDescription)")
         }
     }
 
@@ -5737,35 +5784,13 @@ final class MosaicWindowController: NSObject {
 
     private func videoROIsForKeyframePersistence() -> [MosaicROI] {
         let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
-        return canvas.rois.map { roi in
-            var persisted = roi
-            if persisted.style == nil {
-                persisted.style = inheritedStyle
-            }
-            return persisted
-        }
+        return VideoKeyframe(timeSeconds: currentVideoTimeSeconds, rois: canvas.rois)
+            .resolvingInheritedStyle(inheritedStyle)
+            .rois
     }
 
     private func videoEditStateWithResolvedInheritedStyles(_ state: VideoEditState) -> VideoEditState {
-        let inheritedStyle = defaultMosaicStyleForRendering().persistentStyle()
-        let keyframes = state.keyframes.map { keyframe in
-            VideoKeyframe(
-                timeSeconds: keyframe.timeSeconds,
-                rois: keyframe.rois.map { roi in
-                    var persisted = roi
-                    if persisted.style == nil {
-                        persisted.style = inheritedStyle
-                    }
-                    return persisted
-                },
-                trackingStatus: keyframe.trackingStatus
-            )
-        }
-        return VideoEditState(
-            keyframes: keyframes,
-            keyframeInterval: state.keyframeInterval,
-            maskEngineRawValue: state.maskEngineRawValue
-        )
+        state.resolvingInheritedStyles(defaultMosaicStyleForRendering().persistentStyle())
     }
 
     private func currentVideoKeyframeTrackingStatus() -> VideoKeyframeTrackingStatus {
@@ -5828,6 +5853,10 @@ final class MosaicWindowController: NSObject {
             )
         )
         lastTrackedVideoTimeSeconds = nil
+        mosaicPreviewCheckbox.state = .on
+        if let loadedImage {
+            displayVideoFrame(loadedImage.cgImage, rois: currentVideoEditState.keyframe(at: currentVideoTimeSeconds)?.rois ?? canvas.rois)
+        }
         saveCurrentVideoEditState(item: item)
         updateVideoTimelineLabels()
         updateStatus(
@@ -5933,14 +5962,12 @@ final class MosaicWindowController: NSObject {
                         .frame(at: CMTime(seconds: time, preferredTimescale: 600))
                     let rois = try detector(frame)
                     if !rois.isEmpty {
-                        let persistedROIs = rois.map { roi in
-                            var persisted = roi
-                            if persisted.style == nil {
-                                persisted.style = inheritedStyle
-                            }
-                            return persisted
-                        }
-                        state.upsertKeyframe(VideoKeyframe(timeSeconds: time, rois: persistedROIs, trackingStatus: .autoDetected))
+                        let persistedKeyframe = VideoKeyframe(
+                            timeSeconds: time,
+                            rois: rois,
+                            trackingStatus: .autoDetected
+                        ).resolvingInheritedStyle(inheritedStyle)
+                        state.upsertKeyframe(persistedKeyframe)
                         detectedKeyframes += 1
                     }
                     DispatchQueue.main.async { [weak self] in
@@ -5955,6 +5982,7 @@ final class MosaicWindowController: NSObject {
                     self.updateAnalysisStopButtonVisibility()
                     guard self.currentVideoItem?.id == item.id else { return }
                     self.currentVideoEditState = state
+                    self.mosaicPreviewCheckbox.state = state.keyframes.contains { !$0.rois.isEmpty } ? .on : .off
                     self.saveCurrentVideoEditState(item: item)
                     self.updateVideoTimelineLabels()
                     self.seekVideo(to: self.currentVideoTimeSeconds, reason: wasCancelled ? "動画自動モザイク処理を停止" : "動画自動モザイク処理完了")
@@ -5980,6 +6008,7 @@ final class MosaicWindowController: NSObject {
 
     private func saveCurrentVideoEditState(item: MosaicLibraryItem) {
         do {
+            currentVideoEditState = videoEditStateWithResolvedInheritedStyles(currentVideoEditState)
             try videoEditStore.save(currentVideoEditState, for: item.id)
         } catch {
             showError(error)
@@ -6732,6 +6761,42 @@ final class MosaicWindowController: NSObject {
     @objc private func applyMosaic() {
         guard let loadedImage else {
             updateStatus("先に画像を開いてください")
+            return
+        }
+        if let item = currentLibraryItem, item.isVideo {
+            let persistedROIs = videoROIsForKeyframePersistence()
+            do {
+                let output = try mosaicEngine.applyMosaic(
+                    to: loadedImage.cgImage,
+                    rois: persistedROIs,
+                    style: defaultMosaicStyleForRendering(),
+                    segmentEngine: currentSegmentEngine(),
+                    patternImageProvider: { [weak self] in self?.patternImage(for: $0) }
+                )
+                currentVideoEditState.upsertKeyframe(
+                    VideoKeyframe(
+                        timeSeconds: currentVideoTimeSeconds,
+                        rois: persistedROIs,
+                        trackingStatus: currentVideoKeyframeTrackingStatus()
+                    )
+                )
+                lastTrackedVideoTimeSeconds = nil
+                try videoEditStore.save(currentVideoEditState, for: item.id)
+                canvas.rois = persistedROIs
+                renderedImage = output
+                canvas.setImage(output)
+                mosaicPreviewCheckbox.state = .on
+                hasUnsavedChanges = false
+                updateVideoTimelineLabels()
+                reloadLayerList()
+                updateStatsBar()
+                updateStatus(
+                    "動画キーフレームへモザイク設定を保存: \(VideoPreviewView.timeText(currentVideoTimeSeconds))"
+                    + "（ROI \(persistedROIs.count)件）"
+                )
+            } catch {
+                showError(error)
+            }
             return
         }
         let previousState = currentEditorState()

@@ -1,5 +1,21 @@
 # Changelog
 
+## v0.0.00147 - 2026-08-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: レイヤパネルの「表示:」「詳細:」チェックボックス行が、ウィンドウ縮小時にチェックボックスやラベルごと重なる問題を再修正。
+- 修正: 動画の自動モザイク処理やキーフレーム設定後、タイムライン再生/シーク中にモザイク済みフレームが表示されない問題を修正。
+- 修正: 動画編集中に「モザイクを適用」しても、動画キーフレームの保存先へ反映されず、同じキーフレームを開き直すとモザイク設定が消えたように見える問題を修正。
+
+■更新履歴
+
+- `WrappingControlRowView` に実測高さ制約を持たせ、幅変更時に高さを再計算して後続行を押し下げるようにした。チェックボックス/ラベルは折り返し表示ではなくクリップ扱いにし、行内・行間で重ならないようにした。
+- 動画編集モードの `seekVideo` で、該当時刻に効くキーフレームROIを読み込んだ後、モザイク表示ONなら現在フレームへ即時レンダリングするようにした。
+- 動画編集モードの「モザイクを適用」は静止画の加工済み画像保存ではなく、現在時刻の `VideoKeyframe` を `VideoEditStore` へ保存する分岐へ変更。
+- `VideoKeyframe.resolvingInheritedStyle` / `VideoEditState.resolvingInheritedStyles` を追加し、未設定ROIへ保存時点のモザイク設定を固定する共通処理にした。回帰テストを1件追加。
+- 検証: `swift build` PASS、`swift test --filter VideoEditStoreTests` 8件 PASS、`swift test` 165件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、macOSパッケージ作成 PASS、署名検証 PASS。`0.0.00147` / `147` の反映を確認。GUI起動確認は複数の既存プロセスとmacOS権限ダイアログが重なり、v0.0.00147ウィンドウの目視確定までは未完了。
+
 ## v0.0.00146 - 2026-08-22
 
 ■更新履歴（Readme / ChangeLog 用）

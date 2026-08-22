@@ -94,6 +94,29 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(decoded.trackingStatus == .manual)
 }
 
+@Test func videoEditStateResolvesInheritedStylesWithoutOverwritingExistingROIStyle() {
+    let inheritedROI = makeROI(x: 0.1)
+    var explicitROI = makeROI(x: 0.4)
+    explicitROI.style = MosaicROIStyle(pattern: .border, blockScale: 12, stripeWidth: 3)
+
+    var state = VideoEditState()
+    state.upsertKeyframe(
+        VideoKeyframe(
+            timeSeconds: 1,
+            rois: [inheritedROI, explicitROI],
+            trackingStatus: .tracked
+        )
+    )
+
+    let inheritedStyle = MosaicROIStyle(pattern: .noise, opacity: 0.5, blockScale: 6)
+    let resolved = state.resolvingInheritedStyles(inheritedStyle)
+    let keyframe = resolved.keyframes[0]
+
+    #expect(keyframe.trackingStatus == .tracked)
+    #expect(keyframe.rois[0].style == inheritedStyle)
+    #expect(keyframe.rois[1].style == explicitROI.style)
+}
+
 @Test func videoThumbnailProviderIdentifiesVideoExtensions() {
     #expect(VideoThumbnailProvider.isVideoFile(URL(fileURLWithPath: "/tmp/a.mp4")))
     #expect(VideoThumbnailProvider.isVideoFile(URL(fileURLWithPath: "/tmp/a.MOV")))

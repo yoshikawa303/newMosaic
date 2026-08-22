@@ -242,3 +242,23 @@
 - 検証: `swift test` 164件 PASS、`git diff --check` PASS、`bash scripts/ci/agent_governance_guard.sh` PASS、`bash scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS。
 - `dist/newMosaic.app` の `Info.plist` で `CFBundleShortVersionString=0.0.00146`、`CFBundleVersion=146` を確認。
 - `open -n dist/newMosaic.app` でGUI起動し、縮小したアプリ画面でレイヤパネルの「表示:」「詳細:」チェックボックス行が上下に分離し、重ならないことを目視確認。
+
+### 2026-08-22 13:16 JST - Codex GPT-5 - 種別: 依頼内容 - レイヤトグル重なり再修正/動画モザイク適用修正
+
+```text
+☆バグ：「「表示:」「詳細:」チェックボックス行が重なる」改善なし。以前はラベルは重ならなかったが、ラベルも重なるようになる。
+☆バグ：
+・動画の自動設定で、ROI、キーフレーム等設定後、動画を再生しても、モザイク処理が設定され再生されない。全くモザイク処理されていない。
+・動画：各キーフレームでモザイク適用しても、再度同じキーフレームを参照するとモザイク設定消えている。
+```
+
+### 2026-08-22 13:16 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00147 レイヤトグル/動画モザイク適用修正
+
+- 作業AIモデル: Codex GPT-5（UIレイアウト再修正、動画モザイク状態保持/プレビュー経路の原因調査、回帰テスト、版数/文書同期を同モデルで実施。実行中モデル自体は切替不可のため、サブエージェント委譲なし）
+- `WrappingControlRowView` に実測高さ制約を追加し、幅変更時に行数ぶんの高さを更新して後続行を押し下げるよう修正。チェックボックス/ラベルの内部折返しも抑止。
+- 動画編集モードのシーク/再生で、該当キーフレームのROIがありモザイク表示ONの場合に現在フレームへモザイクを即時レンダリングするよう変更。
+- 動画編集中の「モザイクを適用」を、静止画保存ではなく現在時刻の `VideoKeyframe` を `VideoEditStore` へ保存する処理へ分岐。
+- `VideoKeyframe.resolvingInheritedStyle` / `VideoEditState.resolvingInheritedStyles` を追加し、未設定ROIへ保存時点のモザイク設定を固定する共通処理と回帰テストを追加。
+- `scripts/package_macos_app.sh` を `0.0.00147` / `147` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
+- 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test --filter VideoEditStoreTests` 8件 PASS、`swift test` 165件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、`scripts/package_macos_app.sh` PASS、署名検証 PASS、`Info.plist` で `0.0.00147` / `147` を確認。
+- GUI起動確認は実施したが、複数の既存 `NewMosaicApp` プロセスとmacOS権限ダイアログが前面化に干渉し、v0.0.00147ウィンドウとしての目視確定までは未完了。パッケージの版数と署名は確認済み。

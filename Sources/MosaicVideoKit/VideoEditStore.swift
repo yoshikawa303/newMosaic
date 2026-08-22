@@ -56,6 +56,24 @@ public struct VideoKeyframe: Codable, Equatable, Sendable {
             forKey: .trackingStatus
         ) ?? .manual
     }
+
+    /// ROIが画面全体のモザイク設定を継承している場合、保存時点の設定をROIへ固定する。
+    ///
+    /// 動画は後から別フレームを開き直しても同じ見た目で再現できる必要があるため、
+    /// nilのまま保存せず、キーフレーム確定時の設定を埋め込む。
+    public func resolvingInheritedStyle(_ inheritedStyle: MosaicROIStyle) -> VideoKeyframe {
+        VideoKeyframe(
+            timeSeconds: timeSeconds,
+            rois: rois.map { roi in
+                var persisted = roi
+                if persisted.style == nil {
+                    persisted.style = inheritedStyle
+                }
+                return persisted
+            },
+            trackingStatus: trackingStatus
+        )
+    }
 }
 
 /// 1本の動画に対する編集状態。動画本体は再エンコードせず、この情報だけを保存する。
@@ -121,6 +139,15 @@ public struct VideoEditState: Codable, Equatable, Sendable {
     /// 指定時刻のキーフレームを削除する（±0.01秒）。
     public mutating func removeKeyframe(atTime timeSeconds: Double) {
         keyframes.removeAll { abs($0.timeSeconds - timeSeconds) < 0.01 }
+    }
+
+    /// 全キーフレームの継承スタイルを保存時点のスタイルへ固定する。
+    public func resolvingInheritedStyles(_ inheritedStyle: MosaicROIStyle) -> VideoEditState {
+        VideoEditState(
+            keyframes: keyframes.map { $0.resolvingInheritedStyle(inheritedStyle) },
+            keyframeInterval: keyframeInterval,
+            maskEngineRawValue: maskEngineRawValue
+        )
     }
 }
 
