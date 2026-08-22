@@ -1,5 +1,17 @@
 # Changelog
 
+## v0.0.00146 - 2026-08-22
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 修正: レイヤパネルの「表示:」「詳細:」チェックボックス行が、ウィンドウ縮小時に重なって読めなくなる問題を修正。
+
+■更新履歴
+
+- `WrappingControlRowView` を追加し、テキストラベル付きチェックボックス群を幅に応じてグループ単位で折り返すようにした。
+- レイヤパネルの「表示: ROI/モザイク/人物/骨格」と「詳細: 輪郭/タグ」を固定横並びの `NSStackView` から折り返し行へ変更。
+- 検証: `swift build` PASS、`swift test` 164件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、macOSパッケージ作成 PASS、署名検証 PASS。`0.0.00146` / `146` の反映と、縮小したアプリ画面で「表示:」「詳細:」行が重ならないことを目視確認。
+
 ## v0.0.00145 - 2026-08-22
 
 ■更新履歴（Readme / ChangeLog 用）

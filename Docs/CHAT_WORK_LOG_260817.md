@@ -222,3 +222,23 @@
 - 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test` 164件 PASS、`git diff --check` PASS、`scripts/ci/agent_governance_guard.sh` PASS、`scripts/ci/local_quality_gate.sh` PASS。
 - パッケージ: `bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS、`PlistBuddy` で `CFBundleShortVersionString=0.0.00145` / `CFBundleVersion=145` を確認。
 - 起動確認: `open -n dist/newMosaic.app` 実行後、画面目視でライブラリ一覧下の8操作アイコンが1行表示、動画編集アイコンも横詰め表示されることを確認。
+
+### 2026-08-22 12:50 JST - Codex GPT-5 - 種別: 依頼内容 - レイヤ表示/詳細チェックボックス重なり修正
+
+```text
+☆レイヤの表示、詳細 チェックボックスが、ウィンドウ縮小時重なる。添付画像参照
+```
+
+### 2026-08-22 12:50 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00146 レイヤ表示/詳細チェックボックス重なり修正
+
+- 作業AIモデル: Codex GPT-5（レイヤパネルのAppKitレイアウト修正、版数/文書同期、検証を同モデルで実施。実行中モデル自体は切替不可のため、サブエージェント委譲なし）
+- `/Volumes/DATA/XCode_Project/newMosaic/Sources/NewMosaicApp/main.swift` に `WrappingControlRowView` を追加し、テキストラベル付きチェックボックス群を幅不足時にグループ単位で折り返すよう変更。
+- レイヤパネルの「表示: ROI/モザイク/人物/骨格」「詳細: 輪郭/タグ」を固定横並びから折り返し行へ変更し、ウィンドウ縮小時の重なりを防止。
+- `scripts/package_macos_app.sh` を `0.0.00146` / `146` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
+- 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）。
+
+### 2026-08-22 12:56 JST - Codex GPT-5 - 種別: 検証結果 - v0.0.00146
+
+- 検証: `swift test` 164件 PASS、`git diff --check` PASS、`bash scripts/ci/agent_governance_guard.sh` PASS、`bash scripts/ci/local_quality_gate.sh` PASS、`bash scripts/package_macos_app.sh` PASS、`codesign --verify --deep --strict --verbose=2 dist/newMosaic.app` PASS。
+- `dist/newMosaic.app` の `Info.plist` で `CFBundleShortVersionString=0.0.00146`、`CFBundleVersion=146` を確認。
+- `open -n dist/newMosaic.app` でGUI起動し、縮小したアプリ画面でレイヤパネルの「表示:」「詳細:」チェックボックス行が上下に分離し、重ならないことを目視確認。

@@ -576,6 +576,116 @@ private final class WrappingToolbarView: NSView {
     }
 }
 
+@MainActor
+private final class WrappingControlRowView: NSView {
+    private let groups: [[NSView]]
+    private let itemSpacing: CGFloat
+    private let groupSpacing: CGFloat
+    private let rowSpacing: CGFloat
+
+    init(groups: [[NSView]], itemSpacing: CGFloat = 6, groupSpacing: CGFloat = 8, rowSpacing: CGFloat = 2) {
+        self.groups = groups
+        self.itemSpacing = itemSpacing
+        self.groupSpacing = groupSpacing
+        self.rowSpacing = rowSpacing
+        super.init(frame: .zero)
+        translatesAutoresizingMaskIntoConstraints = false
+        for group in groups {
+            for view in group {
+                view.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(view)
+            }
+        }
+        setContentHuggingPriority(.required, for: .vertical)
+        setContentCompressionResistancePriority(.required, for: .vertical)
+    }
+
+    required init?(coder: NSCoder) { nil }
+
+    override var isFlipped: Bool { true }
+
+    override var intrinsicContentSize: NSSize {
+        let naturalWidth = layoutGroups(maxWidth: .greatestFiniteMagnitude, applyFrames: false).width
+        let measurementWidth = bounds.width > 1 ? bounds.width : naturalWidth
+        return NSSize(width: NSView.noIntrinsicMetric, height: layoutGroups(maxWidth: measurementWidth, applyFrames: false).height)
+    }
+
+    override func setFrameSize(_ newSize: NSSize) {
+        let oldWidth = frame.size.width
+        super.setFrameSize(newSize)
+        if abs(oldWidth - newSize.width) > 0.5 {
+            invalidateIntrinsicContentSize()
+        }
+    }
+
+    override func resizeSubviews(withOldSize oldSize: NSSize) {
+        super.resizeSubviews(withOldSize: oldSize)
+        invalidateIntrinsicContentSize()
+    }
+
+    override func layout() {
+        super.layout()
+        layoutGroups(applyFrames: true)
+    }
+
+    @discardableResult
+    private func layoutGroups(maxWidth: CGFloat? = nil, applyFrames: Bool) -> NSSize {
+        let availableWidth = max(1, maxWidth ?? bounds.width)
+        var x: CGFloat = 0
+        var y: CGFloat = 0
+        var rowHeight: CGFloat = 0
+        var usedWidth: CGFloat = 0
+
+        for group in groups {
+            let groupSize = size(for: group)
+            let spacing = x > 0 ? groupSpacing : 0
+            if x > 0 && x + spacing + groupSize.width > availableWidth {
+                x = 0
+                y += rowHeight + rowSpacing
+                rowHeight = 0
+            }
+            if x > 0 { x += groupSpacing }
+
+            var groupX = x
+            for view in group {
+                let viewSize = size(for: view)
+                if applyFrames {
+                    view.frame = NSRect(
+                        x: groupX,
+                        y: y + max(0, (groupSize.height - viewSize.height) / 2),
+                        width: viewSize.width,
+                        height: viewSize.height
+                    )
+                }
+                groupX += viewSize.width + itemSpacing
+            }
+
+            x += groupSize.width
+            rowHeight = max(rowHeight, groupSize.height)
+            usedWidth = max(usedWidth, x)
+        }
+
+        return NSSize(width: usedWidth, height: y + rowHeight)
+    }
+
+    private func size(for group: [NSView]) -> NSSize {
+        var width: CGFloat = 0
+        var height: CGFloat = 0
+        for (index, view) in group.enumerated() {
+            let viewSize = size(for: view)
+            if index > 0 { width += itemSpacing }
+            width += viewSize.width
+            height = max(height, viewSize.height)
+        }
+        return NSSize(width: width, height: height)
+    }
+
+    private func size(for view: NSView) -> NSSize {
+        let fitting = view.fittingSize
+        return NSSize(width: ceil(fitting.width), height: ceil(fitting.height))
+    }
+}
+
 /// ツールバーボタンのホバー時にヘルプ文をステータスバーへ表示するための追跡中継。
 @MainActor
 private final class HoverHelpRelay: NSResponder {
@@ -4038,12 +4148,12 @@ final class MosaicWindowController: NSObject {
         applyScaledFont(poseLayerCheckbox, size: 13)
         applyScaledFont(roiLayerCheckbox, size: 13)
         applyScaledFont(mosaicPreviewCheckbox, size: 13)
-        let togglesRow = NSStackView(views: [togglesLabel, roiLayerCheckbox, mosaicPreviewCheckbox, personLayerCheckbox, poseLayerCheckbox])
-        togglesRow.orientation = .horizontal
-        togglesRow.alignment = .centerY
-        togglesRow.spacing = 8
-        togglesRow.translatesAutoresizingMaskIntoConstraints = false
-        togglesRow.setHuggingPriority(.required, for: .vertical)
+        let togglesRow = WrappingControlRowView(groups: [
+            [togglesLabel, roiLayerCheckbox],
+            [mosaicPreviewCheckbox],
+            [personLayerCheckbox],
+            [poseLayerCheckbox]
+        ])
 
         // 輪郭/タグ表示は要素毎の個別設定から全レイヤ一括設定へ変更（レイヤ行の表示幅も拡がる）。
         let detailToggleLabel = NSTextField(labelWithString: "詳細:")
@@ -4057,12 +4167,10 @@ final class MosaicWindowController: NSObject {
         layerOutlineAllCheckbox.action = #selector(toggleAllLayerOutlines)
         layerTagAllCheckbox.target = self
         layerTagAllCheckbox.action = #selector(toggleAllLayerTags)
-        let detailTogglesRow = NSStackView(views: [detailToggleLabel, layerOutlineAllCheckbox, layerTagAllCheckbox])
-        detailTogglesRow.orientation = .horizontal
-        detailTogglesRow.alignment = .centerY
-        detailTogglesRow.spacing = 8
-        detailTogglesRow.translatesAutoresizingMaskIntoConstraints = false
-        detailTogglesRow.setHuggingPriority(.required, for: .vertical)
+        let detailTogglesRow = WrappingControlRowView(groups: [
+            [detailToggleLabel, layerOutlineAllCheckbox],
+            [layerTagAllCheckbox]
+        ])
 
         layerOutlineView.headerView = nil
         layerOutlineView.dataSource = self
@@ -4107,10 +4215,10 @@ final class MosaicWindowController: NSObject {
             title.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
             togglesRow.topAnchor.constraint(equalTo: title.bottomAnchor, constant: 6),
             togglesRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
-            togglesRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -12),
+            togglesRow.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
             detailTogglesRow.topAnchor.constraint(equalTo: togglesRow.bottomAnchor, constant: 4),
             detailTogglesRow.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 12),
-            detailTogglesRow.trailingAnchor.constraint(lessThanOrEqualTo: panel.trailingAnchor, constant: -12),
+            detailTogglesRow.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -12),
             scrollView.topAnchor.constraint(equalTo: detailTogglesRow.bottomAnchor, constant: 6),
             scrollView.leadingAnchor.constraint(equalTo: panel.leadingAnchor, constant: 8),
             scrollView.trailingAnchor.constraint(equalTo: panel.trailingAnchor, constant: -8),
