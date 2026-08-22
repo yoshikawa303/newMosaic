@@ -1539,19 +1539,19 @@ private final class NavigableCollectionView: NSCollectionView {
     }
 }
 
-/// 動画キーフレーム一覧では左右キーを「行内移動」ではなく前後キーフレーム移動として扱う。
+/// 動画キーフレーム一覧でも左右キーは1フレーム移動として扱う。
 /// Enterは選択行を確定して、そのキーフレーム時刻をキャンバスへ開く。
 @MainActor
 private final class VideoKeyframeTableView: NSTableView {
-    var onNavigate: ((Int) -> Void)?
+    var onStepFrame: ((Int) -> Void)?
     var onOpenSelection: (() -> Void)?
 
     override func keyDown(with event: NSEvent) {
         switch Int(event.specialKey?.rawValue ?? 0) {
         case Int(NSLeftArrowFunctionKey):
-            onNavigate?(-1)
+            onStepFrame?(-1)
         case Int(NSRightArrowFunctionKey):
-            onNavigate?(1)
+            onStepFrame?(1)
         default:
             if event.keyCode == 36 || event.keyCode == 76 {
                 onOpenSelection?()
@@ -3680,8 +3680,8 @@ final class MosaicWindowController: NSObject {
         videoKeyframeTableView.dataSource = self
         videoKeyframeTableView.target = self
         videoKeyframeTableView.doubleAction = #selector(openSelectedVideoKeyframe)
-        videoKeyframeTableView.onNavigate = { [weak self] direction in
-            self?.navigateVideoKeyframeSelection(by: direction)
+        videoKeyframeTableView.onStepFrame = { [weak self] direction in
+            self?.stepVideoFrame(by: direction)
         }
         videoKeyframeTableView.onOpenSelection = { [weak self] in
             self?.openSelectedVideoKeyframe()
@@ -5914,7 +5914,7 @@ final class MosaicWindowController: NSObject {
         videoTimeLabel.translatesAutoresizingMaskIntoConstraints = false
         videoTimeLabel.widthAnchor.constraint(equalToConstant: 96).isActive = true
         configureToolbarButton(videoPlayButton, symbol: "play.fill", help: "動画タイムラインを再生", action: #selector(playVideoTimeline))
-        configureToolbarButton(videoPauseButton, symbol: "pause.fill", help: "動画タイムラインを一時停止", action: #selector(pauseVideoTimeline))
+        configureToolbarButton(videoPauseButton, symbol: "pause.fill", help: "動画タイムラインを一時停止", action: #selector(pauseVideoTimelineForEditing))
         configureToolbarButton(videoStopButton, symbol: "stop.fill", help: "動画タイムラインを停止して先頭へ戻す", action: #selector(stopVideoTimeline))
 
         let row = NSStackView(views: [
@@ -6002,7 +6002,10 @@ final class MosaicWindowController: NSObject {
     /// 指定時刻のフレームをキャンバスへ読み込み、その時刻に適用されるROIを表示する。
     private func seekVideo(to seconds: Double, reason: String? = nil, playback: Bool = false) {
         guard let item = currentVideoItem, let info = currentVideoInfo else { return }
-        let clamped = min(max(0, seconds), max(0, info.durationSeconds))
+        let rawClamped = min(max(0, seconds), max(0, info.durationSeconds))
+        // 停止中の編集位置は必ず実フレーム境界へ揃える。シークバーの連続値をそのまま
+        // 保存時刻にすると、表示されたデコードフレームと手動キーフレームがずれる。
+        let clamped = playback ? rawClamped : info.frameAlignedTime(nearestTo: rawClamped)
         let url = libraryEngine.originalURL(for: item)
         if playback, videoPlaybackRenderInFlight {
             pendingVideoPlaybackSeekSeconds = clamped
@@ -6029,12 +6032,12 @@ final class MosaicWindowController: NSObject {
         let requestID = videoSeekRequestID
         let tolerance = playback
             ? CMTime(seconds: max(1.0 / 240.0, 0.5 / max(1, info.frameRate)), preferredTimescale: 600)
-            : .zero
+            : CMTime(seconds: 0.45 / max(1, info.frameRate), preferredTimescale: 60_000)
         videoPreviewRenderQueue.async { [weak self] in
             guard let self else { return }
             let result = try? renderer.render(
                 url: url,
-                time: CMTime(seconds: clamped, preferredTimescale: 600),
+                time: CMTime(seconds: clamped, preferredTimescale: 60_000),
                 tolerance: tolerance,
                 maximumSize: playbackMaximumSize,
                 rois: visibleROIs,
@@ -6217,10 +6220,15 @@ final class MosaicWindowController: NSObject {
     @discardableResult
     private func persistCurrentVideoFrameCorrectionIfNeeded() -> Bool {
         guard let item = currentVideoItem,
+              let info = currentVideoInfo,
               currentLibraryItem?.id == item.id,
               loadedImage != nil else { return false }
+        pauseVideoTimeline()
+        let correctionTime = info.frameAlignedTime(nearestTo: currentVideoTimeSeconds)
+        currentVideoTimeSeconds = correctionTime
+        videoTimeSlider.doubleValue = correctionTime
         let correction = videoKeyframeWithResolvedInheritedSettings(
-            timeSeconds: currentVideoTimeSeconds,
+            timeSeconds: correctionTime,
             rois: canvas.rois,
             trackingStatus: .manual
         )
@@ -6239,13 +6247,13 @@ final class MosaicWindowController: NSObject {
             reloadLayerList()
             updateStatsBar()
             updateStatus(
-                "フレーム修正を保存: \(VideoPreviewView.timeText(currentVideoTimeSeconds))"
+                "フレーム修正を保存: \(VideoPreviewView.timeText(correctionTime))"
                 + (propagatedCount > 0
                     ? "（前後の自動キーフレーム\(propagatedCount)件を補正）"
                     : "（現在フレーム）")
             )
             AppLog.video.info(
-                "フレーム修正保存: time=\(self.currentVideoTimeSeconds, privacy: .public) propagated=\(propagatedCount, privacy: .public)"
+                "フレーム修正保存: time=\(correctionTime, privacy: .public) propagated=\(propagatedCount, privacy: .public)"
             )
             return true
         } catch {
@@ -6262,8 +6270,7 @@ final class MosaicWindowController: NSObject {
 
     @objc private func toggleVideoPlayback() {
         if isVideoPlaying {
-            pauseVideoTimeline()
-            updateStatus("動画タイムラインを一時停止")
+            pauseVideoTimelineForEditing()
         } else {
             playVideoTimeline()
         }
@@ -6284,7 +6291,7 @@ final class MosaicWindowController: NSObject {
         }
         pauseVideoTimeline()
         let frameRate = max(1, info.frameRate)
-        let currentFrame = Int((currentVideoTimeSeconds * frameRate).rounded())
+        let currentFrame = info.frameIndex(nearestTo: currentVideoTimeSeconds)
         let targetFrame = max(0, min(info.frameCount - 1, currentFrame + offset))
         seekVideo(
             to: Double(targetFrame) / frameRate,
@@ -6327,6 +6334,13 @@ final class MosaicWindowController: NSObject {
         pendingVideoPlaybackSeekSeconds = nil
         videoPlaybackStartedAt = nil
         isVideoPlaying = false
+    }
+
+    @objc private func pauseVideoTimelineForEditing() {
+        let time = currentVideoTimeSeconds
+        pauseVideoTimeline()
+        guard currentVideoItem != nil else { return }
+        seekVideo(to: time, reason: "動画タイムラインを一時停止")
     }
 
     @objc private func stopVideoTimeline() {
@@ -6423,19 +6437,6 @@ final class MosaicWindowController: NSObject {
         let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
         guard row >= 0, row < sorted.count else { return }
         seekVideo(to: sorted[row].timeSeconds, reason: "キーフレーム")
-    }
-
-    private func navigateVideoKeyframeSelection(by offset: Int) {
-        let sorted = currentVideoEditState.keyframes.sorted { $0.timeSeconds < $1.timeSeconds }
-        guard !sorted.isEmpty else { return }
-        let selected = videoKeyframeTableView.selectedRow
-        let currentRow = selected >= 0 ? selected : (sorted.firstIndex {
-            abs($0.timeSeconds - currentVideoTimeSeconds) < videoFrameMatchingTolerance
-        } ?? 0)
-        let destination = max(0, min(sorted.count - 1, currentRow + offset))
-        videoKeyframeTableView.selectRowIndexes(IndexSet(integer: destination), byExtendingSelection: false)
-        videoKeyframeTableView.scrollRowToVisible(destination)
-        seekVideo(to: sorted[destination].timeSeconds, reason: offset < 0 ? "前のキーフレーム" : "次のキーフレーム")
     }
 
     @objc private func autoProcessCurrentVideo() {
@@ -9503,6 +9504,17 @@ extension MosaicWindowController {
         let modifiers = event.modifierFlags.intersection([.command, .option, .control, .shift])
         let characters = event.characters ?? ""
         let key = (event.charactersIgnoringModifiers ?? characters).lowercased()
+
+        if modifiers.isEmpty {
+            if event.keyCode == 123 || event.specialKey == .leftArrow {
+                stepToPreviousVideoFrame()
+                return true
+            }
+            if event.keyCode == 124 || event.specialKey == .rightArrow {
+                stepToNextVideoFrame()
+                return true
+            }
+        }
 
         if modifiers.contains(.command), modifiers.contains(.option),
            !modifiers.contains(.control), !modifiers.contains(.shift), key == "k" {

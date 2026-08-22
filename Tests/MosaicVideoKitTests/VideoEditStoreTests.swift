@@ -185,6 +185,38 @@ private func makeROI(x: Double) -> MosaicROI {
     #expect(store.load(for: itemID) == nil)
 }
 
+@Test func interKeyframeManualCorrectionSurvivesStoreReload() throws {
+    let root = FileManager.default.temporaryDirectory
+        .appendingPathComponent("newMosaicInterKeyframeCorrectionTests-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: root) }
+
+    let store = VideoEditStore(libraryRootURL: root)
+    let itemID = UUID()
+    let start = makeROI(x: 0.1)
+    var end = makeROI(x: 0.5)
+    end.id = start.id
+    var state = VideoEditState()
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 0, rois: [start], trackingStatus: .tracked))
+    state.upsertKeyframe(VideoKeyframe(timeSeconds: 2, rois: [end], trackingStatus: .tracked))
+
+    let frameTime = 30.0 / 60.0
+    var corrected = try #require(state.interpolatedKeyframe(at: frameTime)?.rois.first)
+    corrected.rect.x += 0.15
+    _ = state.applyManualCorrection(
+        VideoKeyframe(timeSeconds: frameTime, rois: [corrected]),
+        matchingTolerance: 0.45 / 60.0,
+        propagationDuration: 1
+    )
+    try store.save(state, for: itemID)
+
+    let loaded = try #require(store.load(for: itemID))
+    let saved = try #require(loaded.keyframes.first { abs($0.timeSeconds - frameTime) < 0.000_001 })
+    #expect(saved.trackingStatus == .manual)
+    #expect(abs(saved.rois[0].rect.x - corrected.rect.x) < 0.000_001)
+    let nextFrame = try #require(loaded.interpolatedKeyframe(at: frameTime + 1.0 / 60.0))
+    #expect(nextFrame.rois[0].rect.x > corrected.rect.x - 0.01)
+}
+
 @Test func videoEditStateDecodesMinimalJSONForForwardCompatibility() throws {
     // 将来フィールド追加・欠落があっても既定値で読めること（後方互換の担保）
     let json = "{}".data(using: .utf8)!

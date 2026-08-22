@@ -130,6 +130,21 @@ private func makeSyntheticVideo(
 // 直列実行にする（全体スイート実行時のハング対策）。
 @Suite(.serialized) struct VideoKitTests {
 
+@Test func videoInfoAlignsArbitraryTimesToNearestFrame() {
+    let info = VideoInfo(
+        durationSeconds: 2,
+        frameRate: 120,
+        naturalSize: CGSize(width: 1920, height: 1080),
+        frameCount: 240
+    )
+
+    #expect(info.frameIndex(nearestTo: 1.004) == 120)
+    #expect(info.frameIndex(nearestTo: 1.005) == 121)
+    #expect(abs(info.frameAlignedTime(nearestTo: 1.005) - 121.0 / 120.0) < 0.000_001)
+    #expect(info.frameIndex(nearestTo: -1) == 0)
+    #expect(info.frameIndex(nearestTo: 99) == 239)
+}
+
 @Test func readerReportsCorrectFrameCountAndSize() throws {
     let url = makeTemporaryVideoURL()
     defer { try? FileManager.default.removeItem(at: url) }

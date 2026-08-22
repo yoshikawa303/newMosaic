@@ -32,6 +32,19 @@ public struct VideoInfo: Sendable, Equatable {
         self.naturalSize = naturalSize
         self.frameCount = frameCount
     }
+
+    /// 任意時刻に最も近い表示フレーム番号を返す。
+    public func frameIndex(nearestTo seconds: Double) -> Int {
+        guard frameRate > 0, frameCount > 1 else { return 0 }
+        let clampedSeconds = min(max(0, seconds), max(0, durationSeconds))
+        return min(frameCount - 1, max(0, Int((clampedSeconds * frameRate).rounded())))
+    }
+
+    /// 任意時刻を最も近い表示フレームの基準時刻へ揃える。
+    public func frameAlignedTime(nearestTo seconds: Double) -> Double {
+        guard frameRate > 0 else { return 0 }
+        return Double(frameIndex(nearestTo: seconds)) / frameRate
+    }
 }
 
 public enum VideoFrameReaderError: Error, LocalizedError {
