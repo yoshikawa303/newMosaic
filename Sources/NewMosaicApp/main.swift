@@ -1428,6 +1428,12 @@ final class MosaicWindowController: NSObject {
     private var candidateGenerationID: UUID?
     private var cancelledCandidateGenerationIDs: Set<UUID> = []
     private var videoPlaybackTimer: Timer?
+    private let videoPreviewRenderQueue = DispatchQueue(label: "com.yoshikawa.newMosaic.videoPreviewRender", qos: .userInitiated)
+    private var videoSeekRequestID = 0
+    private var videoPlaybackRenderInFlight = false
+    private var pendingVideoPlaybackSeekSeconds: Double?
+    private var videoPlaybackStartedAt: Date?
+    private var videoPlaybackStartTimeSeconds: Double = 0
     private var isVideoPlaying = false
     private var lastTrackedVideoTimeSeconds: Double?
     /// 編集中の動画（nil=静止画編集中）。
@@ -5699,33 +5705,92 @@ final class MosaicWindowController: NSObject {
     }
 
     /// 指定時刻のフレームをキャンバスへ読み込み、その時刻に適用されるROIを表示する。
-    private func seekVideo(to seconds: Double, reason: String? = nil) {
+    private func seekVideo(to seconds: Double, reason: String? = nil, playback: Bool = false) {
         guard let item = currentVideoItem, let info = currentVideoInfo else { return }
         let clamped = min(max(0, seconds), max(0, info.durationSeconds))
         let url = libraryEngine.originalURL(for: item)
-        DispatchQueue.global(qos: .userInitiated).async { [weak self] in
+        if playback, videoPlaybackRenderInFlight {
+            pendingVideoPlaybackSeekSeconds = clamped
+            return
+        }
+        if playback {
+            videoPlaybackRenderInFlight = true
+            pendingVideoPlaybackSeekSeconds = nil
+        }
+        let keyframe = currentVideoEditState.keyframe(at: clamped)
+        let rois = keyframe?.rois ?? []
+        let previewEnabled = mosaicPreviewCheckbox.state == .on && !rois.isEmpty
+        let hiddenROIIDs = canvas.hiddenROIIDs
+        let style = defaultMosaicStyleForRendering()
+        let patternImages = videoPreviewPatternImages(for: rois, style: style)
+        videoSeekRequestID += 1
+        let requestID = videoSeekRequestID
+        let tolerance = playback
+            ? CMTime(seconds: max(1.0 / 60.0, 1.0 / min(max(1, info.frameRate), 24)), preferredTimescale: 600)
+            : .zero
+        videoPreviewRenderQueue.async { [weak self] in
+            guard let self else { return }
             let frame = try? VideoFrameReader(url: url)
-                .frame(at: CMTime(seconds: clamped, preferredTimescale: 600))
+                .frame(at: CMTime(seconds: clamped, preferredTimescale: 600), tolerance: tolerance)
+            let rendered: CGImage?
+            if let frame, playback, previewEnabled {
+                let visibleROIs = rois.filter { !hiddenROIIDs.contains($0.id) }
+                if visibleROIs.isEmpty {
+                    rendered = nil
+                } else {
+                    rendered = try? MosaicEngine().applyMosaic(
+                        to: frame,
+                        rois: visibleROIs,
+                        style: style,
+                        segmentEngine: ShapeSegmentEngine(),
+                        patternImageProvider: { patternImages[$0] },
+                        skipIncompletePatterns: true
+                    )
+                }
+            } else {
+                rendered = nil
+            }
             DispatchQueue.main.async {
-                guard let self, let frame else {
-                    self?.updateStatus("フレームを取得できませんでした（\(VideoPreviewView.timeText(clamped))）")
+                defer {
+                    if playback {
+                        self.videoPlaybackRenderInFlight = false
+                        let pending = self.pendingVideoPlaybackSeekSeconds
+                        self.pendingVideoPlaybackSeekSeconds = nil
+                        if let pending, self.isVideoPlaying {
+                            self.seekVideo(to: pending, playback: true)
+                        }
+                    }
+                }
+                guard requestID == self.videoSeekRequestID,
+                      self.currentVideoItem?.id == item.id else {
+                    return
+                }
+                guard let frame else {
+                    self.updateStatus("フレームを取得できませんでした（\(VideoPreviewView.timeText(clamped))）")
                     return
                 }
                 self.currentVideoTimeSeconds = clamped
                 self.videoTimeSlider.doubleValue = clamped
                 self.loadedImage = LoadedImage(url: url, cgImage: frame)
                 // その時刻に効くキーフレームのROIを表示（無ければ空）
-                let keyframe = self.currentVideoEditState.keyframe(at: clamped)
-                self.canvas.rois = keyframe?.rois ?? []
-                self.displayVideoFrame(frame, rois: self.canvas.rois)
+                self.canvas.rois = rois
+                if playback {
+                    self.renderedImage = rendered
+                    self.canvas.setImage(rendered ?? frame)
+                    self.updateVideoPlaybackLabels()
+                } else {
+                    self.displayVideoFrame(frame, rois: self.canvas.rois)
+                }
                 self.canvas.selectedROIID = nil
                 self.videoTrackingLostIDs = []
                 self.canvas.trackingLostROIIDs = []
-                self.resetUndoHistory()
-                self.editorRevision += 1
-                self.reloadLayerList()
-                self.updateVideoTimelineLabels()
-                self.updateStatsBar()
+                if !playback {
+                    self.resetUndoHistory()
+                    self.editorRevision += 1
+                    self.reloadLayerList()
+                    self.updateVideoTimelineLabels()
+                    self.updateStatsBar()
+                }
                 if let reason {
                     self.updateStatus("\(reason): \(item.sourceName) \(VideoPreviewView.timeText(clamped))")
                 }
@@ -5749,6 +5814,31 @@ final class MosaicWindowController: NSObject {
             canvas.setImage(frame)
             updateStatus("動画モザイク表示を解除しました: \(error.localizedDescription)")
         }
+    }
+
+    private func videoPreviewPatternImages(for rois: [MosaicROI], style: MosaicStyle) -> [String: CGImage] {
+        var identifiers = Set<String>()
+        if let identifier = style.patternImageIdentifier {
+            identifiers.insert(identifier)
+        }
+        for roi in rois {
+            if let identifier = roi.style?.patternImageIdentifier {
+                identifiers.insert(identifier)
+            }
+        }
+        var images: [String: CGImage] = [:]
+        for identifier in identifiers {
+            if let image = patternImage(for: identifier) {
+                images[identifier] = image
+            }
+        }
+        return images
+    }
+
+    private func updateVideoPlaybackLabels() {
+        guard let info = currentVideoInfo else { return }
+        videoTimeLabel.stringValue = "\(VideoPreviewView.timeText(currentVideoTimeSeconds))"
+            + " / \(VideoPreviewView.timeText(info.durationSeconds))"
     }
 
     private func updateVideoTimelineLabels() {
@@ -5813,15 +5903,18 @@ final class MosaicWindowController: NSObject {
         }
         pauseVideoTimeline()
         isVideoPlaying = true
-        let tick = max(1.0 / 30.0, 1.0 / max(1, info.frameRate))
+        videoPlaybackStartedAt = Date()
+        videoPlaybackStartTimeSeconds = currentVideoTimeSeconds
+        let tick = 1.0 / min(max(1, info.frameRate), 24)
         videoPlaybackTimer = Timer.scheduledTimer(withTimeInterval: tick, repeats: true) { [weak self] _ in
             Task { @MainActor in
                 guard let self, let info = self.currentVideoInfo else { return }
-                let next = self.currentVideoTimeSeconds + tick
+                let elapsed = Date().timeIntervalSince(self.videoPlaybackStartedAt ?? Date())
+                let next = self.videoPlaybackStartTimeSeconds + elapsed
                 if next >= info.durationSeconds {
                     self.stopVideoTimeline()
                 } else {
-                    self.seekVideo(to: next)
+                    self.seekVideo(to: next, playback: true)
                 }
             }
         }
@@ -5831,6 +5924,10 @@ final class MosaicWindowController: NSObject {
     @objc private func pauseVideoTimeline() {
         videoPlaybackTimer?.invalidate()
         videoPlaybackTimer = nil
+        videoSeekRequestID += 1
+        videoPlaybackRenderInFlight = false
+        pendingVideoPlaybackSeekSeconds = nil
+        videoPlaybackStartedAt = nil
         isVideoPlaying = false
     }
 

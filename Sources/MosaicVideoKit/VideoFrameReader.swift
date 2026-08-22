@@ -162,11 +162,14 @@ public final class VideoFrameReader {
     }
 
     /// 指定時刻の1枚だけをランダムアクセスで取得する（プレビュー/再生UI向け）。
-    public func frame(at time: CMTime) throws -> CGImage {
+    ///
+    /// 再生プレビューでは完全一致フレームに固執するとデコード待ちでカクつくため、
+    /// 呼び出し側が許容できる場合は非ゼロの`tolerance`を渡して近傍フレームを使う。
+    public func frame(at time: CMTime, tolerance: CMTime = .zero) throws -> CGImage {
         let generator = AVAssetImageGenerator(asset: asset)
         generator.appliesPreferredTrackTransform = true
-        generator.requestedTimeToleranceBefore = .zero
-        generator.requestedTimeToleranceAfter = .zero
+        generator.requestedTimeToleranceBefore = tolerance
+        generator.requestedTimeToleranceAfter = tolerance
         do {
             return try generator.copyCGImage(at: time, actualTime: nil)
         } catch {

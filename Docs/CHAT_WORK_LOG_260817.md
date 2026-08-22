@@ -262,3 +262,20 @@
 - `scripts/package_macos_app.sh` を `0.0.00147` / `147` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
 - 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test --filter VideoEditStoreTests` 8件 PASS、`swift test` 165件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、`scripts/package_macos_app.sh` PASS、署名検証 PASS、`Info.plist` で `0.0.00147` / `147` を確認。
 - GUI起動確認は実施したが、複数の既存 `NewMosaicApp` プロセスとmacOS権限ダイアログが前面化に干渉し、v0.0.00147ウィンドウとしての目視確定までは未完了。パッケージの版数と署名は確認済み。
+
+### 2026-08-22 13:34 JST - Codex GPT-5 - 種別: 依頼内容 - 動画モザイク再生カクつき修正
+
+```text
+☆バグ：動画モザイク再生しても、カクカク再生されるだけになる。GPU等高速化処理されてこれ？
+```
+
+### 2026-08-22 13:34 JST - Codex GPT-5 - 種別: 作業結果 - v0.0.00148 動画モザイク再生プレビュー軽量化
+
+- 作業AIモデル: Codex GPT-5（動画再生の描画経路・同期制御・回帰テスト・リリース更新まで同モデルで対応。実行中モデル自体は切替不可のため、軽量な別モデルへの切替は不可）
+- 原因確認: Core Imageの合成はGPU寄りに動けるが、動画再生経路は毎フレームで完全一致フレーム取得、高品質マスク生成、`reloadLayerList()`/キーフレーム表再読込/Undo初期化を同期実行しており、AVPlayerのような連続デコード/表示パイプラインではなかった。
+- `VideoFrameReader.frame(at:)` に`tolerance`を追加し、再生中は近傍フレームを許容してデコード待ちを減らすよう変更。
+- 動画再生中は実時間ベースで再生位置を計算し、遅れたフレーム要求を捨てて最新時刻へ追従するよう変更。
+- 再生中のモザイクプレビューは専用キューで図形マスクの軽量合成を行い、メインスレッドでは完成フレーム反映と時刻ラベル更新だけに制限。手動シーク・適用・書き出しの高品質処理は維持。
+- `scripts/package_macos_app.sh` を `0.0.00148` / `148` へ更新し、`CHANGELOG.md`、`Mosaic/ARCHITECTURE.md`、`Mosaic/QUALITY_STATS.md` を同期。
+- 検証: `swift build` PASS（既存のdeprecated/Sendable警告のみ）、`swift test` 165件 PASS、`git diff --check` PASS、`agent_governance_guard` PASS、`local_quality_gate` PASS、`scripts/package_macos_app.sh` PASS、署名検証 PASS、`Info.plist` で `0.0.00148` / `148` を確認。
+- `open -n dist/newMosaic.app` で `PID 31085 /Volumes/DATA/XCode_Project/newMosaic/dist/newMosaic.app/Contents/MacOS/NewMosaicApp` の起動を確認。旧版アプリプロセスが複数残っているため、v0.0.00148ウィンドウタイトルの目視確定は未完了。
