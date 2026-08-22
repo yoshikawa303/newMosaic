@@ -369,6 +369,8 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         var parts = [
             String(format: "%.6f,%.6f,%.6f,%.6f", rect.x, rect.y, rect.width, rect.height),
             String(describing: shape),
+            category.rawValue,
+            source,
             String(format: "%.3f", rotation),
             maskEngine ?? "-",
             maskThreshold.map { String(format: "%.3f", $0) } ?? "-",
@@ -436,7 +438,7 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
 
     private enum CodingKeys: String, CodingKey {
         case id, rect, confidence, source, shape, category, rotation, polygonPoints, style, roiGroupName
-        case maskEngine, maskThreshold
+        case maskEngine, maskThreshold, maskShapeScale, manualMaskStrokes
     }
 
     public init(from decoder: Decoder) throws {
@@ -454,6 +456,21 @@ public struct MosaicROI: Codable, Equatable, Identifiable, Sendable {
         // 旧ライブラリJSONには個別マスク設定が無いため、欠落時はnil（全体設定を継承）とする
         maskEngine = try container.decodeIfPresent(String.self, forKey: .maskEngine)
         maskThreshold = try container.decodeIfPresent(Double.self, forKey: .maskThreshold)
+        // v0.0.00152以前のJSONには形状クリップ倍率と手描き補正が無い。欠落時は
+        // 表示中のROI形状をそのまま使い、補正なしとして後方互換を保つ。
+        if container.contains(.maskShapeScale) {
+            maskShapeScale = try container.decodeIfPresent(Double.self, forKey: .maskShapeScale)
+        } else if source != "manual",
+                  category == .maleGenital || category == .femaleGenital {
+            let legacyScale = DetectedROIRefiner.genitalExpansionScale(for: shape)
+            maskShapeScale = legacyScale > 1 ? legacyScale : nil
+        } else {
+            maskShapeScale = nil
+        }
+        manualMaskStrokes = try container.decodeIfPresent(
+            [ManualMaskStroke].self,
+            forKey: .manualMaskStrokes
+        ) ?? []
     }
 }
 

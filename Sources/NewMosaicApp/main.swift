@@ -2187,7 +2187,7 @@ final class MosaicWindowController: NSObject {
         canvasModeControl.setToolTip("編集モード（ドラッグでROIを新規作成。従来通り）", forSegment: 0)
         canvasModeControl.setToolTip("範囲選択モード（ドラッグで複数ROIを一括選択。Option(⌥)キーで一時的に編集モードへ切替）", forSegment: 1)
         canvasModeControl.setToolTip(
-            "マスク追加ペン（ドラッグでマスクを塗る。レイヤ未選択ならモザイク対象へ新しいレイヤ「その他」を作って塗る。"
+            "マスク追加ペン（ドラッグでマスクを塗る。レイヤ未選択なら現在の候補カテゴリで新しいレイヤを作って塗る。"
             + "Option(⌥)キーを押しながらで一時的に消しゴム）",
             forSegment: 2
         )
@@ -2390,12 +2390,12 @@ final class MosaicWindowController: NSObject {
         shapeControl.action = #selector(shapeControlChanged)
         for (_, button) in categoryFilterChecks {
             button.target = self
-            button.action = #selector(generationFilterChanged)
+            button.action = #selector(generationFilterChanged(_:))
         }
         generatePersonCheckbox.target = self
-        generatePersonCheckbox.action = #selector(generationFilterChanged)
+        generatePersonCheckbox.action = #selector(generationFilterChanged(_:))
         generatePoseCheckbox.target = self
-        generatePoseCheckbox.action = #selector(generationFilterChanged)
+        generatePoseCheckbox.action = #selector(generationFilterChanged(_:))
         loadGenerationFilter()
         personLayerCheckbox.target = self
         personLayerCheckbox.action = #selector(toggleDetectionLayers)
@@ -2426,6 +2426,7 @@ final class MosaicWindowController: NSObject {
                   self.canvas.rois[index].category != category else { return }
             self.pushUndoSnapshot(self.currentEditorState())
             self.canvas.rois[index].category = category
+            self.canvas.currentCategory = category
             self.refreshMaskShapeScale(at: index)
             if !self.persistCurrentVideoFrameCorrectionIfNeeded() {
                 self.hasUnsavedChanges = true
@@ -2460,6 +2461,7 @@ final class MosaicWindowController: NSObject {
                 case .ellipse: self.shapeControl.selectedSegment = 1
                 case .polygon: self.shapeControl.selectedSegment = 2
                 }
+                self.canvas.currentCategory = roi.category
             }
             self.loadMosaicStyleForSelection(roi)
             self.loadDetectionSettingForSelection(roi)
@@ -2561,9 +2563,18 @@ final class MosaicWindowController: NSObject {
         Set(categoryFilterChecks.filter { $0.button.state == .on }.map(\.category))
     }
 
-    @objc private func generationFilterChanged() {
+    @objc private func generationFilterChanged(_ sender: NSButton) {
+        // 候補カテゴリのチェック操作は、次に手動追加するROIのカテゴリ選択も兼ねる。
+        // 従来は常に「その他」で作られ、男性器を選んだつもりでもSAMの中心プロンプトや
+        // カテゴリ別グループが適用されなかった（GUI報告 2026-08-22）。
+        if sender.state == .on,
+           let category = categoryFilterChecks.first(where: { $0.button === sender })?.category {
+            canvas.currentCategory = category
+        }
         saveGenerationFilter()
-        updateStatus("候補生成の対象: \(generationFilterSummary())（次回の候補生成から適用）")
+        updateStatus(
+            "候補生成の対象: \(generationFilterSummary())（新規範囲: \(canvas.currentCategory.displayName)）"
+        )
     }
 
     private func generationFilterSummary() -> String {
@@ -4704,26 +4715,27 @@ final class MosaicWindowController: NSObject {
         maskBrushValueLabel.stringValue = "\(Int(maskBrushSlider.doubleValue * 100)) %"
     }
 
-    /// マスク追加ペンでレイヤ未選択のとき、モザイク対象へ新しいレイヤ（その他）を作る。
+    /// マスク追加ペンでレイヤ未選択のとき、現在の追加カテゴリで新しいレイヤを作る。
     ///
-    /// 作ったレイヤは「その他」グループへ入れる（自動検出のカテゴリ別グループと並ぶ）。
+    /// 作ったレイヤはカテゴリ別グループへ入れる（自動検出のグループと同じ分類）。
     /// マスクは手描きのみで使うので、生成方式は図形にせずROI形状（矩形）をそのまま使う。
     private func addLayerForMaskPaint(rect: NormalizedRect) -> UUID? {
         guard loadedImage != nil else { return nil }
         pushUndoSnapshot(currentEditorState())
+        let category = canvas.currentCategory
         let roi = MosaicROI(
             rect: rect,
             confidence: 1.0,
             source: "manual",
             shape: .rectangle,
-            category: .other,
-            roiGroupName: MosaicTargetCategory.other.displayName
+            category: category,
+            roiGroupName: category.displayName
         )
         canvas.rois.append(roi)
         canvas.selectedROIID = roi.id
         hasUnsavedChanges = true
         reloadLayerList()
-        updateStatus("モザイク対象へ新しいレイヤを追加しました（\(MosaicTargetCategory.other.displayName)）")
+        updateStatus("モザイク対象へ新しいレイヤを追加しました（\(category.displayName)）")
         return roi.id
     }
 

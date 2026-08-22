@@ -1773,12 +1773,20 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
         source: "test",
         category: .maleGenital,
         maskEngine: "samShape",
-        maskThreshold: 0.5
+        maskThreshold: 0.5,
+        maskShapeScale: 1.4142,
+        manualMaskStrokes: [ManualMaskStroke(
+            points: [NormalizedPoint(x: 0.25, y: 0.4), NormalizedPoint(x: 0.75, y: 0.6)],
+            width: 0.18,
+            isAdditive: true
+        )]
     )
     let encoded = try JSONEncoder().encode(roi)
     let decoded = try JSONDecoder().decode(MosaicROI.self, from: encoded)
     #expect(decoded.maskEngine == "samShape")
     #expect(decoded.maskThreshold == 0.5)
+    #expect(decoded.maskShapeScale == 1.4142)
+    #expect(decoded.manualMaskStrokes == roi.manualMaskStrokes)
 
     let legacyJSON = """
     {"id":"\(UUID().uuidString)","rect":{"x":0.1,"y":0.1,"width":0.2,"height":0.2},
@@ -1787,6 +1795,45 @@ private func rgbaPixel(in image: CGImage, x: Int, y: Int) -> (red: Double, green
     let legacy = try JSONDecoder().decode(MosaicROI.self, from: Data(legacyJSON.utf8))
     #expect(legacy.maskEngine == nil)
     #expect(legacy.maskThreshold == nil)
+    #expect(legacy.maskShapeScale == nil)
+    #expect(legacy.manualMaskStrokes.isEmpty)
+
+    let legacyDetectedGenitalJSON = """
+    {"id":"\(UUID().uuidString)","rect":{"x":0.1,"y":0.1,"width":0.2,"height":0.2},
+     "confidence":0.9,"source":"photo-censor","shape":"ellipse","category":"maleGenital"}
+    """
+    let migrated = try JSONDecoder().decode(
+        MosaicROI.self,
+        from: Data(legacyDetectedGenitalJSON.utf8)
+    )
+    #expect(migrated.maskShapeScale == DetectedROIRefiner.genitalExpansionScale(for: .ellipse))
+}
+
+/// SAM・学習形状などのマスク生成がカテゴリ/検出元に依存するため、変更時はキャッシュを分離する。
+@Test func maskIdentityChangesWithCategoryAndSource() {
+    let rect = NormalizedRect(x: 0.1, y: 0.2, width: 0.3, height: 0.4)
+    let other = MosaicROI(rect: rect, confidence: 1, source: "manual", category: .other)
+    let genital = MosaicROI(rect: rect, confidence: 1, source: "manual", category: .maleGenital)
+    let detected = MosaicROI(rect: rect, confidence: 1, source: "photo-censor", category: .other)
+    #expect(other.maskIdentity != genital.maskIdentity)
+    #expect(other.maskIdentity != detected.maskIdentity)
+}
+
+/// 性器ROI用SAMプロンプトは、枠だけでなく対象中心の正例点を先頭へ追加する。
+/// 枠内の背景や人体側を選ぶ回帰を防ぎ、通常ROIのbox-onlyプロンプトは維持する。
+@Test func samDecoderPromptsAddCenterPointOnlyWhenRequested() {
+    let box = CGRect(x: 10, y: 20, width: 40, height: 60)
+    let boxOnly = SAMSegmentEngine.decoderPrompts(
+        box: box, scale: 2, includesCenterPoint: false
+    )
+    #expect(boxOnly.coordinates == [20, 40, 100, 160])
+    #expect(boxOnly.labels == [2, 3])
+
+    let centerAndBox = SAMSegmentEngine.decoderPrompts(
+        box: box, scale: 2, includesCenterPoint: true
+    )
+    #expect(centerAndBox.coordinates == [60, 100, 20, 40, 100, 160])
+    #expect(centerAndBox.labels == [1, 2, 3])
 }
 
 /// 個別設定に使うマスク生成方式の識別子が `SegmentEngineKind` のrawValueと往復すること。

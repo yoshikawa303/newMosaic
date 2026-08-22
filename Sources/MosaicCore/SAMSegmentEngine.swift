@@ -248,20 +248,23 @@ public final class SAMSegmentEngine: Segmenting {
 
 
     /// SAMのデコーダを枠プロンプトで実行し、元画像サイズの二値マスク（白=対象）を返す。
+    /// 性器ROIでは枠中央を正例点として加え、枠内で面積の大きい背景や人体側が選ばれるのを防ぐ。
     /// デコーダ出力はマスクのlogitsで、>0 が対象。
     private static func binaryMask(
         box: CGRect,
         embedding: ORTValue,
         decoder: ORTSession,
-        image: CGImage
+        image: CGImage,
+        includesCenterPoint: Bool = false
     ) throws -> CGImage? {
         let scale = Double(inputLongSide) / Double(max(image.width, image.height))
-        // 枠 = 左上点(label 2) + 右下点(label 3)。座標はリサイズ後（長辺1024）空間
-        var coords: [Float] = [
-            Float(box.minX * scale), Float(box.minY * scale),
-            Float(box.maxX * scale), Float(box.maxY * scale)
-        ]
-        var labels: [Float] = [2, 3]
+        let prompts = decoderPrompts(
+            box: box,
+            scale: scale,
+            includesCenterPoint: includesCenterPoint
+        )
+        var coords = prompts.coordinates
+        var labels = prompts.labels
         var maskInput = [Float](repeating: 0, count: 256 * 256)
         var hasMask: [Float] = [0]
         var origSize: [Float] = [Float(image.height), Float(image.width)]
@@ -272,8 +275,8 @@ public final class SAMSegmentEngine: Segmenting {
         }
         let inputs: [String: ORTValue] = [
             "image_embeddings": embedding,
-            "point_coords": try value(&coords, shape: [1, 2, 2]),
-            "point_labels": try value(&labels, shape: [1, 2]),
+            "point_coords": try value(&coords, shape: [1, NSNumber(value: labels.count), 2]),
+            "point_labels": try value(&labels, shape: [1, NSNumber(value: labels.count)]),
             "mask_input": try value(&maskInput, shape: [1, 1, 256, 256]),
             "has_mask_input": try value(&hasMask, shape: [1]),
             "orig_im_size": try value(&origSize, shape: [2])
@@ -302,6 +305,27 @@ public final class SAMSegmentEngine: Segmenting {
             shouldInterpolate: false,
             intent: .defaultIntent
         )
+    }
+
+    /// デコーダへ渡す点列。boxは左上(label 2)・右下(label 3)、必要な場合はその前へ
+    /// 対象中心の正例点(label 1)を置く。テストから配列順と座標変換を固定できるよう分離する。
+    static func decoderPrompts(
+        box: CGRect,
+        scale: Double,
+        includesCenterPoint: Bool
+    ) -> (coordinates: [Float], labels: [Float]) {
+        var coordinates: [Float] = []
+        var labels: [Float] = []
+        if includesCenterPoint {
+            coordinates.append(contentsOf: [Float(box.midX * scale), Float(box.midY * scale)])
+            labels.append(1)
+        }
+        coordinates.append(contentsOf: [
+            Float(box.minX * scale), Float(box.minY * scale),
+            Float(box.maxX * scale), Float(box.maxY * scale)
+        ])
+        labels.append(contentsOf: [2, 3])
+        return (coordinates, labels)
     }
 
     // MARK: - 小さいROI向けの切り出し推論
@@ -351,6 +375,7 @@ public final class SAMSegmentEngine: Segmenting {
         encoder: ORTSession,
         decoder: ORTSession,
         image: CGImage,
+        includesCenterPoint: Bool = false,
         cache: EmbeddingCache = embeddingCache
     ) throws -> CGImage? {
         let imageSize = CGSize(width: image.width, height: image.height)
@@ -362,7 +387,11 @@ public final class SAMSegmentEngine: Segmenting {
         )
         let localBox = box.offsetBy(dx: -window.minX, dy: -window.minY)
         guard let localMask = try binaryMask(
-            box: localBox, embedding: embedding, decoder: decoder, image: cropped
+            box: localBox,
+            embedding: embedding,
+            decoder: decoder,
+            image: cropped,
+            includesCenterPoint: includesCenterPoint
         ) else { return nil }
         return place(localMask, at: window, inImageOfSize: imageSize)
     }
@@ -429,6 +458,7 @@ public final class SAMSegmentEngine: Segmenting {
         let scale = Double(Self.inputLongSide) / Double(max(image.width, image.height))
         let boxSideInInput = max(box.width, box.height) * scale
         let primaryUsesCrop = boxSideInInput < Self.minimumBoxSideInInput
+        let usesCenterPoint = roi.category == .maleGenital || roi.category == .femaleGenital
 
         // 指定経路（全体推論 or 切り出し推論）でマスクを生成し、形状で切ってcoverageを測る。
         // マスクは常に**選択範囲の形状**で切る。
@@ -447,11 +477,20 @@ public final class SAMSegmentEngine: Segmenting {
             if usesCrop {
                 guard let encoder = Self.sharedSessions?.encoder else { return nil }
                 maskImage = try Self.binaryMaskViaCrop(
-                    box: box, encoder: encoder, decoder: decoder, image: image, cache: cache
+                    box: box,
+                    encoder: encoder,
+                    decoder: decoder,
+                    image: image,
+                    includesCenterPoint: usesCenterPoint,
+                    cache: cache
                 )
             } else {
                 maskImage = try Self.binaryMask(
-                    box: box, embedding: embedding, decoder: decoder, image: image
+                    box: box,
+                    embedding: embedding,
+                    decoder: decoder,
+                    image: image,
+                    includesCenterPoint: usesCenterPoint
                 )
             }
             guard let maskImage else { return nil }
@@ -500,6 +539,7 @@ public final class SAMSegmentEngine: Segmenting {
             samShape category=\(roi.category.rawValue, privacy: .public) \
             rotation=\(Int(roi.rotation)) \
             path=\(usedPath, privacy: .public) \
+            prompt=\(usesCenterPoint ? "center+box" : "box", privacy: .public) \
             boxSideInInput=\(Int(boxSideInInput)) \
             rectCoverage=\(String(format: "%.2f", result.coverage), privacy: .public) \
             clip=shape \
