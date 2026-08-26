@@ -1,5 +1,19 @@
 # Changelog
 
+## v0.0.00154 - 2026-08-26
+
+■更新履歴（Readme / ChangeLog 用）
+
+- 改善: 一括処理（未加工画像の候補生成→モザイク適用→保存）を並列化し、複数枚をまとめて処理する際の所要時間を短縮した。
+- 調査: ONNX RuntimeのCoreML実行プロバイダ（Apple GPU/Neural Engine活用）を試験導入したが、実測で大幅な速度低下（最大約16倍）が確認されたため不採用とした（正確性への影響は無視できる範囲だった）。
+
+■更新履歴
+
+- `batchProcessAll`をactorベースの共有キュー（`BatchQueue`）＋`withTaskGroup`による並列ワーカー方式へ書き換え。並列数は論理コア数の半分・上限2（`batchConcurrency`）。各ワーカーはCandidateGenerationWorker/ImageLoader/MosaicEngineをタスク開始時に1回だけ生成し、モデル読み込みの重複を避ける。
+- 進捗表示を「現在処理中のN件目」から「完了件数」方式へ変更（並列処理では完了順が投入順と一致しないため）。`LibraryEngine`は既存の`syncQueue`直列化により複数ワーカーからの保存でも競合しない。
+- CoreML実行プロバイダ（`ORTCoreMLExecutionProviderOptions`）を全ONNXモデルへ試験的に付与して`SampleImageRegressionTests`で実測。正確性（IoU差0.001）は問題なかったが、総実行時間が100.5秒→692.8秒（約6.9倍）、個別テストで最大16.3倍まで悪化したため不採用とし、コードは全て元へ戻した。原因と判断根拠は`Mosaic/ARCHITECTURE.md` §5.71.1に記録。
+- 検証: `swift build`成功、`swift test`既存全件PASS（一括処理の並列化はSwift Testing対象外の実行ファイル内部実装のため、既存回帰テストへの影響が無いことで確認）。並列実行時の実測速度・実データでの動作確認は要GUI確認。
+
 ## v0.0.00153 - 2026-08-23
 
 ■更新履歴（Readme / ChangeLog 用）

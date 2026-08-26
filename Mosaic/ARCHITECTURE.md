@@ -1440,6 +1440,66 @@ GUI報告「ディルド範囲ずれ」（7624B71B・実写）の実測調査:
 - `MosaicROI.maskShapeScale`と`manualMaskStrokes`をJSONへ保存する。旧JSONでキーが欠落した
   検出済み性器ROIは、形状ごとの倍率を読込時に再構築する。手動ROIはユーザー指定範囲を維持する。
 
+## 5.71 高速化調査: CoreML実行プロバイダは不採用、一括処理は並列化（2026-08-26 v0.0.00154〜）
+
+「静止画・動画解析の高速化施策（並列処理・GPU使用）は入っているか」というユーザー質問（2026-08-10）
+への回答で判明した2つの伸びしろのうち、推奨順で両方を検証・実装した。
+
+### 5.71.1 ONNX RuntimeのCoreML実行プロバイダ（ANE/GPU）は検証の上で不採用
+
+- **経緯**: 全ONNXモデル（`AnimeSegmenter`・`AnimePoseEstimator`・`AnimeCensorDetector`・
+  `PhotoCensorDetector`・`DomainModelClassifier`・`PartSegmentationDetector`・
+  `SAMSegmentEngine`）は`ORTSessionOptions()`を無指定のまま使っており、既定では
+  **CPU実行のみ**でApple SiliconのGPU・Neural Engine（ANE）を一切使っていなかった。
+  ONNX Runtime公式のCoreML実行プロバイダ（`ORTCoreMLExecutionProviderOptions`・
+  `appendCoreMLExecutionProviderWithOptions`。`onnxruntime-swift-package-manager`の
+  `OnnxRuntimeBindings`が既に対応、macOS 14+も対象プラットフォームに含まれる）を
+  全モデルへ試験的に付与した。
+- **正確性への影響は無視できる範囲**: `SampleImageRegressionTests`（IoU・被覆率の実測）を
+  CoreML EP有効の状態で実行し、全11件PASS。人物マスクIoUは0.943→0.942（差0.001、
+  浮動小数点の丸め差の範囲内）で、実用上の差は無かった。
+- **速度は大幅に悪化した（採用しない決定打）**: 同じ`SampleImageRegressionTests`の総実行時間が
+  **100.5秒→692.8秒（約6.9倍）**に悪化した。個別テストでは
+  `personMaskDoesNotCoverWholeBoundsOnSampleImages`が27.9秒→454.5秒（**16.3倍**）、
+  `compareSAMWholeImageAndCropForSmallROIs`が15.7秒→122.3秒（**7.8倍**）と、
+  特に大きい後退が見られた。全11件が一律に悪化しており、特定条件下だけの後退ではない。
+- **原因（ORT公式ログから特定）**: CoreML EPはグラフをCoreML対応部分とCPU実行部分へ
+  分割する（実行時ログ `CoreMLExecutionProvider::GetCapability` に
+  「number of partitions supported by CoreML: 7」等と出る）。分割数が多いモデルほど
+  CoreMLとCPUの間でテンソルを行き来させるオーバーヘッドが発生し、かつセッション生成の
+  たびにCore MLへのコンパイルが走る。本アプリの検出・分類モデルは1推論あたりの処理量に
+  比してこのオーバーヘッドが大きく、ANE/GPUでの演算そのものが速くても総時間では
+  CPU一本より遅くなる（ORT+CoreML EPの既知の落とし穴。モデルサイズ・演算の種類次第で
+  有利不利が分かれ、本アプリの構成では不利側だった）。
+- **結論**: CoreML EPは実装・検証したうえで不採用とし、コードは残さず全て元へ戻した
+  （`ORTAcceleration.swift`等は作成後に削除）。将来モデル構成を大きく変える場合
+  （単一の大きなモデルへ統合する等）は再検証の価値があるが、現行の複数の小〜中規模
+  モデルを都度呼び出す構成では、この経路の高速化は見込めないと判断する。
+
+### 5.71.2 一括処理（`batchProcessAll`）の並列化
+
+- **背景**: 一括処理（未加工画像を候補生成→モザイク適用→保存）は画像1枚ずつ完全直列で、
+  N枚の処理時間はN倍だった。
+- **実装**: `BatchQueue`（actor）が対象画像を1件ずつ払い出し、`batchConcurrency`件の
+  ワーカータスクが`withTaskGroup`で並行して払い出しを受け取り処理する。各ワーカータスクは
+  `CandidateGenerationWorker`・`ImageLoader`・`MosaicEngine`を1つずつ**タスク開始時に1回だけ**
+  生成する（画像ごとに作り直すとモデル読み込みが並列数×画像数ぶん走ってしまうため）。
+- **並列数**: 論理コア数の半分・上限2（`batchConcurrency`）。モデル常駐は1ワーカーあたり
+  約0.4〜1.5GB（§5.49実測）で、SAMのエンコーダ/デコーダはプロセス全体で共有するため
+  並列数に比例しないが、アニメ/実写の検出・分類モデルはワーカーごとに個別ロードされるため、
+  際限のない並列化はメモリ逼迫を招く。CoreML EPは不採用（§5.71.1）のため、この並列化は
+  純粋にCPU推論をコア数ぶん重ねる効果のみを狙ったもの。
+- **保存の競合**: `LibraryEngine`は`index.json`の読み書きを`syncQueue`（`DispatchQueue`）で
+  直列化済み（既存実装。複数ワーカーからの`saveProcessedImage`呼び出しが並行しても
+  read-modify-writeのTOCTOU競合は起きない）。
+- **進捗表示**: 並列処理では完了順が投入順と一致しないため、「現在処理中のN件目」ではなく
+  「完了件数」で進捗バー・ラベルを更新する方式へ変更した（`recordBatchItemCompletion`）。
+- **キャンセル**: 各ワーカーは次の画像を取り出す**前**に`batchCancelRequested`を確認する。
+  取り出し済みの画像は最後まで処理してから停止する（従来と同じ「中途半端な保存をしない」方針）。
+- **検証**: 一括処理は実行ファイル側（`NewMosaicApp`）の内部実装でSwift Testing対象外のため、
+  `swift build`成功・既存回帰テスト（`swift test`）全件PASSで既存機能への影響が無いことを
+  確認した。**並列実行時の実測速度・メモリ・実データでの動作確認はGUI確認が必要**。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。

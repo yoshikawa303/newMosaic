@@ -2105,6 +2105,9 @@ final class MosaicWindowController: NSObject {
     }
     private var lastStatusText = ""
     private var batchCancelRequested = false
+    /// 一括処理の完了件数（並列ワーカーからMainActor経由で加算する）。
+    private var batchProcessedCount = 0
+    private var batchFailedCount = 0
     private var batchPanel: NSPanel?
     private let batchProgressBar = NSProgressIndicator()
     private let batchProgressLabel = NSTextField(labelWithString: "")
@@ -5353,8 +5356,38 @@ final class MosaicWindowController: NSObject {
         let engineKindIndex: Int
     }
 
+    /// 一括処理の残りキュー。並列ワーカータスクが同時に取り出すため actor で直列化する
+    /// （複数タスクが同じ添字を取り出す競合を避ける。1件ずつの受け渡しのみでロジックは持たない）。
+    private actor BatchQueue {
+        private var remaining: [MosaicLibraryItem]
+        init(items: [MosaicLibraryItem]) { remaining = items }
+        func dequeue() -> MosaicLibraryItem? {
+            guard !remaining.isEmpty else { return nil }
+            return remaining.removeFirst()
+        }
+    }
+
+    /// 一括処理の並列ワーカー数。
+    ///
+    /// モデル常駐は1ワーカーあたり約0.4〜1.5GB（`Mosaic/ARCHITECTURE.md` §5.49実測。
+    /// SAMのエンコーダ/デコーダはプロセス全体で共有するため並列数に比例しないが、
+    /// アニメ/実写の検出・分類モデルはワーカーごとに個別ロードされる）。際限なく並列化すると
+    /// メモリ逼迫を招くため、論理コア数の半分・上限2を目安にする。
+    ///
+    /// **ONNX RuntimeのCoreML実行プロバイダ（ANE/GPU）は使わない**（検討・実測の上で不採用。
+    /// 詳細は`Mosaic/ARCHITECTURE.md` §5.5x「高速化調査」参照）。よってここでの並列化は
+    /// 純粋にCPU推論をコア数ぶん重ねる効果のみを狙ったもの。
+    private static var batchConcurrency: Int {
+        max(1, min(2, ProcessInfo.processInfo.activeProcessorCount / 2))
+    }
+
     /// 未加工（加工後画像なし）かつリンク有効な全画像を、候補生成→モザイク適用→保存で一括処理する。
     /// 処理中は進捗パネル（件数・進捗バー・キャンセル）をリアルタイム更新する。
+    ///
+    /// **並列処理（v0.0.00154〜）**: 従来は1件ずつ直列に処理していた（画像N枚→N倍の時間）。
+    /// `batchConcurrency`件のワーカータスクを起動し、共有キュー（`BatchQueue`）から
+    /// 各自が次の画像を取り出して並行処理する。`LibraryEngine`は内部で`syncQueue`により
+    /// 保存を直列化済みのため、複数ワーカーからの`saveProcessedImage`は安全に競合しない。
     @objc private func batchProcessAll() {
         guard !isBatchProcessing else { return }
         let targets = libraryItems.filter { !$0.isVideo && $0.processedRelativePath == nil && !libraryEngine.isLinkBroken($0) }
@@ -5381,76 +5414,91 @@ final class MosaicWindowController: NSObject {
         )
         isBatchProcessing = true
         batchCancelRequested = false
-        presentBatchPanel(total: targets.count)
+        batchProcessedCount = 0
+        batchFailedCount = 0
+        let total = targets.count
+        let concurrency = Self.batchConcurrency
+        presentBatchPanel(total: total)
+        updateStatus("一括処理を開始します（並列\(concurrency)）")
 
         Task.detached(priority: .userInitiated) { [weak self] in
-            let worker = CandidateGenerationWorker()
-            let loader = ImageLoader()
-            let engine = MosaicEngine()
-            func makeSegmentEngine() -> Segmenting {
-                let kinds = MosaicWindowController.selectableEngineKinds
-                guard config.engineKindIndex >= 0, config.engineKindIndex < kinds.count else {
-                    return ShapeSegmentEngine()
+            let queue = BatchQueue(items: targets)
+
+            await withTaskGroup(of: Void.self) { group in
+                for _ in 0..<concurrency {
+                    group.addTask {
+                        // ワーカー・ローダー・エンジンはこのタスク（並列スロット）専用に1つだけ作る。
+                        // 画像1枚ごとに作り直すとモデル読み込み（重い）が並列数×画像数ぶん走ってしまう。
+                        let worker = CandidateGenerationWorker()
+                        let loader = ImageLoader()
+                        let engine = MosaicEngine()
+                        func makeSegmentEngine() -> Segmenting {
+                            let kinds = MosaicWindowController.selectableEngineKinds
+                            guard config.engineKindIndex >= 0, config.engineKindIndex < kinds.count else {
+                                return ShapeSegmentEngine()
+                            }
+                            switch kinds[config.engineKindIndex] {
+                            case .shape: return ShapeSegmentEngine()
+                            case .visionPersonSegmentation: return VisionPersonSegmentEngine()
+                            case .foregroundObjects: return ForegroundSegmentEngine()
+                            case .regionForeground: return RegionForegroundSegmentEngine()
+                            case .learnedShape: return LearnedShapeSegmentEngine()
+                            case .samShape: return SAMSegmentEngine()
+                            }
+                        }
+
+                        while true {
+                            let shouldStop = await MainActor.run { [weak self] in self?.batchCancelRequested ?? true }
+                            if shouldStop { return }
+                            guard let item = await queue.dequeue() else { return }
+
+                            var success = false
+                            do {
+                                let loaded = try loader.loadImage(from: config.library.originalURL(for: item))
+                                let output = try worker.run(CandidateGenerationInput(
+                                    image: loaded.cgImage,
+                                    domainMode: config.domainMode,
+                                    groinPositionRatio: config.groinRatio
+                                ))
+                                var rois = output.rois.filter { config.checkedCategories.contains($0.category) }
+                                rois = rois.map { roi in
+                                    var updated = roi
+                                    updated.shape = config.shape
+                                    if config.shape == .polygon && updated.polygonPoints == nil {
+                                        updated.polygonPoints = MosaicROI.defaultPolygonPoints
+                                    }
+                                    return updated
+                                }
+                                let result = try engine.applyMosaic(
+                                    to: loaded.cgImage,
+                                    rois: rois,
+                                    style: config.style,
+                                    segmentEngine: makeSegmentEngine(),
+                                    patternImageProvider: { identifier in
+                                        if let builtin = OverlayAssetCatalog.image(for: identifier) { return builtin }
+                                        let url = config.library.patternURL(identifier: identifier)
+                                        guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
+                                        return CGImageSourceCreateImageAtIndex(source, 0, nil)
+                                    }
+                                )
+                                _ = try config.library.saveProcessedImage(result, rois: rois, for: item.id)
+                                success = true
+                            } catch {
+                                success = false
+                            }
+
+                            await MainActor.run { [weak self] in
+                                self?.recordBatchItemCompletion(success: success, name: item.sourceName, total: total)
+                            }
+                        }
+                    }
                 }
-                switch kinds[config.engineKindIndex] {
-                case .shape: return ShapeSegmentEngine()
-                case .visionPersonSegmentation: return VisionPersonSegmentEngine()
-                case .foregroundObjects: return ForegroundSegmentEngine()
-                case .regionForeground: return RegionForegroundSegmentEngine()
-                case .learnedShape: return LearnedShapeSegmentEngine()
-                case .samShape: return SAMSegmentEngine()
-                }
+                await group.waitForAll()
             }
 
-            var processed = 0
-            var failed = 0
-            var cancelled = false
-            for (index, item) in targets.enumerated() {
-                let shouldStop = await MainActor.run { [weak self] in self?.batchCancelRequested ?? true }
-                if shouldStop {
-                    cancelled = true
-                    break
-                }
-                await MainActor.run { [weak self] in
-                    self?.updateBatchProgress(current: index + 1, total: targets.count, name: item.sourceName)
-                }
-                do {
-                    let loaded = try loader.loadImage(from: config.library.originalURL(for: item))
-                    let output = try worker.run(CandidateGenerationInput(
-                        image: loaded.cgImage,
-                        domainMode: config.domainMode,
-                        groinPositionRatio: config.groinRatio
-                    ))
-                    var rois = output.rois.filter { config.checkedCategories.contains($0.category) }
-                    rois = rois.map { roi in
-                        var updated = roi
-                        updated.shape = config.shape
-                        if config.shape == .polygon && updated.polygonPoints == nil {
-                            updated.polygonPoints = MosaicROI.defaultPolygonPoints
-                        }
-                        return updated
-                    }
-                    let result = try engine.applyMosaic(
-                        to: loaded.cgImage,
-                        rois: rois,
-                        style: config.style,
-                        segmentEngine: makeSegmentEngine(),
-                        patternImageProvider: { identifier in
-                            if let builtin = OverlayAssetCatalog.image(for: identifier) { return builtin }
-                            let url = config.library.patternURL(identifier: identifier)
-                            guard let source = CGImageSourceCreateWithURL(url as CFURL, nil) else { return nil }
-                            return CGImageSourceCreateImageAtIndex(source, 0, nil)
-                        }
-                    )
-                    _ = try config.library.saveProcessedImage(result, rois: rois, for: item.id)
-                    processed += 1
-                } catch {
-                    failed += 1
-                }
+            let (processedCount, failedCount, wasCancelled): (Int, Int, Bool) = await MainActor.run { [weak self] in
+                (self?.batchProcessedCount ?? 0, self?.batchFailedCount ?? 0, self?.batchCancelRequested ?? false)
             }
-            let processedCount = processed
-            let failedCount = failed
-            let wasCancelled = cancelled
             await MainActor.run { [weak self] in
                 self?.finishBatchProcessing(processed: processedCount, failed: failedCount, cancelled: wasCancelled)
             }
@@ -5502,10 +5550,14 @@ final class MosaicWindowController: NSObject {
         batchProgressLabel.stringValue = "キャンセルしています..."
     }
 
-    private func updateBatchProgress(current: Int, total: Int, name: String) {
-        batchProgressLabel.stringValue = "\(current)/\(total) 処理中: \(name)"
-        batchProgressBar.doubleValue = Double(current - 1)
-        updateStatus("一括処理 \(current)/\(total): \(name)")
+    /// 並列ワーカーが1件処理し終えるたびに呼ばれる。並列処理では完了順が投入順と一致しない
+    /// ため、「現在処理中のN件目」ではなく「完了件数」で進捗を示す（`updateBatchProgress`から改称）。
+    private func recordBatchItemCompletion(success: Bool, name: String, total: Int) {
+        if success { batchProcessedCount += 1 } else { batchFailedCount += 1 }
+        let completed = batchProcessedCount + batchFailedCount
+        batchProgressLabel.stringValue = "\(completed)/\(total) 完了・直近: \(name)"
+        batchProgressBar.doubleValue = Double(completed)
+        updateStatus("一括処理 \(completed)/\(total) 完了: \(name)")
     }
 
     private func finishBatchProcessing(processed: Int, failed: Int, cancelled: Bool) {
