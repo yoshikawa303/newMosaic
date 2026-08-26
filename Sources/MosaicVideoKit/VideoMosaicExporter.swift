@@ -106,6 +106,89 @@ private final class AudioPassthrough {
     }
 }
 
+/// 1フレーム分の「ROI解決済み」データ。デコード＋ROI解決（producer）→
+/// モザイク描画＋書き出し（consumer）へ受け渡す単位（v0.0.00155）。
+private struct PipelineFrame: @unchecked Sendable {
+    let index: Int
+    let image: CGImage
+    let rois: [MosaicROI]
+    let presentationTime: CMTime
+}
+
+/// producer（デコード＋ROI解決）とconsumer（モザイク描画＋書き出し）の間の
+/// 有界ブロッキングキュー（v0.0.00155: 動画書き出しの2段パイプライン化）。
+///
+/// - `push`はキューが満杯なら空くまで待つ（producerが先行しすぎてフレームを
+///   メモリに溜め込み続けないようにする＝背圧）。
+/// - `pop`は空ならproducerが次を入れるかfinishProducingを呼ぶまで待つ。
+/// - `abort`はconsumer側の失敗や外部キャンセルを知らせ、push/pop双方を即座に
+///   抜けさせる（バッファ内容は破棄。producer側は次の`isCancelled()`チェックで
+///   自然に停止する設計のため、ここでは待たせているスレッドを起こすだけでよい）。
+private final class VideoExportPipelineQueue<Element>: @unchecked Sendable {
+    private var buffer: [Element] = []
+    private let capacity: Int
+    private let condition = NSCondition()
+    private var producerDone = false
+    private var aborted = false
+
+    init(capacity: Int) { self.capacity = max(1, capacity) }
+
+    func push(_ element: Element) {
+        condition.lock()
+        defer { condition.unlock() }
+        while buffer.count >= capacity && !aborted {
+            condition.wait()
+        }
+        guard !aborted else { return }
+        buffer.append(element)
+        condition.broadcast()
+    }
+
+    func pop() -> Element? {
+        condition.lock()
+        defer { condition.unlock() }
+        while buffer.isEmpty && !producerDone && !aborted {
+            condition.wait()
+        }
+        guard !aborted, !buffer.isEmpty else { return nil }
+        let element = buffer.removeFirst()
+        condition.broadcast()
+        return element
+    }
+
+    func finishProducing() {
+        condition.lock()
+        producerDone = true
+        condition.broadcast()
+        condition.unlock()
+    }
+
+    func abort() {
+        condition.lock()
+        aborted = true
+        condition.broadcast()
+        condition.unlock()
+    }
+}
+
+/// producer/consumer間で最初に発生したエラーだけを記録する箱（両スレッドから読み書きするためlock付き）。
+private final class VideoExportFailureBox: @unchecked Sendable {
+    private let lock = NSLock()
+    private var storedError: Error?
+
+    var error: Error? {
+        lock.lock(); defer { lock.unlock() }
+        return storedError
+    }
+
+    /// 最初のエラーだけを記録する（2つ目以降は握りつぶす。producer/consumer
+    /// どちらが先に失敗しても、最初の原因がユーザーへ伝わるようにするため）。
+    func recordFirst(_ error: Error) {
+        lock.lock(); defer { lock.unlock() }
+        if storedError == nil { storedError = error }
+    }
+}
+
 public final class VideoMosaicExporter {
     /// 出力ファイルの拡張子から書き出しコンテナを決める。
     /// 読み込みはMP4/MOV両対応なのに書き出しがMP4固定という非対称を解消するために追加した
@@ -157,7 +240,23 @@ public final class VideoMosaicExporter {
         self.patternImageProvider = patternImageProvider
     }
 
+    /// producer（デコード＋ROI解決）とconsumer（モザイク描画＋書き出し）の間で
+    /// 溜め込むフレーム数の上限。大きいほど段差の吸収力は上がるがメモリを食う
+    /// （1フレームがフルHDのBGRAで約8MB、4Kで約33MB）。2段パイプラインが目的（重い方の
+    /// 処理と軽い方の処理を重ねて総時間を縮める）であり、大量に溜め込む設計ではないため
+    /// 小さめの値にしてある。
+    static let pipelineQueueCapacity = 2
+
     /// 動画全体へモザイクを適用して再エンコードする（同期・ブロッキング処理）。
+    ///
+    /// **2段パイプライン（v0.0.00155〜）**: 「デコード＋ROI解決（検出・追跡）」と
+    /// 「モザイク描画＋書き出し」を別スレッドで重ねて実行する。前者は`roiProvider`が
+    /// `VideoTrackingCoordinator`等のフレーム番号昇順の呼び出しを前提にした内部状態
+    /// （Vision追跡・シーンカット比較・見失い蓄積）を持つため、**このステージ自体は
+    /// 並列化しない**（フレームNの結果はフレームN-1の処理が終わった後でなければ求まらない）。
+    /// 並列化するのは「重いROI解決」と「重いモザイク描画・書き出し」という**性質の異なる
+    /// 2つの重い処理を同時に進める**ことで、従来の完全直列（1フレームずつ両方終えてから
+    /// 次へ）より総時間を縮めることだけを狙っている。
     ///
     /// - Parameters:
     ///   - inputURL: 入力動画（mp4/mov等、AVFoundationが読める形式）。
@@ -165,11 +264,15 @@ public final class VideoMosaicExporter {
     ///   - roiProvider: フレーム番号（0始まり）とそのフレーム画像を受け取り、そのフレームへ
     ///     適用するROI群を返すクロージャ。呼び出し側が検出結果・追跡結果（`VideoROITracker`等）
     ///     をここへ差し込む。空配列を返すとそのフレームは無加工のまま書き出す。
+    ///     producer専用スレッドから、フレーム番号の昇順・一度に1回だけ呼ばれる
+    ///     （従来と同じ呼び出し規約。並行呼び出しはされない）。
     ///   - includeAudio: 入力の音声トラックを再エンコードせずそのまま複製するか（既定true）。
     ///   - cancellation: 途中キャンセル用フラグ。
-    ///   - progress: 進捗（0.0〜1.0）を都度通知するコールバック。
+    ///   - progress: 進捗（0.0〜1.0）を都度通知するコールバック。書き出し（consumer）側の
+    ///     スレッドから呼ばれる（従来と同じ）。
     /// - Throws: `VideoMosaicExporterError`、または`roiProvider`/`MosaicEngine.applyMosaic`が
-    ///   投げたエラー。
+    ///   投げたエラー。producer側・consumer側どちらが先に失敗しても、最初に発生した
+    ///   エラーが呼び出し元へ伝わる。
     public func export(
         from inputURL: URL,
         to outputURL: URL,
@@ -233,20 +336,43 @@ public final class VideoMosaicExporter {
         let estimatedTotalFrames = max(1, info.frameCount)
         var processedCount = 0
 
-        func isCancelled() -> Bool { cancellation?.isCancelled == true }
+        let failure = VideoExportFailureBox()
+        // producerスレッドとconsumer（呼び出し元）スレッドの双方から呼ぶため@Sendable。
+        // `cancellation`（lock付き）・`failure`（lock付き）とも内部で同期しているため安全。
+        let isCancelled: @Sendable () -> Bool = { cancellation?.isCancelled == true || failure.error != nil }
 
+        // producer（デコード＋ROI解決）: 専用のバックグラウンドスレッドでフレーム番号の
+        // 昇順に進める。consumer（下のwhileループ）とは`pipeline`経由でのみやり取りする。
+        let pipeline = VideoExportPipelineQueue<PipelineFrame>(capacity: Self.pipelineQueueCapacity)
+        let producerFinished = DispatchSemaphore(value: 0)
+        DispatchQueue.global(qos: .userInitiated).async {
+            do {
+                try reader.readFrames(shouldContinue: { !isCancelled() }) { index, cgImage, presentationTime in
+                    if isCancelled() { throw VideoMosaicExporterError.cancelled }
+                    let rois = try roiProvider(index, cgImage)
+                    pipeline.push(PipelineFrame(index: index, image: cgImage, rois: rois, presentationTime: presentationTime))
+                }
+            } catch {
+                failure.recordFirst(error)
+            }
+            pipeline.finishProducing()
+            producerFinished.signal()
+        }
+
+        // consumer（モザイク描画＋書き出し）: 呼び出し元スレッドで、pipelineから
+        // 届いた順にフレームを処理する。書き出し（AVAssetWriterInput）は従来どおり
+        // このスレッドからのみ触る（複数スレッドからの同時appendはしない）。
         do {
-            try reader.readFrames(shouldContinue: { !isCancelled() }) { index, cgImage, presentationTime in
-                if isCancelled() { throw VideoMosaicExporterError.cancelled }
+            while let frame = pipeline.pop() {
+                if isCancelled() { throw failure.error ?? VideoMosaicExporterError.cancelled }
 
-                let rois = try roiProvider(index, cgImage)
                 let outputImage: CGImage
-                if rois.isEmpty {
-                    outputImage = cgImage
+                if frame.rois.isEmpty {
+                    outputImage = frame.image
                 } else {
                     outputImage = try self.engine.applyMosaic(
-                        to: cgImage,
-                        rois: rois,
+                        to: frame.image,
+                        rois: frame.rois,
                         style: self.style,
                         segmentEngine: self.segmentEngine,
                         patternImageProvider: self.patternImageProvider
@@ -258,7 +384,7 @@ public final class VideoMosaicExporter {
                     if Date() >= readyDeadline || writer.status != .writing {
                         throw VideoMosaicExporterError.writingFailed(writer.error)
                     }
-                    if isCancelled() { throw VideoMosaicExporterError.cancelled }
+                    if isCancelled() { throw failure.error ?? VideoMosaicExporterError.cancelled }
                     Thread.sleep(forTimeInterval: 0.005)
                 }
 
@@ -273,20 +399,31 @@ public final class VideoMosaicExporter {
                 guard Self.render(outputImage, into: pixelBuffer) else {
                     throw VideoMosaicExporterError.renderFailed
                 }
-                guard adaptor.append(pixelBuffer, withPresentationTime: presentationTime) else {
+                guard adaptor.append(pixelBuffer, withPresentationTime: frame.presentationTime) else {
                     throw VideoMosaicExporterError.appendFailed
                 }
 
                 processedCount += 1
                 progress?(min(1.0, Double(processedCount) / Double(estimatedTotalFrames)))
             }
+            // pipelineが正常に空になって終わっても、producer側がエラーで終了していた
+            // 場合はそのエラーを呼び出し元へ伝える（pop()はfinishProducing()でも
+            // 自然にnilを返すため、ここで確認しないとproducerの失敗が握りつぶされる）。
+            if let producerError = failure.error { throw producerError }
         } catch {
+            // consumer側の失敗をproducerへ伝え、pushで待機中なら起こして早期終了させる
+            // （producer自身は次のisCancelled()チェックで自然に止まる設計）。
+            failure.recordFirst(error)
+            pipeline.abort()
+            producerFinished.wait()
             input.markAsFinished()
             writer.cancelWriting()
             try? FileManager.default.removeItem(at: outputURL)
             throw error
         }
 
+        // 正常終了時もproducerスレッドの完了を待ってから後始末する（リーク防止）。
+        producerFinished.wait()
         input.markAsFinished()
         let semaphore = DispatchSemaphore(value: 0)
         writer.finishWriting { semaphore.signal() }

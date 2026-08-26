@@ -332,6 +332,110 @@ private func makeSyntheticVideoWithAudio(at url: URL) throws {
     #expect(FileManager.default.fileExists(atPath: outputURL.path))
 }
 
+// MARK: - VideoMosaicExporter 2段パイプライン（v0.0.00155: デコード＋ROI解決／モザイク描画＋書き出しの並列化）
+
+/// 画像の指定座標が白（R/G/B全て高い）かを判定する。BGRA/RGBAのバイト順に関わらず
+/// 白=(255,255,255)・黒=(0,0,0)はチャンネル順によらず判定できるため使う。
+private func isWhitePixel(_ image: CGImage, x: Int, y: Int) -> Bool {
+    let width = image.width, height = image.height
+    guard x >= 0, x < width, y >= 0, y < height else { return false }
+    var pixels = [UInt8](repeating: 0, count: width * height * 4)
+    let context = pixels.withUnsafeMutableBytes { buffer -> CGContext? in
+        guard let base = buffer.baseAddress else { return nil }
+        return CGContext(data: base, width: width, height: height, bitsPerComponent: 8,
+                         bytesPerRow: width * 4, space: CGColorSpaceCreateDeviceRGB(),
+                         bitmapInfo: CGImageAlphaInfo.premultipliedFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+    }
+    guard let context else { return false }
+    context.draw(image, in: CGRect(x: 0, y: 0, width: width, height: height))
+    let offset = (y * width + x) * 4
+    return pixels[offset] > 200 && pixels[offset + 1] > 200 && pixels[offset + 2] > 200
+}
+
+/// producer（デコード＋ROI解決）とconsumer（モザイク描画＋書き出し）が別スレッドで動く
+/// ようになった後も、フレームの書き出し順が投入順のまま保たれることを検証する。
+/// `roiProvider`の処理時間を偶数フレームだけ意図的に長くし、「producerが先行してキューに
+/// 複数フレーム溜まりうる」状況を作ったうえで、出力側の各フレームの正方形位置
+/// （`squareX(forFrameIndex:)`）が入力と一致することを確認する（モザイクは掛けず素通しにして、
+/// 位置そのもので順序を判定する）。
+@Test func exporterKeepsFrameOrderUnderPipelinedProcessing() throws {
+    let inputURL = makeTemporaryVideoURL()
+    let outputURL = makeTemporaryVideoURL()
+    defer {
+        try? FileManager.default.removeItem(at: inputURL)
+        try? FileManager.default.removeItem(at: outputURL)
+    }
+    try makeSyntheticVideo(at: inputURL)
+
+    let exporter = VideoMosaicExporter(style: MosaicStyle())
+    try exporter.export(
+        from: inputURL,
+        to: outputURL,
+        roiProvider: { index, _ in
+            if index.isMultiple(of: 2) { Thread.sleep(forTimeInterval: 0.02) }
+            return []
+        }
+    )
+
+    let outputReader = VideoFrameReader(url: outputURL)
+    var index = 0
+    try outputReader.readFrames { _, image, _ in
+        let expectedX = squareX(forFrameIndex: index) + testSquareSize / 2
+        let y = Int(testSize.height) / 2
+        #expect(isWhitePixel(image, x: expectedX, y: y),
+               "frame \(index): 正方形の中心(x=\(expectedX))が白ではない＝書き出し順が崩れている疑い")
+        index += 1
+    }
+    #expect(index == testFrameCount)
+}
+
+/// producer側（`roiProvider`）が例外を投げた場合、consumer（別スレッド）側にも伝わって
+/// `export`全体が失敗し、中途半端な出力ファイルが残らないことを検証する。
+@Test func exporterPropagatesProducerSideErrorAndCleansUpOutput() throws {
+    let inputURL = makeTemporaryVideoURL()
+    let outputURL = makeTemporaryVideoURL()
+    defer { try? FileManager.default.removeItem(at: inputURL) }
+    try makeSyntheticVideo(at: inputURL)
+
+    struct ProbeError: Error {}
+    let exporter = VideoMosaicExporter(style: MosaicStyle())
+    #expect(throws: ProbeError.self) {
+        try exporter.export(
+            from: inputURL,
+            to: outputURL,
+            // 半分ほど処理させてから失敗させる（キューに溜まった分の後始末も検証するため）
+            roiProvider: { index, _ in
+                if index == testFrameCount / 2 { throw ProbeError() }
+                return []
+            }
+        )
+    }
+    #expect(!FileManager.default.fileExists(atPath: outputURL.path))
+}
+
+/// 書き出し中に`CancellationFlag`を立てると、producer/consumerの両スレッドが停止して
+/// `export`が中断し、出力ファイルが残らないことを検証する。
+@Test func exporterStopsPromptlyWhenCancelled() throws {
+    let inputURL = makeTemporaryVideoURL()
+    let outputURL = makeTemporaryVideoURL()
+    defer { try? FileManager.default.removeItem(at: inputURL) }
+    try makeSyntheticVideo(at: inputURL)
+
+    let cancellation = VideoMosaicExporter.CancellationFlag()
+    let exporter = VideoMosaicExporter(style: MosaicStyle())
+    #expect(throws: VideoMosaicExporterError.self) {
+        try exporter.export(
+            from: inputURL,
+            to: outputURL,
+            roiProvider: { index, _ in
+                if index == 2 { cancellation.isCancelled = true }
+                return []
+            },
+            cancellation: cancellation
+        )
+    }
+    #expect(!FileManager.default.fileExists(atPath: outputURL.path))
+}
 
 // MARK: - VideoTrackingCoordinator（v0.0.00136: 自動再検出・シーンカット・見失い膨張）
 

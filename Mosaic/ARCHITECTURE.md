@@ -1500,6 +1500,61 @@ GUI報告「ディルド範囲ずれ」（7624B71B・実写）の実測調査:
   `swift build`成功・既存回帰テスト（`swift test`）全件PASSで既存機能への影響が無いことを
   確認した。**並列実行時の実測速度・メモリ・実データでの動作確認はGUI確認が必要**。
 
+### 5.71.3 動画書き出しの2段パイプライン化（2026-08-26 v0.0.00155〜）
+
+- **背景**: `VideoMosaicExporter.export`は「デコード→ROI解決（検出・追跡）→モザイク描画→
+  書き出し」を1フレームずつ完全直列で行っていた。ROI解決（`VideoTrackingCoordinator`経由。
+  §5.71.2の自動再検出時はONNX推論を伴う）とモザイク描画（CoreImage・SAM等のマスク生成を
+  伴う）はどちらも軽くない処理で、1本のスレッド上で交互に実行されるため、
+  どちらの処理中も他方が完全に停止していた。
+- **並列化できない部分（設計上の制約）**: ROI解決を担う`roiProvider`
+  （`VideoTrackingCoordinator.rois(forFrame:image:detector:)`）は、フレーム番号の**昇順**で
+  呼ばれることを前提にした内部状態（Vision `VNTrackObjectRequest`の追跡状態・
+  `SceneCutDetector`の直前フレームとの輝度比較・見失いの累積拡大量）を持つ。
+  フレームNの結果はフレームN-1の処理が完了して初めて求まるため、**このステージ自体は
+  並列化できない**（例えばフレーム3と5を同時に検出すると、フレーム5の追跡はフレーム4の
+  更新を経ていない誤った状態から始まることになる）。
+- **並列化した部分**: 「ROI解決」と「モザイク描画＋書き出し」という**性質の異なる2つの重い
+  処理を別スレッドで重ねる**、2段パイプライン（producer/consumer）構成にした。
+  - producer（専用の`DispatchQueue.global(qos: .userInitiated)`スレッド）: `VideoFrameReader`
+    でのデコードと`roiProvider`呼び出しをフレーム番号の昇順で行い、結果
+    （`PipelineFrame` = index・画像・ROI群・提示時刻）を`VideoExportPipelineQueue`
+    （有界ブロッキングキュー、容量2）へ`push`する。
+  - consumer（`export`の呼び出し元スレッド。従来どおり）: キューから`pop`した順に
+    `MosaicEngine.applyMosaic`でモザイク描画し、`AVAssetWriterInputPixelBufferAdaptor`へ
+    書き出す。書き出し（`AVAssetWriterInput`）は従来どおりこのスレッドからのみ触る
+    （複数スレッドからの同時appendはしない）。
+  - キューはFIFO（`push`した順に`pop`される）のため、2スレッドで重ねて処理しても
+    **書き出し順は投入順のまま保たれる**（producerは1本のスレッドで順番にpushするため、
+    途中でフレームの順序が入れ替わることはない）。
+- **キュー容量**: `VideoMosaicExporter.pipelineQueueCapacity`（既定2）。大きいほど段差の
+  吸収力は上がるがメモリを食う（1フレームがフルHDのBGRAで約8MB、4Kで約33MB）。
+  大量に溜め込む設計ではないため小さめにしてある。
+- **エラー伝播とキャンセル**: producer/consumerどちらが先に失敗しても、最初に発生した
+  エラーだけを記録する`VideoExportFailureBox`（lock付き）を介して相互に伝わる。
+  consumer側が失敗した場合は`VideoExportPipelineQueue.abort()`でproducerが`push`で
+  待機中でも即座に抜けさせ、producerスレッドの終了（`DispatchSemaphore`で待機）を
+  確認してから出力ファイルを削除する（producer側が書き込みを続けたまま呼び出し元が
+  戻ってしまう競合を防ぐ）。外部キャンセル（`CancellationFlag`）も同じ`isCancelled()`判定
+  経由で両スレッドへ伝わる。
+- **実測（合成計測）**: 検出30ms/フレーム・モザイク描画20ms/フレーム相当の人為的遅延を
+  与えた40フレームの合成動画で、AVFoundationの固定オーバーヘッド（読み書きセットアップ等。
+  フレーム数に依存し遅延の大小には依存しない）を切り離して比較したところ、正味時間は
+  完全直列の見積り（80フレーム分、frameCount×(検出+描画)）比で**約1.5倍高速**、
+  理論上の理想値（律速する方の処理だけの合計時間、frameCount×max(検出,描画)）にほぼ一致した。
+  実際の速度向上幅は動画ごとの検出コスト・描画コストの比率に依存する
+  （どちらか一方が極端に軽い場合、重い方の処理時間がほぼそのまま総時間になる）。
+- **検証**: 新規回帰テスト3件を追加。
+  - `exporterKeepsFrameOrderUnderPipelinedProcessing`: 偶数フレームだけ`roiProvider`を
+    意図的に遅くし、producerがキューへ先行して溜め込みうる状況を作った上で、出力側の
+    各フレームの内容（移動する正方形の位置）が投入順のまま保たれることを確認。
+  - `exporterPropagatesProducerSideErrorAndCleansUpOutput`: producer側
+    （`roiProvider`）の例外が呼び出し元へ伝わり、出力ファイルが残らないことを確認。
+  - `exporterStopsPromptlyWhenCancelled`: `CancellationFlag`を立てると両スレッドが
+    停止し、出力ファイルが残らないことを確認。
+  - 上記3件は5回連続実行でフレーキーな失敗が無いことを確認済み（スレッド同期を伴う
+    テストのため）。
+
 ## 6. 品質基準
 
 - 静止画処理時間の目標は3秒以内。
